@@ -47,7 +47,9 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug
 
       # This produces an unsigned DEBUG apk - installable for testing/internal
       # sharing but not eligible for the Play Store. Add signing secrets +
