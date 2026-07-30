@@ -28,6 +28,10 @@ export default defineConfig(() => {
               handler: 'NetworkOnly',
             },
           ],
+          // The app's main JS bundle is a few MB (single-file App.tsx) -
+          // raise the default 2 MiB precache limit so it still gets cached
+          // for offline use instead of the build failing outright.
+          maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         },
         devOptions: {
           enabled: false, // never register a SW in the AI Studio preview / `vite dev`
