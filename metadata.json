@@ -1,0 +1,10 @@
+{
+  "name": "Remix raj",
+  "description": "Imported from GitHub: Kpawan44/raj",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

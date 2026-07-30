@@ -1,0 +1,185 @@
+@import url('https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,300;0,400;0,505;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Public Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #F8FAFC;
+}
+
+/* Custom status badge utilities for Professional Polish styling */
+.status-badge {
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .02em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid;
+}
+
+.status-pending {
+  background-color: #FFF7ED;
+  color: #C2410C;
+  border-color: #FED7AA;
+}
+
+.status-process {
+  background-color: #EFF6FF;
+  color: #1D4ED8;
+  border-color: #BFDBFE;
+}
+
+.status-complete {
+  background-color: #F0FDF4;
+  color: #15803D;
+  border-color: #BBF7D0;
+}
+
+.status-rejected {
+  background-color: #FEF2F2;
+  color: #B91C1C;
+  border-color: #FECACA;
+}
+
+.status-acceptance {
+  background-color: #FAF5FF;
+  color: #7E22CE;
+  border-color: #E9D5FF;
+}
+
+/* @media print custom overrides for pristine physical page rendering */
+@media print {
+  /* Override backgrounds to white and text to dark/high contrast, and disable flexbox layout constraints */
+  html, body, #root, #root > div, main {
+    display: block !important;
+    background: white !important;
+    color: #0F172A !important;
+    height: auto !important;
+    min-height: auto !important;
+    overflow: visible !important;
+    position: static !important;
+  }
+
+  /* Force hidden on interactive menus, filters, logs, headers, sidebars */
+  .print\:hidden,
+  header,
+  aside,
+  button,
+  form,
+  input,
+  select,
+  .no-print {
+    display: none !important;
+  }
+
+  /* Expand all grid tables, modals, and container wrappers for continuous flow */
+  .overflow-x-auto, 
+  .overflow-y-auto {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  /* Clean up margins and layout container rules */
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Optimized printing of Job Card Details Modal if open */
+  body:has(#job-card-printable-area) #root > div > main,
+  body:has(#job-card-printable-area) #root > div > div:not(:has(#job-card-printable-area)),
+  body:has(#job-card-printable-area) .fixed.inset-0:not(:has(#job-card-printable-area)) {
+    display: none !important;
+  }
+
+  body:has(#job-card-printable-area) .fixed.inset-0 {
+    position: static !important;
+    display: block !important;
+    background: transparent !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  body:has(#job-card-printable-area) .fixed.inset-0 > div {
+    position: static !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: white !important;
+    color: black !important;
+    overflow: visible !important;
+  }
+
+  /* Optimized printing of Bulk Manifest if open */
+  body:has(#bulk-manifest-printable-area) #root > div > main,
+  body:has(#bulk-manifest-printable-area) #root > div > div:not(:has(#bulk-manifest-printable-area)),
+  body:has(#bulk-manifest-printable-area) .fixed.inset-0:not(:has(#bulk-manifest-printable-area)) {
+    display: none !important;
+  }
+
+  body:has(#bulk-manifest-printable-area) .fixed.inset-0 {
+    position: static !important;
+    display: block !important;
+    background: transparent !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  body:has(#bulk-manifest-printable-area) .fixed.inset-0 > div {
+    position: static !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: white !important;
+    color: black !important;
+    overflow: visible !important;
+  }
+
+  /* Specific print configuration when the dedicated Workshop QR Code is active */
+  body:has(#workshop-qr-container) #root > div > main,
+  body:has(#workshop-qr-container) #root > div > div:not(:has(#workshop-qr-container)),
+  body:has(#workshop-qr-container) .fixed.inset-0 > div:not(#workshop-qr-container) {
+    display: none !important;
+  }
+
+  body:has(#workshop-qr-container) .fixed.inset-0 {
+    position: static !important;
+    display: block !important;
+    background: transparent !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  body:has(#workshop-qr-container) #workshop-qr-container {
+    background: white !important;
+    position: static !important;
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: auto !important;
+    overflow: visible !important;
+  }
+}
+

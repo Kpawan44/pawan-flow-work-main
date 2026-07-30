@@ -1,0 +1,26 @@
+# Render "Blueprint" - lets Render create/configure the service straight
+# from this file instead of manual dashboard clicks. Push this to GitHub,
+# then in Render: New -> Blueprint -> select this repo.
+services:
+  - type: web
+    name: pmw-tracker
+    runtime: docker
+    plan: free            # change to "starter" ($7/mo) later to avoid cold starts
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true       # redeploys automatically on every push to the branch below
+    branch: main
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false        # set real values for all of these in the Render dashboard, not here
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false

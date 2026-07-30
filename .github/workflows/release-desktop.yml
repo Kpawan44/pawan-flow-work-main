@@ -1,0 +1,33 @@
+name: Release Desktop App
+
+# Builds and publishes Windows + Linux installers to a GitHub Release
+# whenever you push a version tag (e.g. `git tag v1.0.1 && git push --tags`).
+# electron-updater on every installed copy of the app then picks this up
+# automatically. (macOS .dmg builds require a macOS runner + Apple signing
+# certs - add a macos-latest job here later once you have those.)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - run: npm install
+      - run: npm run build
+      - run: npm run build:electron-main
+      - run: npx electron-builder --linux --win --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

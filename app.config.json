@@ -1,0 +1,4 @@
+{
+  "_comment": "Leave appUrl empty to run everything fully local/offline (desktop runs its own bundled server; mobile bundles the built web app directly into the app). The only feature that needs a live server is the AI email-summary report - that will just show a friendly error if you leave this empty. If you ever host the app publicly, paste that URL below and both apps will load it live instead, restoring that feature and making all UI updates instant without rebuilding anything.",
+  "appUrl": ""
+}
