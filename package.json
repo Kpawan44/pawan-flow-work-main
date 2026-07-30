@@ -96,11 +96,11 @@
       "allowToChangeInstallationDirectory": true
     },
     "publish": [
-      {
-        "provider": "github",
-        "owner": "YOUR_GITHUB_USERNAME",
-        "repo": "YOUR_REPO_NAME"
-      }
-    ]
+  {
+    "provider": "github",
+    "owner": "Kpawan44",
+    "repo": "pawan-flow-work-main"
+  }
+]
   }
 }
