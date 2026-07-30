@@ -22,16 +22,29 @@ export default defineConfig(() => {
           // Don't let the SW try to cache API calls to our own backend or
           // Firestore - those must always go to the network.
           navigateFallbackDenylist: [/^\/api\//],
+          // Only precache small, fast-changing shell files. The app's main
+          // JS bundle is a few MB (single-file App.tsx) - instead of trying
+          // to precache it (which hits a hard size check), it's cached at
+          // runtime below instead. Functionally equivalent for the user:
+          // still offline-capable, still auto-updating.
+          globPatterns: ['**/*.{html,css,ico,svg,json}'],
           runtimeCaching: [
             {
               urlPattern: /^\/api\//,
               handler: 'NetworkOnly',
             },
+            {
+              // Always try the network first for JS so users get the
+              // newest code immediately when online; falls back to the
+              // last cached copy when offline.
+              urlPattern: /\.js$/,
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'app-js-assets',
+                networkTimeoutSeconds: 5,
+              },
+            },
           ],
-          // The app's main JS bundle is a few MB (single-file App.tsx) -
-          // raise the default 2 MiB precache limit so it still gets cached
-          // for offline use instead of the build failing outright.
-          maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
         },
         devOptions: {
           enabled: false, // never register a SW in the AI Studio preview / `vite dev`
