@@ -1,0 +1,4 @@
+{
+  "_comment": "If you deploy the web app (Dockerfile) to a public server, put its URL below. The desktop and mobile apps will then load that live site directly - identical interface, and content updates instantly whenever you redeploy, no app rebuild needed. Leave appUrl empty to have the desktop app run its own bundled local server instead (mobile always requires a URL here).",
+  "appUrl": ""
+}

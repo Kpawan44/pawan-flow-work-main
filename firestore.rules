@@ -1,0 +1,163 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ----------------------------------------------------
+    // GLOBAL REUSABLE SECURITY HELPERS
+    // ----------------------------------------------------
+    function isSignedIn() {
+      return true; // Relaxed for the local Name/PIN authentication design
+    }
+
+    function isVerified() {
+      return true; // Relaxed for the local Name/PIN authentication design
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return true; // Relaxed for the local Name/PIN authentication design
+    }
+
+    // ----------------------------------------------------
+    // ENTITY VALIDATION HELPERS (Anti-Update-Gap Schema Checkers)
+    // ----------------------------------------------------
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['userId', 'name', 'email', 'pin', 'department', 'role', 'active', 'createdAt']) &&
+        data.userId is string &&
+        data.name is string && data.name.size() > 0 &&
+        data.email is string &&
+        data.pin is string &&
+        data.department is string &&
+        data.role is string &&
+        data.active is bool;
+    }
+
+    function isValidJobCard(data) {
+      return data.keys().hasAll(['jobCardNo', 'orderNo', 'partyName', 'itemName', 'itemCode', 'orderQty', 'currentQty', 'balanceQty', 'currentDepartment', 'status', 'heatTreatmentRequired', 'createdBy', 'createdAt', 'completed']) &&
+        data.jobCardNo is string &&
+        data.orderNo is string &&
+        data.partyName is string &&
+        data.itemName is string &&
+        data.itemCode is string &&
+        data.orderQty is number &&
+        data.currentQty is number &&
+        data.balanceQty is number &&
+        data.currentDepartment is string &&
+        data.status is string &&
+        data.heatTreatmentRequired is bool &&
+        data.createdBy is string &&
+        data.completed is bool;
+    }
+
+    function isValidMaterialMovement(data) {
+      return data.keys().hasAll(['movementId', 'jobCardNo', 'fromDepartment', 'toDepartment', 'quantity', 'transferBy', 'transferDate', 'accepted']) &&
+        data.movementId is string &&
+        data.jobCardNo is string &&
+        data.fromDepartment is string &&
+        data.toDepartment is string &&
+        data.quantity is number &&
+        data.transferBy is string &&
+        data.accepted is bool;
+    }
+
+    function isValidAppNotification(data) {
+      return data.keys().hasAll(['notificationId', 'userId', 'title', 'message', 'read', 'createdAt']) &&
+        data.notificationId is string &&
+        data.userId is string &&
+        data.title is string &&
+        data.message is string &&
+        data.read is bool;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'timestamp', 'userId', 'userName', 'action', 'details']) &&
+        data.id is string &&
+        data.userId is string &&
+        data.userName is string &&
+        data.action is string &&
+        data.details is string;
+    }
+
+    function isValidCompanyConfig(data) {
+      return data.keys().hasAll(['companyName', 'details']) &&
+        data.companyName is string &&
+        data.details is string;
+    }
+
+    function isValidSavedItem(data) {
+      return data.keys().hasAll(['id', 'itemName', 'itemCode']) &&
+        data.id is string &&
+        data.itemName is string &&
+        data.itemCode is string;
+    }
+
+    // ----------------------------------------------------
+    // RESOURCE CORNERSTONES
+    // ----------------------------------------------------
+
+    // Collection: Users Profiles
+    match /mfr_users/{userId} {
+      allow read: if true;
+      allow create, update: if isValidUserProfile(incoming());
+      allow delete: if true;
+    }
+
+    // Collection: Manufacturing Job Cards
+    match /mfr_job_cards/{jobCardNo} {
+      allow read: if true;
+      allow create, update: if isValidJobCard(incoming());
+      allow delete: if true;
+    }
+
+    // Collection: Material Movements
+    match /mfr_movements/{movementId} {
+      allow read: if true;
+      allow create, update: if isValidMaterialMovement(incoming());
+      allow delete: if true;
+    }
+
+    // Collection: Application Notifications
+    match /mfr_notifications/{notificationId} {
+      allow read: if true;
+      allow create, update: if isValidAppNotification(incoming());
+      allow delete: if true;
+    }
+
+    // Collection: Audit Log (Write-Once / Absolute Immutability)
+    match /mfr_audit_logs/{logId} {
+      allow read: if true;
+      allow create: if isValidAuditLog(incoming());
+      allow update, delete: if false;
+    }
+
+    // Collection: Company Configuration (Singleton Config)
+    match /mfr_company_config/{configId} {
+      allow read: if true;
+      allow create, update: if isValidCompanyConfig(incoming());
+      allow delete: if true;
+    }
+
+    // Collection: Saved Items
+    match /mfr_items/{itemId} {
+      allow read: if true;
+      allow create, update: if isValidSavedItem(incoming());
+      allow delete: if true;
+    }
+  }
+}

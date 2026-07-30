@@ -1,0 +1,135 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Represents a user in the system with roles and department assignments.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "pin": { "type": "string" },
+        "department": { "type": "string", "enum": ["Purchase", "Raw Material Store", "Dispatch", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Admin"] },
+        "role": { "type": "string", "enum": ["admin", "staff"] },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "name", "email", "pin", "department", "role", "active", "createdAt"]
+    },
+    "JobCard": {
+      "title": "JobCard",
+      "description": "Tracks a job card from initial creation to complete manufacturing cycle.",
+      "type": "object",
+      "properties": {
+        "jobCardNo": { "type": "string" },
+        "orderNo": { "type": "string" },
+        "partyName": { "type": "string" },
+        "itemName": { "type": "string" },
+        "itemCode": { "type": "string" },
+        "orderQty": { "type": "number" },
+        "currentQty": { "type": "number" },
+        "balanceQty": { "type": "number" },
+        "currentDepartment": { "type": "string", "enum": ["Purchase", "Raw Material Store", "Dispatch", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Completed"] },
+        "status": { "type": "string", "enum": ["Pending", "In Process", "Completed", "Rejected", "Pending Acceptance"] },
+        "heatTreatmentRequired": { "type": "boolean" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "completed": { "type": "boolean" }
+      },
+      "required": ["jobCardNo", "orderNo", "partyName", "itemName", "itemCode", "orderQty", "currentQty", "balanceQty", "currentDepartment", "status", "heatTreatmentRequired", "createdBy", "createdAt", "completed"]
+    },
+    "MaterialMovement": {
+      "title": "MaterialMovement",
+      "description": "Logs transfers and handovers of physical materials between departments.",
+      "type": "object",
+      "properties": {
+        "movementId": { "type": "string" },
+        "jobCardNo": { "type": "string" },
+        "fromDepartment": { "type": "string", "enum": ["Purchase", "Raw Material Store", "Dispatch", "Production", "Heat Treatment", "Plating", "Packing", "Store"] },
+        "toDepartment": { "type": "string", "enum": ["Purchase", "Raw Material Store", "Dispatch", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Completed"] },
+        "quantity": { "type": "number" },
+        "transferBy": { "type": "string" },
+        "transferDate": { "type": "string", "format": "date-time" },
+        "accepted": { "type": "boolean" },
+        "acceptedBy": { "type": "string" },
+        "acceptedDate": { "type": "string", "format": "date-time" },
+        "remarks": { "type": "string" },
+        "allottedLocation": { "type": "string" },
+        "rackNo": { "type": "string" }
+      },
+      "required": ["movementId", "jobCardNo", "fromDepartment", "toDepartment", "quantity", "transferBy", "transferDate", "accepted"]
+    },
+    "AppNotification": {
+      "title": "AppNotification",
+      "description": "Alerts or info logs displayed to users in the active app session.",
+      "type": "object",
+      "properties": {
+        "notificationId": { "type": "string" },
+        "userId": { "type": "string" },
+        "department": { "type": "string", "enum": ["Purchase", "Raw Material Store", "Dispatch", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Admin", "All"] },
+        "title": { "type": "string" },
+        "message": { "type": "string" },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["notificationId", "userId", "title", "message", "read", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Permanent trace records of important user events for admin oversight.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "ipAddress": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "userId", "userName", "action", "details"]
+    },
+    "CompanyConfig": {
+      "title": "CompanyConfig",
+      "description": "Enterprise hub company profiles and works scope configurations.",
+      "type": "object",
+      "properties": {
+        "companyName": { "type": "string" },
+        "details": { "type": "string" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "gstIn": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["companyName", "details"]
+    }
+  },
+  "firestore": {
+    "mfr_users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Collection of employee credentials and roles keyed by UID."
+    },
+    "mfr_job_cards/{jobCardNo}": {
+      "schema": "JobCard",
+      "description": "Collection of tracking job cards keyed by their alphanumeric reference."
+    },
+    "mfr_movements/{movementId}": {
+      "schema": "MaterialMovement",
+      "description": "Transit steps between departments."
+    },
+    "mfr_notifications/{notificationId}": {
+      "schema": "AppNotification",
+      "description": "App notification collection for push / session updates."
+    },
+    "mfr_audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Historical system logs."
+    },
+    "mfr_company_config/{configId}": {
+      "schema": "CompanyConfig",
+      "description": "Corporate profiles and work specs."
+    }
+  }
+}
