@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#3b82f6" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <title>Precision Metal Works Manufacturing Tracker</title>
+    <script>
+      // Handle Google OAuth implicit flow callback in popup
+      if (window.opener && window.location.hash.includes('access_token=')) {
+        try {
+          const params = new URLSearchParams(window.location.hash.substring(1));
+          const token = params.get('access_token');
+          if (token) {
+            window.opener.postMessage({ type: 'GOOGLE_AUTH_SUCCESS', token: token }, '*');
+            window.close();
+          }
+        } catch (e) {
+          console.error('Error in OAuth popup callback:', e);
+        }
+      }
+
+      // In local development / the AI Studio preview, always clear any old service
+      // worker and caches so edits are never masked by stale cached files.
+      // In production builds (npm run build) this block is skipped entirely and
+      // the real auto-updating service worker (registered by vite-plugin-pwa,
+      // see src/main.tsx) takes over instead.
+      const isLocalPreview =
+        location.hostname === 'localhost' ||
+        location.hostname === '127.0.0.1' ||
+        location.hostname.endsWith('.aistudio.google.com');
+
+      if (isLocalPreview && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then((registrations) => {
+          for (const registration of registrations) {
+            registration.unregister();
+          }
+        });
+        if ('caches' in window) {
+          caches.keys().then((keys) => {
+            keys.forEach((key) => caches.delete(key));
+          });
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
