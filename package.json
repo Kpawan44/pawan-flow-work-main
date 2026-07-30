@@ -2,7 +2,12 @@
   "name": "react-example",
   "private": true,
   "main": "dist-electron/main.js",
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Precision Metal Works Manufacturing Tracker - job card, material movement and production workflow ERP.",
+  "author": {
+    "name": "Pawan Kumar",
+    "email": "pawan.kummar16@gmail.com"
+  },
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -98,8 +103,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "YOUR_GITHUB_USERNAME",
-        "repo": "YOUR_REPO_NAME"
+        "owner": "Kpawan44",
+        "repo": "pawan-flow-work-main"
       }
     ]
   }
