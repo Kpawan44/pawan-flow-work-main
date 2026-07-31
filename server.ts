@@ -1,10 +1,10 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
 
 async function startServer() {
+  console.log(`Starting server with NODE_ENV=${process.env.NODE_ENV}`);
   const app = express();
   const PORT = 3000;
 
@@ -422,13 +422,22 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
+    // Dynamically imported so this (and its heavy esbuild/rollup native
+    // binaries) never gets pulled in for production/packaged builds, where
+    // this branch never runs anyway.
+    // Using a variable (not a string literal) here is deliberate: it stops
+    // esbuild from statically resolving/inlining this import at bundle time,
+    // so 'vite' is only ever actually touched at runtime, and only when this
+    // branch (dev only) really executes.
+    const viteModuleName = "vite";
+    const { createServer: createViteServer } = await import(viteModuleName);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = process.env.STATIC_DIR || path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
