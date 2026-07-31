@@ -34,6 +34,11 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
+      - name: Confirm which Java is active
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+
       - name: Check android/ platform exists
         run: |
           if [ ! -d "android" ]; then
@@ -49,7 +54,7 @@ jobs:
         working-directory: android
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug -Dorg.gradle.java.home="$JAVA_HOME"
 
       # This produces an unsigned DEBUG apk - installable for testing/internal
       # sharing but not eligible for the Play Store. Add signing secrets +
