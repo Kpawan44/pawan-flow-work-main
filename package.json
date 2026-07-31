@@ -2,7 +2,7 @@
   "name": "react-example",
   "private": true,
   "main": "dist-electron/main.cjs",
-  "version": "1.0.11",
+  "version": "1.0.13",
   "description": "Precision Metal Works Manufacturing Tracker - job card, material movement and production workflow ERP.",
   "author": {
     "name": "Pawan Kumar",
@@ -67,6 +67,7 @@
   "build": {
     "appId": "com.pawan.pmwtracker",
     "productName": "PMW Manufacturing Tracker",
+    "asar": false,
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
@@ -76,8 +77,9 @@
     ],
     "extraResources": [
       {
-        "from": "dist/server.cjs",
-        "to": "server.cjs"
+        "from": "dist",
+        "to": "app-dist",
+        "filter": ["**/*", "!server.cjs", "!server.cjs.map"]
       },
       {
         "from": "app.config.json",
