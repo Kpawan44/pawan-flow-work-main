@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog } from 'electron';
 import path from 'path';
 import { fork, ChildProcess } from 'child_process';
 import fs from 'fs';
+import http from 'http';
 import { autoUpdater } from 'electron-updater';
 
 let mainWindow: BrowserWindow | null = null;
@@ -20,6 +21,26 @@ function readAppConfig(): { appUrl: string } {
   } catch {
     return { appUrl: '' };
   }
+}
+
+function waitForServer(url: string, timeoutMs = 15000, intervalMs = 250): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      const req = http.get(url, (res) => {
+        res.destroy();
+        resolve();
+      });
+      req.on('error', () => {
+        if (Date.now() > deadline) {
+          reject(new Error(`Server at ${url} did not respond within ${timeoutMs}ms`));
+        } else {
+          setTimeout(attempt, intervalMs);
+        }
+      });
+    };
+    attempt();
+  });
 }
 
 function startBundledServer(): Promise<void> {
@@ -41,10 +62,16 @@ function startBundledServer(): Promise<void> {
     serverProcess.stdout?.on('data', (d) => console.log(`[server] ${d}`));
     serverProcess.stderr?.on('data', (d) => console.error(`[server] ${d}`));
     serverProcess.on('error', reject);
+    serverProcess.on('exit', (code) => {
+      if (code !== 0 && code !== null) {
+        reject(new Error(`Bundled server exited early with code ${code}`));
+      }
+    });
 
-    // Give the server a moment to bind the port, then just proceed - the
-    // BrowserWindow will retry loading if it's not ready yet.
-    setTimeout(resolve, 700);
+    // Actually wait for the server to respond instead of guessing with a
+    // fixed delay - avoids a race where the window tries to load the page
+    // before the server has bound the port.
+    waitForServer(`http://localhost:${LOCAL_PORT}`).then(resolve, reject);
   });
 }
 
@@ -84,6 +111,17 @@ async function createWindow() {
       return;
     }
   }
+
+  // Safety net: if the very first load still somehow fails (e.g. dev server
+  // not up yet), retry a few times instead of getting stuck on Chromium's
+  // error page.
+  let retriesLeft = 5;
+  mainWindow.webContents.on('did-fail-load', () => {
+    if (retriesLeft > 0 && mainWindow) {
+      retriesLeft -= 1;
+      setTimeout(() => mainWindow?.loadURL(targetUrl), 500);
+    }
+  });
 
   mainWindow.loadURL(targetUrl);
 }

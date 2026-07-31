@@ -2,7 +2,7 @@
   "name": "react-example",
   "private": true,
   "main": "dist-electron/main.cjs",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Precision Metal Works Manufacturing Tracker - job card, material movement and production workflow ERP.",
   "author": {
     "name": "Pawan Kumar",
