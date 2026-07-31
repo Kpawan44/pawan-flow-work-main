@@ -77,11 +77,6 @@
     ],
     "extraResources": [
       {
-        "from": "dist",
-        "to": "app-dist",
-        "filter": ["**/*", "!server.cjs", "!server.cjs.map"]
-      },
-      {
         "from": "app.config.json",
         "to": "app.config.json"
       }

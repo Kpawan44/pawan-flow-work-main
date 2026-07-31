@@ -55,7 +55,7 @@ function startBundledServer(): Promise<void> {
     }
 
     const staticDir = app.isPackaged
-      ? path.join(process.resourcesPath, 'app-dist')
+      ? path.join(process.resourcesPath, 'app', 'dist')
       : path.join(__dirname, '..', 'dist');
 
     serverProcess = fork(serverPath, [], {
