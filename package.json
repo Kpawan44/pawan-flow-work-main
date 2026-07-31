@@ -2,7 +2,7 @@
   "name": "react-example",
   "private": true,
   "main": "dist-electron/main.cjs",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Precision Metal Works Manufacturing Tracker - job card, material movement and production workflow ERP.",
   "author": {
     "name": "Pawan Kumar",
@@ -29,6 +29,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "@capacitor/core": "^7.0.0",
     "dotenv": "^17.2.3",
+    "electron-updater": "^6.3.9",
     "express": "^4.21.2",
     "firebase": "^12.14.0",
     "html5-qrcode": "^2.3.8",
@@ -50,7 +51,6 @@
     "autoprefixer": "^10.4.21",
     "electron": "^42.4.0",
     "electron-builder": "^26.15.3",
-    "electron-updater": "^6.3.9",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
@@ -70,7 +70,9 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "!dist/server.cjs.map"
+      "!dist/server.cjs.map",
+      "node_modules/**/*",
+      "package.json"
     ],
     "extraResources": [
       {
