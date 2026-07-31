@@ -46,7 +46,7 @@ function waitForServer(url: string, timeoutMs = 15000, intervalMs = 250): Promis
 function startBundledServer(): Promise<void> {
   return new Promise((resolve, reject) => {
     const serverPath = app.isPackaged
-      ? path.join(process.resourcesPath, 'server.cjs')
+      ? path.join(process.resourcesPath, 'app', 'dist', 'server.cjs')
       : path.join(__dirname, '..', 'dist', 'server.cjs');
 
     if (!fs.existsSync(serverPath)) {
@@ -54,8 +54,17 @@ function startBundledServer(): Promise<void> {
       return;
     }
 
+    const staticDir = app.isPackaged
+      ? path.join(process.resourcesPath, 'app-dist')
+      : path.join(__dirname, '..', 'dist');
+
     serverProcess = fork(serverPath, [], {
-      env: { ...process.env, PORT: String(LOCAL_PORT), NODE_ENV: 'production' },
+      env: {
+        ...process.env,
+        PORT: String(LOCAL_PORT),
+        NODE_ENV: 'production',
+        STATIC_DIR: staticDir,
+      },
       silent: true,
     });
 
