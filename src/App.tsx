@@ -554,27 +554,91 @@ export default function App() {
         console.warn('Daily auto-backup check failed:', err);
       });
 
-    // Debounce the refresh triggers to avoid flooding database connections on initial mount / batch updates
-    let refreshTimeout: NodeJS.Timeout | null = null;
-    const debouncedRefresh = () => {
-      if (refreshTimeout) {
-        clearTimeout(refreshTimeout);
+    // Per-collection refresh: each live update now only re-reads the ONE
+    // collection that actually changed, instead of re-fetching all six
+    // collections on every single change. At higher write volumes / more
+    // simultaneously-open devices, this cuts redundant Firestore reads
+    // roughly 6x versus refreshing everything every time.
+    const refreshUsers = async () => {
+      try {
+        const u = await DBService.getUsers();
+        setUsers(u);
+        const savedUserUid = sessionStorage.getItem('mfr_active_user_uid');
+        if (savedUserUid && !currentUser) {
+          const found = u.find(user => user.userId === savedUserUid);
+          if (found) setCurrentUser(found);
+        }
+      } catch (err) {
+        console.error('Failed to refresh users', err);
       }
-      refreshTimeout = setTimeout(() => {
-        refreshAllStates();
-      }, 100);
     };
 
-    // Attach real-time subscription streams emulation triggers
-    const unsubUsers = DBService.subscribeToUpdates('mfr_users', debouncedRefresh);
-    const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', debouncedRefresh);
-    const unsubMoves = DBService.subscribeToUpdates('mfr_movements', debouncedRefresh);
-    const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', debouncedRefresh);
-    const unsubAudits = DBService.subscribeToUpdates('mfr_audit_logs', debouncedRefresh);
-    const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', debouncedRefresh);
+    const refreshJobCards = async () => {
+      try {
+        const jc = await DBService.getJobCards();
+        setJobCards(jc);
+        setSelectedJob(prev => {
+          if (!prev) return null;
+          const freshJob = jc.find(j => j.jobCardNo.toLowerCase() === prev.jobCardNo.toLowerCase());
+          return freshJob || prev;
+        });
+      } catch (err) {
+        console.error('Failed to refresh job cards', err);
+      }
+    };
+
+    const refreshMovements = async () => {
+      try {
+        setMovements(await DBService.getMovements());
+      } catch (err) {
+        console.error('Failed to refresh movements', err);
+      }
+    };
+
+    const refreshNotifications = async () => {
+      try {
+        setNotifications(await DBService.getNotifications());
+      } catch (err) {
+        console.error('Failed to refresh notifications', err);
+      }
+    };
+
+    const refreshAuditLogs = async () => {
+      try {
+        setAuditLogs(await DBService.getAuditLogs());
+      } catch (err) {
+        console.error('Failed to refresh audit logs', err);
+      }
+    };
+
+    const refreshCompanyConfig = async () => {
+      try {
+        setCompanyConfig(await DBService.getCompanyConfig());
+      } catch (err) {
+        console.error('Failed to refresh company config', err);
+      }
+    };
+
+    // Debounce each collection's own refresh independently, so a burst of
+    // writes to the same collection coalesces into one refetch, without
+    // making unrelated collections wait on each other.
+    const debounceTimeouts: Record<string, NodeJS.Timeout | null> = {};
+    const makeDebounced = (key: string, fn: () => void) => () => {
+      if (debounceTimeouts[key]) clearTimeout(debounceTimeouts[key]!);
+      debounceTimeouts[key] = setTimeout(fn, 100);
+    };
+
+    // Attach real-time subscription streams - each now only refreshes its
+    // own collection's state.
+    const unsubUsers = DBService.subscribeToUpdates('mfr_users', makeDebounced('users', refreshUsers));
+    const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', makeDebounced('jobs', refreshJobCards));
+    const unsubMoves = DBService.subscribeToUpdates('mfr_movements', makeDebounced('moves', refreshMovements));
+    const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', makeDebounced('notifs', refreshNotifications));
+    const unsubAudits = DBService.subscribeToUpdates('mfr_audit_logs', makeDebounced('audits', refreshAuditLogs));
+    const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', makeDebounced('company', refreshCompanyConfig));
 
     return () => {
-      if (refreshTimeout) clearTimeout(refreshTimeout);
+      Object.values(debounceTimeouts).forEach(t => t && clearTimeout(t));
       unsubUsers();
       unsubJobs();
       unsubMoves();
