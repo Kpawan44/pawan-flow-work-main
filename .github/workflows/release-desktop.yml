@@ -38,6 +38,11 @@ jobs:
           cache: 'npm'
 
       - run: npm install
+
+      - name: Set package.json version from the git tag
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+        shell: bash
+
       - run: npm run build
       - run: npm run build:electron-main
       - run: npx electron-builder ${{ matrix.build_flag }} --publish always
