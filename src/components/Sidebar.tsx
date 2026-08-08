@@ -58,6 +58,7 @@ export default function Sidebar({
   const menuItems = [
     { id: 'dashboard', label: 'Department Panel', icon: Factory },
     { id: 'all-orders', label: 'All Job Cards', icon: FileText },
+    { id: 'outsource', label: 'Process Outsourcing', icon: Truck },
     { id: 'timeline-live', label: 'Real-Time Tracking', icon: Activity },
     { id: 'reports', label: 'Reports & Analytics', icon: Layers },
     { id: 'user-guide', label: 'User Guide & Manual', icon: BookOpen },

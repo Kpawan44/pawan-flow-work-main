@@ -20,7 +20,7 @@ import {
   limit 
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation } from '../types';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder } from '../types';
 import { 
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
@@ -55,6 +55,26 @@ export interface FirestoreErrorInfo {
     emailVerified?: boolean | null;
     isAnonymous?: boolean | null;
   }
+}
+
+// Helper function to sanitize objects before sending to Firestore (removes undefined fields)
+export function sanitizeForFirestore<T>(obj: T): T {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => sanitizeForFirestore(item)) as unknown as T;
+  }
+  if (typeof obj === 'object' && !(obj instanceof Date)) {
+    const cleaned: any = {};
+    for (const [key, value] of Object.entries(obj)) {
+      if (value !== undefined) {
+        cleaned[key] = sanitizeForFirestore(value);
+      }
+    }
+    return cleaned as T;
+  }
+  return obj;
 }
 
 // Global offline/error state tracker for UI
@@ -131,7 +151,7 @@ if (!isPlaceholder) {
     const dbId = (firebaseConfig as any).firestoreDatabaseId || '(default)';
     try {
       dbInstance = initializeFirestore(app, {
-        experimentalAutoDetectLongPolling: true,
+        experimentalForceLongPolling: true,
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager()
         })
@@ -141,7 +161,7 @@ if (!isPlaceholder) {
       console.warn(`Failed to initialize Firestore persistent cache, using fallback initializeFirestore for database ${dbId}:`, cacheError);
       try {
         dbInstance = initializeFirestore(app, {
-          experimentalAutoDetectLongPolling: true
+          experimentalForceLongPolling: true
         }, dbId);
       } catch (fallbackError) {
         console.error("Firestore initialization fallback failed completely:", fallbackError);
@@ -392,6 +412,98 @@ const defaultAuditLogs: AuditLog[] = [
     userName: 'Alice Dispatcher',
     action: 'CREATE_JOB_CARD',
     details: 'Created Job Card JC-1001 with quantity 1200 KG'
+  }
+];
+
+const defaultOutsourceOrders: OutsourceOrder[] = [
+  {
+    orderId: 'OUT-2026-001',
+    partyName: 'Global Heavy Industries',
+    itemName: 'Precision Plated Spacer Sleeve',
+    itemCode: 'MFR-LOAD-101',
+    orderQty: 800,
+    unit: 'PCS',
+    processType: 'External Heat Treatment',
+    outsourceMaterialType: 'Semi Finished Goods',
+    orderedByUserId: 'u-2',
+    orderedByUserName: 'Alice Dispatcher',
+    orderedAt: new Date(Date.now() - 3600000 * 48).toISOString(),
+    assignedToUserId: 'u-1',
+    assignedToUserName: 'Pawan Kumar',
+    status: 'Supplier PO Placed',
+    supplierName: 'Apex Vacuum Heat Treaters',
+    supplierPoNo: 'PO-OUT-9102',
+    supplierRate: 42.50,
+    poDate: new Date(Date.now() - 3600000 * 36).toISOString(),
+    estimatedDelivery: new Date(Date.now() - 3600000 * 24 * 3).toISOString().slice(0, 10), // 3 days ago -> OVERDUE
+    poRemarks: 'Vacuum hardening spec required. Overdue for delivery.',
+    dispatchRemarks: 'High priority external vacuum heat treatment required.'
+  },
+  {
+    orderId: 'OUT-2026-002',
+    partyName: 'Bharat Auto Components',
+    itemName: 'Hardened Transmission Flange',
+    itemCode: 'BAC-FLG-402',
+    orderQty: 350,
+    unit: 'KGS',
+    processType: 'Precision Plating & Coating',
+    outsourceMaterialType: 'Finished Goods',
+    orderedByUserId: 'u-2',
+    orderedByUserName: 'Alice Dispatcher',
+    orderedAt: new Date(Date.now() - 3600000 * 24).toISOString(),
+    assignedToUserId: 'u-1',
+    assignedToUserName: 'Pawan Kumar',
+    status: 'Supplier PO Placed',
+    supplierName: 'Supreme Zinc Platers Ltd',
+    supplierPoNo: 'PO-OUT-9105',
+    supplierRate: 65.00,
+    poDate: new Date(Date.now() - 3600000 * 18).toISOString(),
+    estimatedDelivery: new Date().toISOString().slice(0, 10), // Today!
+    poRemarks: 'Zinc-nickel anti-corrosion coating.',
+    dispatchRemarks: 'Deliver directly to finished goods store upon receipt.'
+  },
+  {
+    orderId: 'OUT-2026-003',
+    partyName: 'Mahindra Heavy Gear Corp',
+    itemName: 'CNC Threaded Pinion Shaft',
+    itemCode: 'MHG-PIN-088',
+    orderQty: 500,
+    unit: 'PCS',
+    processType: 'CNC Threading & Grinding',
+    outsourceMaterialType: 'Semi Finished Goods',
+    orderedByUserId: 'u-2',
+    orderedByUserName: 'Alice Dispatcher',
+    orderedAt: new Date(Date.now() - 3600000 * 72).toISOString(),
+    assignedToUserId: 'u-1',
+    assignedToUserName: 'Pawan Kumar',
+    status: 'Material Received',
+    supplierName: 'Micro-Turn CNC Works',
+    supplierPoNo: 'PO-OUT-9088',
+    supplierRate: 110.00,
+    poDate: new Date(Date.now() - 3600000 * 60).toISOString(),
+    estimatedDelivery: new Date(Date.now() - 3600000 * 12).toISOString().slice(0, 10),
+    receivedQty: 500,
+    receivedAt: new Date(Date.now() - 3600000 * 6).toISOString(),
+    receivedChallanNo: 'CH-9088-A',
+    receivedMaterialType: 'Semi Finished Goods',
+    receiptRemarks: '100% thread gauge verified. Passed quality control.'
+  },
+  {
+    orderId: 'OUT-2026-004',
+    partyName: 'Tata Precision Systems',
+    itemName: 'Cast Iron Braking Hub',
+    itemCode: 'TPS-HUB-109',
+    orderQty: 1200,
+    unit: 'KGS',
+    processType: 'Braking & Bending',
+    outsourceMaterialType: 'Semi Finished Goods',
+    orderedByUserId: 'u-2',
+    orderedByUserName: 'Alice Dispatcher',
+    orderedAt: new Date(Date.now() - 3600000 * 6).toISOString(),
+    assignedToUserId: 'u-1',
+    assignedToUserName: 'Pawan Kumar',
+    status: 'Assigned',
+    dispatchRemarks: 'Brake pressing required as per drawing rev 4.'
   }
 ];
 
@@ -955,7 +1067,10 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     const cards = await this.getJobCards();
     const idx = cards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
-    if (idx === -1) throw new Error(`Job card ${jobCardNo} not found`);
+    if (idx === -1) {
+      console.warn(`Job card ${jobCardNo} not found for update`);
+      return;
+    }
     
     cards[idx] = { ...cards[idx], ...updates } as JobCard;
     setLocalStorageItem('mfr_job_cards', cards);
@@ -2025,6 +2140,137 @@ export class DBService {
     const remaining = queue.filter(item => item.status !== 'synced');
     setLocalStorageItem('mfr_sync_queue', remaining);
     window.dispatchEvent(new CustomEvent('sync-queue-updated'));
+  }
+
+  // --- OUTSOURCE ORDERS ---
+  static async getOutsourceOrders(): Promise<OutsourceOrder[]> {
+    if (useRealFirebase && db && !this.isOfflineMode()) {
+      try {
+        await this.ensureSeeded();
+        const querySnapshot = await getDocs(collection(db, 'mfr_outsource_orders'));
+        const list: OutsourceOrder[] = [];
+        querySnapshot.forEach((docSnap) => {
+          list.push(docSnap.data() as OutsourceOrder);
+        });
+        const sorted = list.sort((a, b) => new Date(b.orderedAt).getTime() - new Date(a.orderedAt).getTime());
+        setLocalStorageItem('mfr_outsource_orders', sorted);
+        return sorted;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'mfr_outsource_orders');
+      }
+    }
+    return getLocalStorageItem<OutsourceOrder[]>('mfr_outsource_orders', defaultOutsourceOrders);
+  }
+
+  static async createOutsourceOrder(
+    orderData: Omit<OutsourceOrder, 'orderId' | 'orderedAt' | 'status' | 'orderedByUserId' | 'orderedByUserName'>,
+    userId: string,
+    userName: string
+  ): Promise<OutsourceOrder> {
+    const list = await this.getOutsourceOrders();
+    const orderId = `OUT-${new Date().getFullYear()}-${String(list.length + 1).padStart(3, '0')}`;
+    
+    const newOrderRaw: OutsourceOrder = {
+      ...orderData,
+      orderId,
+      orderedByUserId: userId,
+      orderedByUserName: userName,
+      orderedAt: new Date().toISOString(),
+      status: 'Assigned'
+    };
+    const newOrder = sanitizeForFirestore(newOrderRaw);
+
+    list.unshift(newOrder);
+    setLocalStorageItem('mfr_outsource_orders', list);
+
+    // Notify assigned person
+    await this.createNotification({
+      userId: newOrder.assignedToUserId,
+      department: 'Purchase',
+      title: '📦 New Outsource Order Assigned',
+      message: `${userName} (Dispatch) assigned process outsource order ${orderId} (${newOrder.itemName}, ${newOrder.orderQty} ${newOrder.unit}) to you.`
+    });
+
+    await this.tryPhysicalWrite(
+      'Create Outsource Order',
+      `Placed process outsource order ${orderId} assigned to ${newOrder.assignedToUserName}`,
+      [
+        { collection: 'mfr_outsource_orders', docId: orderId, data: newOrder, operation: 'set' }
+      ],
+      async () => {
+        await setDoc(doc(db, 'mfr_outsource_orders', orderId), newOrder);
+      }
+    );
+
+    await this.logAction(
+      userId,
+      userName,
+      'CREATE_OUTSOURCE_ORDER',
+      `Dispatch placed outsource order ${orderId} for ${newOrder.itemName} (${newOrder.orderQty} ${newOrder.unit}) assigned to ${newOrder.assignedToUserName}`
+    );
+
+    return newOrder;
+  }
+
+  static async updateOutsourceOrder(
+    orderId: string,
+    updates: Partial<OutsourceOrder>,
+    userId: string,
+    userName: string
+  ): Promise<void> {
+    const list = await this.getOutsourceOrders();
+    const idx = list.findIndex(o => o.orderId === orderId);
+    if (idx === -1) throw new Error(`Outsource order ${orderId} not found`);
+
+    const updated = sanitizeForFirestore({ ...list[idx], ...updates });
+    list[idx] = updated;
+    setLocalStorageItem('mfr_outsource_orders', list);
+
+    await this.tryPhysicalWrite(
+      'Update Outsource Order',
+      `Updated outsource order ${orderId} status to ${updated.status}`,
+      [
+        { collection: 'mfr_outsource_orders', docId: orderId, data: updated, operation: 'set' }
+      ],
+      async () => {
+        await setDoc(doc(db, 'mfr_outsource_orders', orderId), updated);
+      }
+    );
+
+    await this.logAction(
+      userId,
+      userName,
+      'UPDATE_OUTSOURCE_ORDER',
+      `Updated outsource order ${orderId}: Status set to '${updated.status}'`
+    );
+  }
+
+  static async deleteOutsourceOrder(
+    orderId: string,
+    userId: string,
+    userName: string
+  ): Promise<void> {
+    const list = await this.getOutsourceOrders();
+    const filtered = list.filter(o => o.orderId !== orderId);
+    setLocalStorageItem('mfr_outsource_orders', filtered);
+
+    await this.tryPhysicalWrite(
+      'Delete Outsource Order',
+      `Deleted outsource order ${orderId}`,
+      [
+        { collection: 'mfr_outsource_orders', docId: orderId, operation: 'delete' }
+      ],
+      async () => {
+        await deleteDoc(doc(db, 'mfr_outsource_orders', orderId));
+      }
+    );
+
+    await this.logAction(
+      userId,
+      userName,
+      'DELETE_OUTSOURCE_ORDER',
+      `Deleted outsource order ${orderId}`
+    );
   }
 
   // --- COMPANY CONFIG ---

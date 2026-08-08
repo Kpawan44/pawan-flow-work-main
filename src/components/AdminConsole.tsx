@@ -163,6 +163,7 @@ export default function AdminConsole({
   const [newUserPin, setNewUserPin] = useState('');
   const [newUserDept, setNewUserDept] = useState<Department | 'Admin'>('Production');
   const [newUserRole, setNewUserRole] = useState<'staff' | 'admin' | 'super_admin'>('staff');
+  const [newUserCanOutsource, setNewUserCanOutsource] = useState<boolean>(false);
   const [pinError, setPinError] = useState('');
 
   // Synchronize onboarding presets depending on creator's level
@@ -622,16 +623,29 @@ export default function AdminConsole({
       department: newUserDept,
       role: newUserRole,
       active: true,
+      canOutsource: newUserCanOutsource,
       createdAt: new Date().toISOString()
     };
 
     onSaveUser(newProfile);
-    onLogAction('CREATE_USER', `Created new user account '${newProfile.name}' for department ${newProfile.department} with role ${newUserRole}`);
+    onLogAction('CREATE_USER', `Created new user account '${newProfile.name}' for department ${newProfile.department} with role ${newUserRole}${newUserCanOutsource ? ' [Outsource Authorized]' : ''}`);
     
     // Reset Form
     setNewUserName('');
     setNewUserPin('');
+    setNewUserCanOutsource(false);
     setShowAddForm(false);
+  };
+
+  const toggleUserOutsource = (user: UserProfile) => {
+    if (!isManager) {
+      showToast('Only plant managers are authorized to modify outsourcing permissions.', 'error');
+      return;
+    }
+    const updated = { ...user, canOutsource: !user.canOutsource };
+    onSaveUser(updated);
+    onLogAction('TOGGLE_USER_OUTSOURCE', `Changed outsourcing authorization for '${user.name}' to ${updated.canOutsource ? 'AUTHORIZED' : 'REVOKED'}`);
+    showToast(`${updated.canOutsource ? 'Granted' : 'Revoked'} process outsourcing authorization for ${user.name}`, 'info');
   };
 
   const handleSavePinCode = async (user: UserProfile) => {
@@ -1087,6 +1101,20 @@ export default function AdminConsole({
                 </p>
               )}
             </div>
+
+            <div className="col-span-1 md:col-span-2 pt-1">
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={newUserCanOutsource}
+                  onChange={e => setNewUserCanOutsource(e.target.checked)}
+                  className="rounded border-slate-300 dark:border-slate-700 text-[#3B82F6] focus:ring-[#3B82F6] h-4 w-4"
+                />
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                  Authorize as Process Outsourcing Assignee (Can handle outsource POs from Dispatch)
+                </span>
+              </label>
+            </div>
           </div>
 
           {pinError && (
@@ -1228,6 +1256,7 @@ export default function AdminConsole({
                     <th className="py-3 px-4">Operator Authorization PIN</th>
                     <th className="py-3 px-4">Allocated Line</th>
                     <th className="py-3 px-4">Access Level</th>
+                    <th className="py-3 px-4">Outsource Assignee</th>
                     <th className="py-3 px-4">Operator State</th>
                     <th className="py-3 px-4 text-center">Actions</th>
                   </tr>
@@ -1306,6 +1335,19 @@ export default function AdminConsole({
                         }`}>
                           {u.role === 'super_admin' ? 'Super Admin' : u.role === 'admin' ? 'Admin' : 'Staff'}
                         </span>
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <button
+                          onClick={() => toggleUserOutsource(u)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 transition-colors ${
+                            u.canOutsource
+                              ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-900/50'
+                              : 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700'
+                          }`}
+                          title="Click to toggle process outsourcing authorization"
+                        >
+                          {u.canOutsource ? 'Authorized' : 'Not Authorized'}
+                        </button>
                       </td>
                       <td className="py-3.5 px-4">
                         <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
@@ -1439,12 +1481,25 @@ export default function AdminConsole({
                   </div>
 
                   <div className="flex items-center justify-between gap-4 pt-1.5 border-t border-slate-100 dark:border-slate-800/80">
-                    <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                      u.active ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/20 dark:text-emerald-400' : 'bg-rose-100 text-rose-800 dark:bg-rose-950/20 dark:text-rose-400'
-                    }`}>
-                      <span className={`h-1.5 w-1.5 rounded-full ${u.active ? 'bg-emerald-500' : 'bg-rose-500'}`} />
-                      {u.active ? 'Active on Floor' : 'Off-duty'}
-                    </span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                        u.active ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/20 dark:text-emerald-400' : 'bg-rose-100 text-rose-800 dark:bg-rose-950/20 dark:text-rose-400'
+                      }`}>
+                        <span className={`h-1.5 w-1.5 rounded-full ${u.active ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                        {u.active ? 'Active on Floor' : 'Off-duty'}
+                      </span>
+
+                      <button
+                        onClick={() => toggleUserOutsource(u)}
+                        className={`px-2 py-0.5 rounded text-[9px] font-bold border ${
+                          u.canOutsource
+                            ? 'bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-900/50'
+                            : 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-500 dark:border-slate-700'
+                        }`}
+                      >
+                        {u.canOutsource ? 'Outsource Authorized' : 'No Outsource'}
+                      </button>
+                    </div>
 
                     <div className="flex items-center gap-2">
                       <button

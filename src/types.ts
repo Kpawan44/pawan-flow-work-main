@@ -10,9 +10,78 @@ export interface UserProfile {
   role: UserRole;
   active: boolean;
   createdAt: string;
+  canOutsource?: boolean; // Authorized Outsourcing Assignee
 }
 
 export type JobCardStatus = 'Pending' | 'In Process' | 'Completed' | 'Rejected' | 'Pending Acceptance';
+export type OutsourceStatus = 'Assigned' | 'Supplier PO Placed' | 'In Transit' | 'Material Received' | 'Completed' | 'Cancelled';
+export type OutsourceMaterialType = 'Semi Finished Goods' | 'Finished Goods';
+
+export interface OutsourceOrderItem {
+  itemId: string;
+  itemName: string;
+  itemCode?: string;
+  orderQty: number;
+  unit: 'KGS' | 'PCS';
+  processType: string;
+  outsourceMaterialType: OutsourceMaterialType;
+  jobCardNo?: string;
+  receivedQty?: number;
+}
+
+export interface OutsourceOrder {
+  orderId: string; // OUT-2026-001
+  jobCardNo?: string;
+  partyName: string;
+  itemName: string;
+  itemCode?: string;
+  orderQty: number;
+  unit: 'KGS' | 'PCS';
+  processType: string; // e.g. 'External Heat Treatment', 'Surface Plating', 'CNC Machining Outsource'
+  outsourceMaterialType: OutsourceMaterialType; // 'Semi Finished Goods' | 'Finished Goods'
+  
+  // Multi-item support
+  items?: OutsourceOrderItem[];
+  
+  // Dispatch Creator
+  orderedByUserId: string;
+  orderedByUserName: string;
+  orderedAt: string;
+  dispatchRemarks?: string;
+  
+  // Assignee
+  assignedToUserId: string;
+  assignedToUserName: string;
+  status: OutsourceStatus;
+  
+  // Supplier PO Details (filled by Assigned Person)
+  supplierName?: string;
+  poNumber?: string;
+  supplierPoNo?: string;
+  poDate?: string;
+  unitRate?: number;
+  supplierRate?: number;
+  totalCost?: number;
+  expectedDeliveryDate?: string;
+  estimatedDelivery?: string;
+  supplierRemarks?: string;
+  poRemarks?: string;
+  poPlacedAt?: string;
+  poPlacedByUserName?: string;
+  
+  // Goods Receipt Details (filled when Material Received by Purchase / Assignee)
+  receivedQty?: number;
+  rejectionQty?: number;
+  rejectionReason?: string;
+  billNo?: string;
+  receivedChallanNo?: string;
+  receivedMaterialType?: 'Semi Finished Goods' | 'Finished Goods';
+  receivedAt?: string;
+  receivedByUserId?: string;
+  receivedByUserName?: string;
+  targetDepartmentAfterReceipt?: Department;
+  receiptRemarks?: string;
+}
 
 export interface JobCard {
   jobCardNo: string;
@@ -31,6 +100,12 @@ export interface JobCard {
   createdAt: string;
   completed: boolean;
   processType?: 'Manufacturing' | 'Purchase';
+  isOutsource?: boolean;
+  outsourceOrderId?: string;
+  assignedToUserId?: string;
+  assignedToUserName?: string;
+  outsourceStatus?: OutsourceStatus;
+  outsourceDetails?: Partial<OutsourceOrder>;
   materialType?: 'Raw Material' | 'Semi Finished Goods' | 'Finished Goods';
   customRoutedToPlating?: number;
   customRoutedToPacking?: number;

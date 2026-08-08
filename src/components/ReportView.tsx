@@ -461,7 +461,14 @@ export default function ReportView({ jobCards, movements, onCreateMovement, curr
               (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
             )
             .reduce((sum, m) => sum + (m.quantity || 0), 0);
-          const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued);
+          const totalRejected = movements
+            .filter(m => 
+              m.fromDepartment === 'Raw Material Store' && 
+              (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
+              (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-'))
+            )
+            .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
+          const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
           return {
             'Material Code': item.code,
             'Material Name': item.name,

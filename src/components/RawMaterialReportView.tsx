@@ -111,7 +111,15 @@ export default function RawMaterialReportView({
         )
         .reduce((sum, m) => sum + (m.quantity || 0), 0);
 
-      const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued);
+      const totalRejected = movements
+        .filter(m => 
+          m.fromDepartment === 'Raw Material Store' && 
+          (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
+          (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-'))
+        )
+        .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
+
+      const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
       const stockPercentage = item.availableStock > 0 ? (currentStock / item.availableStock) * 100 : 0;
 
       return {
@@ -119,6 +127,7 @@ export default function RawMaterialReportView({
         startingStock: item.availableStock,
         totalPurchased,
         totalIssued,
+        totalRejected,
         currentStock,
         stockPercentage
       };

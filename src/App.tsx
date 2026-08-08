@@ -7,6 +7,7 @@ import {
   Filter, 
   Download, 
   Activity, 
+  Truck,
   LogOut,
   Mail,
   Flame,
@@ -83,6 +84,7 @@ import BulkStatusUpdateModal from './components/BulkStatusUpdateModal';
 import PendingBreakdownModal from './components/PendingBreakdownModal';
 import JobStatusBadge from './components/JobStatusBadge';
 import ConnectivityHealthWidget from './components/ConnectivityHealthWidget';
+import { OutsourceManager } from './components/OutsourceManager';
 import { getJobCardProcessMetrics, getRawMaterialIssuedQty, getJobCardDepartmentPending } from './lib/metrics';
 
 const getAvatarBg = (dept: string) => {
@@ -1871,7 +1873,7 @@ export default function App() {
         className={`
           fixed inset-y-0 left-0 z-50 transition-all duration-300 ease-in-out flex shrink-0 h-full print:hidden
           lg:static lg:z-0 lg:translate-x-0
-          ${sidebarOpen ? 'translate-x-0 w-[220px]' : '-translate-x-full w-[220px] lg:w-0 lg:opacity-0 lg:overflow-hidden'}
+          ${sidebarOpen ? 'translate-x-0 w-[270px] max-w-[85vw]' : '-translate-x-full w-[270px] max-w-[85vw] lg:w-0 lg:opacity-0 lg:overflow-hidden'}
         `}
       >
         <Sidebar 
@@ -3363,6 +3365,17 @@ export default function App() {
             </div>
           )}
 
+          {/* PROCESS OUTSOURCING VIEW */}
+          {activeTab === 'outsource' && (
+            <OutsourceManager
+              currentUser={currentUser}
+              users={users}
+              jobCards={jobCards}
+              onRefreshData={refreshAllStates}
+              showToast={showToast}
+            />
+          )}
+
           {/* REPORTS EXPORT VIEW */}
           {activeTab === 'reports' && (
             <ReportView 
@@ -3460,7 +3473,7 @@ export default function App() {
               setActiveTab('dashboard');
               setSelectedJobCardNos([]);
             }}
-            className={`relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 rounded-2xl transition-all duration-200 cursor-pointer min-w-[68px] ${
+            className={`relative flex flex-col items-center justify-center gap-0.5 px-2 py-1.5 rounded-2xl transition-all duration-200 cursor-pointer min-w-[54px] sm:min-w-[68px] ${
               activeTab === 'dashboard'
                 ? 'text-[#3B82F6] font-bold'
                 : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium'
@@ -3474,7 +3487,7 @@ export default function App() {
               />
             )}
             <Factory className={`h-5 w-5 transition-transform duration-200 ${activeTab === 'dashboard' ? 'scale-110 text-[#3B82F6]' : ''}`} />
-            <span className="text-[10px] tracking-tight">Dashboard</span>
+            <span className="text-[9.5px] sm:text-[10px] tracking-tight">Dashboard</span>
           </motion.button>
 
           <motion.button
@@ -3483,7 +3496,7 @@ export default function App() {
               setActiveTab('all-orders');
               setSelectedJobCardNos([]);
             }}
-            className={`relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 rounded-2xl transition-all duration-200 cursor-pointer min-w-[68px] ${
+            className={`relative flex flex-col items-center justify-center gap-0.5 px-2 py-1.5 rounded-2xl transition-all duration-200 cursor-pointer min-w-[54px] sm:min-w-[68px] ${
               activeTab === 'all-orders'
                 ? 'text-[#3B82F6] font-bold'
                 : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium'
@@ -3497,7 +3510,30 @@ export default function App() {
               />
             )}
             <FileText className={`h-5 w-5 transition-transform duration-200 ${activeTab === 'all-orders' ? 'scale-110 text-[#3B82F6]' : ''}`} />
-            <span className="text-[10px] tracking-tight">Orders</span>
+            <span className="text-[9.5px] sm:text-[10px] tracking-tight">Orders</span>
+          </motion.button>
+
+          <motion.button
+            whileTap={{ scale: 0.92 }}
+            onClick={() => {
+              setActiveTab('outsource');
+              setSelectedJobCardNos([]);
+            }}
+            className={`relative flex flex-col items-center justify-center gap-0.5 px-2 py-1.5 rounded-2xl transition-all duration-200 cursor-pointer min-w-[56px] sm:min-w-[68px] ${
+              activeTab === 'outsource'
+                ? 'text-[#3B82F6] font-bold'
+                : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium'
+            }`}
+          >
+            {activeTab === 'outsource' && (
+              <motion.div
+                layoutId="activeBottomTabPill"
+                className="absolute inset-0 bg-blue-50/80 dark:bg-blue-950/60 border border-blue-200/70 dark:border-blue-800/50 rounded-2xl -z-10 shadow-xs"
+                transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+              />
+            )}
+            <Truck className={`h-5 w-5 transition-transform duration-200 ${activeTab === 'outsource' ? 'scale-110 text-[#3B82F6]' : ''}`} />
+            <span className="text-[9.5px] sm:text-[10px] tracking-tight">Outsource</span>
           </motion.button>
 
           <motion.button
@@ -3506,7 +3542,7 @@ export default function App() {
               setActiveTab('timeline-live');
               setSelectedJobCardNos([]);
             }}
-            className={`relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 rounded-2xl transition-all duration-200 cursor-pointer min-w-[68px] ${
+            className={`relative flex flex-col items-center justify-center gap-0.5 px-2 py-1.5 rounded-2xl transition-all duration-200 cursor-pointer min-w-[56px] sm:min-w-[68px] ${
               activeTab === 'timeline-live'
                 ? 'text-[#3B82F6] font-bold'
                 : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium'
@@ -3526,10 +3562,10 @@ export default function App() {
           <motion.button
             whileTap={{ scale: 0.92 }}
             onClick={() => setSidebarOpen(true)}
-            className="relative flex flex-col items-center justify-center gap-0.5 px-3 py-1.5 rounded-2xl text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium transition-all duration-200 cursor-pointer min-w-[68px]"
+            className="relative flex flex-col items-center justify-center gap-0.5 px-2 py-1.5 rounded-2xl text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 font-medium transition-all duration-200 cursor-pointer min-w-[54px] sm:min-w-[68px]"
           >
             <Menu className="h-5 w-5" />
-            <span className="text-[10px] tracking-tight">Menu</span>
+            <span className="text-[9.5px] sm:text-[10px] tracking-tight">Menu</span>
           </motion.button>
         </nav>
       </main>

@@ -20,11 +20,12 @@ import {
   CheckCircle2,
   Layers,
   Scale,
-  Box
+  Box,
+  Link
 } from 'lucide-react';
-import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType } from '../types';
 import { DBService } from '../lib/firebase';
-import RawMaterialRequestModal from './RawMaterialRequestModal';
+import RawMaterialRequestModal, { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 import JobStatusBadge from './JobStatusBadge';
 
 interface DepartmentOperationsProps {
@@ -41,6 +42,7 @@ interface DepartmentOperationsProps {
     quantity: number;
     remarks?: string;
     isIssueRequest?: boolean;
+    issueStatus?: 'Pending' | 'Issued' | 'Rejected';
     requestedUnit?: 'PCS' | 'KGS';
     requestedQty?: number;
     processDetails?: any;
@@ -51,6 +53,7 @@ interface DepartmentOperationsProps {
     quantity: number;
     remarks?: string;
     isIssueRequest?: boolean;
+    issueStatus?: 'Pending' | 'Issued' | 'Rejected';
     requestedUnit?: 'PCS' | 'KGS';
     requestedQty?: number;
     processDetails?: any;
@@ -182,16 +185,23 @@ export default function DepartmentOperations({
   const [showItemDropdown, setShowItemDropdown] = useState(false);
   const [showPurchaseItemDropdown, setShowPurchaseItemDropdown] = useState(false);
 
+  const [outsourceOrders, setOutsourceOrders] = useState<OutsourceOrder[]>([]);
+  const [selectedOutsourceOrderId, setSelectedOutsourceOrderId] = useState<string>('');
+
   useEffect(() => {
-    const loadItems = async () => {
+    const loadItemsAndOutsource = async () => {
       try {
-        const items = await DBService.getSavedItems();
+        const [items, orders] = await Promise.all([
+          DBService.getSavedItems(),
+          DBService.getOutsourceOrders()
+        ]);
         setSavedItems(items);
+        setOutsourceOrders(orders);
       } catch (err) {
-        console.error("Failed to load saved items:", err);
+        console.error("Failed to load saved items or outsource orders:", err);
       }
     };
-    loadItems();
+    loadItemsAndOutsource();
   }, [jobCards]);
 
   // Purchase Department Inputs
@@ -307,6 +317,58 @@ export default function DepartmentOperations({
   const [rawIssueRejectionNotes, setRawIssueRejectionNotes] = useState<string>('');
   const [showRawMaterialRequestModal, setShowRawMaterialRequestModal] = useState<boolean>(false);
   const [selectedJobCardForRMRequest, setSelectedJobCardForRMRequest] = useState<string | null>(null);
+
+  // Direct Wire Rejection in Raw Material Store state
+  const [showWireRejectionModal, setShowWireRejectionModal] = useState<boolean>(false);
+  const [selectedRejectMaterialCode, setSelectedRejectMaterialCode] = useState<string>('MS-WC');
+  const [wireRejectQty, setWireRejectQty] = useState<number>(0);
+  const [wireRejectReason, setWireRejectReason] = useState<string>('Corroded / Rusted Wire Coil');
+  const [wireRejectJobCardNo, setWireRejectJobCardNo] = useState<string>('');
+  const [wireRejectRemarks, setWireRejectRemarks] = useState<string>('');
+  const [isSubmittingWireRejection, setIsSubmittingWireRejection] = useState<boolean>(false);
+
+  const handleDirectWireRejection = async () => {
+    if (!selectedRejectMaterialCode || wireRejectQty <= 0) {
+      alert('Please select a raw material wire code and enter a valid rejection quantity (KG).');
+      return;
+    }
+    const matched = INVENTORY_RAW_MATERIALS.find(m => m.code === selectedRejectMaterialCode);
+    const matName = matched ? matched.name : selectedRejectMaterialCode;
+
+    setIsSubmittingWireRejection(true);
+    try {
+      const jobNo = wireRejectJobCardNo.trim() || (`RM-REJECT-${selectedRejectMaterialCode}`);
+      await onCreateMovement({
+        jobCardNo: jobNo,
+        fromDepartment: 'Raw Material Store',
+        toDepartment: 'Raw Material Store',
+        quantity: wireRejectQty,
+        isIssueRequest: true,
+        issueStatus: 'Rejected',
+        processDetails: {
+          rawMaterialCode: selectedRejectMaterialCode,
+          rawMaterialName: matName,
+          isWireRejection: true,
+          rejectedQty: wireRejectQty,
+          rejectionReason: wireRejectReason,
+          requestedBy: currentUser?.name || 'Raw Material Store Keeper',
+          urgency: 'High'
+        },
+        remarks: `🚫 Wire Quantity Rejected: ${wireRejectQty} KG (${wireRejectReason}). Deducted automatically from raw material store inventory. Notes: ${wireRejectRemarks || 'Direct Store Rejection'}`
+      });
+
+      setShowWireRejectionModal(false);
+      setWireRejectQty(0);
+      setWireRejectRemarks('');
+      setWireRejectJobCardNo('');
+      alert(`✅ Wire rejection of ${wireRejectQty} KG recorded for ${selectedRejectMaterialCode}. Store inventory reduced automatically.`);
+    } catch (err) {
+      console.error("Error submitting wire rejection:", err);
+      alert("Failed to submit wire rejection. Please try again.");
+    } finally {
+      setIsSubmittingWireRejection(false);
+    }
+  };
 
   const filteredItems = savedItems.filter(item => 
     item.itemName.toLowerCase().includes(itemName.toLowerCase())
@@ -483,7 +545,7 @@ export default function DepartmentOperations({
     setPurchaseMultiItems(prev => prev.filter((_, i) => i !== index));
   };
 
-  const handleDirectPurchaseEntry = (e: React.FormEvent) => {
+  const handleDirectPurchaseEntry = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!purchaseSupplier.trim()) {
       alert("Please specify Supplier / Vendor Name.");
@@ -493,8 +555,41 @@ export default function DepartmentOperations({
     const recNum = typeof purchaseRecQty === 'number' ? purchaseRecQty : (parseInt(String(purchaseRecQty), 10) || 0);
     const rejNum = typeof purchaseRejQty === 'number' ? purchaseRejQty : (parseInt(String(purchaseRejQty), 10) || 0);
 
+    // If linked to an Outsource Order, update the Outsource Order in DB first
+    let linkedOrder: OutsourceOrder | undefined = undefined;
+    if (selectedOutsourceOrderId) {
+      linkedOrder = outsourceOrders.find(o => o.orderId === selectedOutsourceOrderId);
+      if (linkedOrder) {
+        try {
+          await DBService.updateOutsourceOrder(
+            linkedOrder.orderId,
+            {
+              status: 'Completed',
+              supplierName: purchaseSupplier.trim(),
+              receivedQty: recNum || linkedOrder.orderQty,
+              receivedAt: new Date().toISOString(),
+              receivedChallanNo: purchaseBill || `CH-${Date.now().toString().slice(-5)}`,
+              receivedMaterialType: purchaseMaterialType as OutsourceMaterialType,
+              targetDepartmentAfterReceipt: purchaseTargetDept,
+              receiptRemarks: `Direct Purchase Entry by Purchaser (${currentUser.name}): ${purchaseRemarks || 'Material received and routed to next process.'}`,
+              receivedByUserId: currentUser.userId,
+              receivedByUserName: currentUser.name
+            },
+            currentUser.userId,
+            currentUser.name
+          );
+
+          // Refresh outsource orders
+          const updated = await DBService.getOutsourceOrders();
+          setOutsourceOrders(updated);
+        } catch (err) {
+          console.error("Failed to update outsource order from direct purchase entry:", err);
+        }
+      }
+    }
+
     if (purchaseMultiItems.length === 0) {
-      // Fallback/backwards compatibility: register the current form values as a single item if specified
+      // Fallback/backwards compatibility: register current form values as single item
       if (!purchaseItemName || recNum <= 0) {
         alert("Please add at least one item to the purchase list, or fill in item details.");
         return;
@@ -511,13 +606,30 @@ export default function DepartmentOperations({
 
       const effectiveCode = purchaseItemCode.trim() ? purchaseItemCode.trim().toUpperCase() : '-';
 
-      if (purchaseMaterialType === 'Raw Material' || purchaseTargetDept === 'Raw Material Store') {
+      // Check if linked order has an existing job card in current production list
+      const existingJob = linkedOrder?.jobCardNo ? jobCards.find(j => j.jobCardNo.toLowerCase() === linkedOrder!.jobCardNo!.toLowerCase()) : null;
+
+      if (existingJob) {
+        // Move existing job card directly to target department!
+        onUpdateJobCard(existingJob.jobCardNo, {
+          currentDepartment: purchaseTargetDept,
+          currentQty: purchaseSentQty,
+          status: 'Pending Acceptance'
+        });
+        onCreateMovement({
+          jobCardNo: existingJob.jobCardNo,
+          fromDepartment: 'Purchase',
+          toDepartment: purchaseTargetDept,
+          quantity: purchaseSentQty,
+          remarks: `Outsource Order ${linkedOrder?.orderId} material inwarded via Purchase (Supplier: ${purchaseSupplier}, Bill/Challan: ${purchaseBill || 'N/A'}). Routed to ${purchaseTargetDept}.`
+        });
+      } else if (purchaseMaterialType === 'Raw Material' || purchaseTargetDept === 'Raw Material Store') {
         onCreateMovement({
           jobCardNo: 'STOCK-IN-' + (effectiveCode !== '-' ? effectiveCode : Date.now().toString().slice(-6)),
           fromDepartment: 'Purchase',
           toDepartment: 'Raw Material Store',
           quantity: purchaseSentQty,
-          remarks: `Direct Purchase Inward of Raw Material (Supplier: ${purchaseSupplier}, Bill: ${purchaseBill || 'N/A'}). Remarks: ${purchaseRemarks || 'None'}`,
+          remarks: `Direct Purchase / Outsource Inward of Raw Material (Supplier: ${purchaseSupplier}, Bill: ${purchaseBill || 'N/A'}). ${selectedOutsourceOrderId ? `Linked Outsource Order: ${selectedOutsourceOrderId}` : ''}`,
           processDetails: {
             rawMaterialCode: effectiveCode,
             rawMaterialName: purchaseItemName.trim(),
@@ -552,6 +664,7 @@ export default function DepartmentOperations({
       }
 
       // Reset Form
+      setSelectedOutsourceOrderId('');
       setPurchaseSupplier('');
       setPurchaseBill('');
       setPurchaseItemName('');
@@ -2099,6 +2212,86 @@ Please adjust the quantity or request additional raw material issue.`);
             </div>
 
             <form onSubmit={handleDirectPurchaseEntry} className="space-y-4 text-xs font-sans">
+              {/* Optional: Link Outsource Order Selector */}
+              <div className="bg-purple-50/80 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800/80 rounded-xl p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="block text-purple-900 dark:text-purple-300 font-bold text-xs flex items-center gap-1.5">
+                    <Link className="h-3.5 w-3.5 text-purple-600 dark:text-purple-400" />
+                    Select Outsource Order <span className="text-[10px] text-purple-600 dark:text-purple-400 font-normal">(Optional)</span>
+                  </label>
+                  {selectedOutsourceOrderId && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedOutsourceOrderId('');
+                        setPurchaseSupplier('');
+                        setPurchaseItemName('');
+                        setPurchaseItemCode('');
+                        setPurchaseRecQty('');
+                        setPurchaseRejQty(0);
+                        setPurchaseSentQty(0);
+                      }}
+                      className="text-[10px] text-purple-700 dark:text-purple-300 underline font-bold hover:text-purple-900 cursor-pointer"
+                    >
+                      Clear Link
+                    </button>
+                  )}
+                </div>
+
+                <select
+                  value={selectedOutsourceOrderId}
+                  onChange={e => {
+                    const orderId = e.target.value;
+                    setSelectedOutsourceOrderId(orderId);
+                    if (orderId) {
+                      const order = outsourceOrders.find(o => o.orderId === orderId);
+                      if (order) {
+                        setPurchaseSupplier(order.supplierName || order.partyName || '');
+                        setPurchaseItemName(order.itemName);
+                        setPurchaseItemCode(order.itemCode || '');
+                        setPurchaseRecQty(order.orderQty);
+                        setPurchaseRejQty(0);
+                        setPurchaseSentQty(order.orderQty);
+                        setPurchaseUnit(order.unit);
+                        setPurchaseBill(order.supplierPoNo || order.poNumber || `CH-${order.orderId}`);
+                        
+                        if (order.outsourceMaterialType) {
+                          setPurchaseMaterialType(order.outsourceMaterialType === 'Finished Goods' ? 'Finished Goods' : 'Semi Finished Goods');
+                        } else {
+                          setPurchaseMaterialType('Semi Finished Goods');
+                        }
+
+                        // Target department logic based on processType
+                        const proc = (order.processType || '').toLowerCase();
+                        if (proc.includes('plating') || proc.includes('zinc') || proc.includes('surface')) {
+                          setPurchaseTargetDept('Plating');
+                        } else if (proc.includes('heat') || proc.includes('hardening') || proc.includes('annealing')) {
+                          setPurchaseTargetDept('Heat Treatment');
+                        } else if (order.outsourceMaterialType === 'Finished Goods' || proc.includes('finish')) {
+                          setPurchaseTargetDept('Store');
+                        } else {
+                          setPurchaseTargetDept('Heat Treatment');
+                        }
+                      }
+                    }
+                  }}
+                  className="w-full bg-white dark:bg-slate-900 border border-purple-200 dark:border-purple-800 rounded-lg px-3 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 focus:outline-none focus:border-purple-500 shadow-xs"
+                >
+                  <option value="">-- Direct Purchase (No Outsource Link) --</option>
+                  {outsourceOrders.filter(o => o.status !== 'Completed').map(ord => (
+                    <option key={ord.orderId} value={ord.orderId}>
+                      {ord.orderId} • {ord.supplierName || ord.partyName} - {ord.itemName} ({ord.orderQty} {ord.unit}) [{ord.status}]
+                    </option>
+                  ))}
+                </select>
+
+                {selectedOutsourceOrderId && (
+                  <div className="text-[11px] text-purple-900 dark:text-purple-200 bg-purple-100/90 dark:bg-purple-900/60 px-2.5 py-1.5 rounded-lg flex items-center justify-between border border-purple-200 dark:border-purple-800">
+                    <span>Auto-filled details for <strong>{selectedOutsourceOrderId}</strong></span>
+                    <span className="font-bold text-purple-700 dark:text-purple-300">Target: {purchaseTargetDept}</span>
+                  </div>
+                )}
+              </div>
               <div>
                 <label className="block text-slate-400 font-semibold mb-1">Supplier / Vendor Name</label>
                 <input
@@ -3259,6 +3452,156 @@ Please adjust the quantity or request additional raw material issue.`);
 
         {activeDept === 'Raw Material Store' && (
           <div className="lg:col-span-2 space-y-4">
+            {/* Action Bar Header */}
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="font-sans font-extrabold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                  <span>🏬 Raw Material Store Operations</span>
+                </h3>
+                <p className="text-[11px] text-slate-400 font-sans mt-0.5">
+                  Manage wire stock, issue requests, and process wire quantity rejections with automatic inventory deductions.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setShowWireRejectionModal(true)}
+                  className="px-3 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+                >
+                  <span>🚫 Reject / Scrap Wire Quantity</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowRawMaterialRequestModal(true)}
+                  className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+                >
+                  <span>📋 Request Raw Material</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Direct Wire Rejection Modal / Card */}
+            {showWireRejectionModal && (
+              <div className="bg-rose-50/40 dark:bg-rose-950/20 border-2 border-rose-300 dark:border-rose-900/60 rounded-2xl p-5 space-y-4 shadow-lg text-left font-sans">
+                <div className="flex items-center justify-between border-b border-rose-200 dark:border-rose-900/40 pb-2">
+                  <h4 className="font-extrabold text-rose-800 dark:text-rose-300 text-xs uppercase tracking-wider flex items-center gap-1.5">
+                    <span>🚫 Raw Material Wire Coil Rejection & Stock Deduction</span>
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setShowWireRejectionModal(false)}
+                    className="text-slate-400 hover:text-slate-600 text-xs font-bold px-2 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800 cursor-pointer"
+                  >
+                    ✕ Close
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+                  <div>
+                    <label className="block text-slate-600 dark:text-slate-300 font-bold uppercase text-[9.5px] mb-1">
+                      Select Wire Material Coil Code
+                    </label>
+                    <select
+                      value={selectedRejectMaterialCode}
+                      onChange={e => setSelectedRejectMaterialCode(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 font-bold text-slate-800 dark:text-slate-100"
+                    >
+                      {getDynamicRawMaterialsStock(movements).map(rm => (
+                        <option key={rm.code} value={rm.code}>
+                          {rm.code} - {rm.name} (Stock: {rm.availableStock.toLocaleString()} KG)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-rose-600 dark:text-rose-400 font-bold uppercase text-[9.5px] mb-1">
+                      Wire Quantity to Reject (KG) *
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={wireRejectQty || ''}
+                      onChange={e => {
+                        const clean = e.target.value.replace(/\D/g, '');
+                        setWireRejectQty(clean === '' ? 0 : parseInt(clean, 10));
+                      }}
+                      placeholder="E.g. 100"
+                      className="w-full bg-white dark:bg-slate-900 border border-rose-300 dark:border-rose-800 rounded-lg p-2 font-mono font-bold text-rose-700 dark:text-rose-300"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-600 dark:text-slate-300 font-bold uppercase text-[9.5px] mb-1">
+                      Rejection Reason / Category *
+                    </label>
+                    <select
+                      value={wireRejectReason}
+                      onChange={e => setWireRejectReason(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100"
+                    >
+                      <option value="Corroded / Rusted Wire Coil">Corroded / Rusted Wire Coil</option>
+                      <option value="Wire Gauge / Diameter Deviation">Wire Gauge / Diameter Deviation</option>
+                      <option value="Tensile Strength / Metallurgical Failure">Tensile Strength / Metallurgical Failure</option>
+                      <option value="Bent / Tangled / Damaged Wire Coil">Bent / Tangled / Damaged Wire Coil</option>
+                      <option value="Physical Audit Shortage / Scrap">Physical Audit Shortage / Scrap</option>
+                      <option value="QC Inspection Reject">QC Inspection Reject</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-600 dark:text-slate-300 font-bold uppercase text-[9.5px] mb-1">
+                      Associated Job Card No (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="E.g. JC-2026-001 or leave blank"
+                      value={wireRejectJobCardNo}
+                      onChange={e => setWireRejectJobCardNo(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-mono"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block text-slate-600 dark:text-slate-300 font-bold uppercase text-[9.5px] mb-1">
+                      Storekeeper / Inspector Remarks
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Provide specific notes regarding why this wire quantity is rejected..."
+                      value={wireRejectRemarks}
+                      onChange={e => setWireRejectRemarks(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs"
+                    />
+                  </div>
+                </div>
+
+                <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-[11px] text-amber-800 dark:text-amber-300 flex items-center justify-between font-mono">
+                  <span>ℹ️ Submitting this wire rejection will automatically deduct <strong>{wireRejectQty} KG</strong> from the store inventory balance for <strong>{selectedRejectMaterialCode}</strong>.</span>
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowWireRejectionModal(false)}
+                    className="px-4 py-2 bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-lg text-xs font-bold cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!selectedRejectMaterialCode || wireRejectQty <= 0 || isSubmittingWireRejection}
+                    onClick={handleDirectWireRejection}
+                    className="px-4 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white rounded-lg text-xs font-bold uppercase cursor-pointer transition"
+                  >
+                    {isSubmittingWireRejection ? 'Processing...' : 'Confirm Wire Rejection & Deduct Stock'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Pending Requests Container */}
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
               <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4 flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
                 🔧 Production Raw Material Requests
@@ -3459,10 +3802,10 @@ Please adjust the quantity or request additional raw material issue.`);
                               </label>
                               <textarea
                                 rows={2}
-                                placeholder="Describe exact reasons (e.g. Stock insufficient, incorrect material spec requested)..."
+                                placeholder="Describe exact reasons (e.g. Defective wire coil, stock corrupted)..."
                                 value={rawIssueRejectionNotes}
                                 onChange={e => setRawIssueRejectionNotes(e.target.value)}
-                                className="w-full bg-white dark:bg-slate-900 border border-slate-200 rounded p-2 focus:outline-none focus:border-rose-500"
+                                className="w-full bg-white dark:bg-slate-900 border border-slate-200 rounded p-2 focus:outline-none focus:border-rose-500 text-xs"
                               />
                               <div className="flex gap-1.5 justify-end">
                                 <button
@@ -3476,19 +3819,47 @@ Please adjust the quantity or request additional raw material issue.`);
                                   type="button"
                                   onClick={async () => {
                                     if (!rawIssueRejectionNotes) return;
-                                    
-                                    // Reject the movement
+                                    const reqQty = req.requestedQty || req.quantity || 0;
+                                    const matCode = req.processDetails?.rawMaterialCode || 'N/A';
+                                    const matName = req.processDetails?.rawMaterialName || 'Raw Material';
+
+                                    // Reject movement & deduct rejected wire qty from store stock
                                     await onAcceptMovement(req.movementId, rawIssueRejectionNotes, {
                                       issueStatus: 'Rejected',
-                                      quantity: 0
+                                      quantity: reqQty
                                     });
+
+                                    if (reqQty > 0 && matCode !== 'N/A') {
+                                      try {
+                                        await onCreateMovement({
+                                          jobCardNo: req.jobCardNo || (`RM-REJECT-${matCode}`),
+                                          fromDepartment: 'Raw Material Store',
+                                          toDepartment: 'Raw Material Store',
+                                          quantity: reqQty,
+                                          isIssueRequest: true,
+                                          issueStatus: 'Rejected',
+                                          processDetails: {
+                                            rawMaterialCode: matCode,
+                                            rawMaterialName: matName,
+                                            isWireRejection: true,
+                                            rejectedQty: reqQty,
+                                            rejectionReason: `Rejected Request: ${rawIssueRejectionNotes}`,
+                                            requestedBy: currentUser?.name || 'Raw Material Store Keeper',
+                                            urgency: 'High'
+                                          },
+                                          remarks: `🚫 Request Rejected & Stock Deducted: ${reqQty} KG of ${matCode}. Notes: ${rawIssueRejectionNotes}`
+                                        });
+                                      } catch (e) {
+                                        console.error("Non-fatal request rejection log error:", e);
+                                      }
+                                    }
                                     
                                     setActiveRawIssueRejectionId(null);
                                   }}
                                   disabled={!rawIssueRejectionNotes}
-                                  className="bg-rose-600 hover:bg-rose-500 text-white px-3 py-1.5 rounded text-[10px] font-bold disabled:opacity-40"
+                                  className="bg-rose-600 hover:bg-rose-500 text-white px-3 py-1.5 rounded text-[10px] font-bold disabled:opacity-40 cursor-pointer"
                                 >
-                                  Confirm Rejection
+                                  Confirm Rejection & Deduct Wire Stock
                                 </button>
                               </div>
                             </div>
@@ -3497,6 +3868,71 @@ Please adjust the quantity or request additional raw material issue.`);
                       );
                     })}
                   </AnimatePresence>
+                </div>
+              )}
+            </div>
+
+            {/* Wire Rejection & Stock Deductions Ledger */}
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm text-left">
+              <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4 flex items-center justify-between">
+                <span className="flex items-center gap-2 text-rose-600 dark:text-rose-400">
+                  🚫 Wire Rejections & Auto-Deductions Ledger
+                </span>
+                <span className="text-xs text-slate-400 font-mono">
+                  (Total Auto-Deducted: {movements
+                    .filter(m => m.fromDepartment === 'Raw Material Store' && (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection))
+                    .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0)
+                    .toLocaleString()} KG)
+                </span>
+              </h3>
+
+              {movements.filter(m => m.fromDepartment === 'Raw Material Store' && (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection)).length === 0 ? (
+                <div className="text-center py-6 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
+                  <p className="text-slate-400 text-xs font-mono">No wire rejections logged in current store records</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 dark:bg-slate-950 font-mono text-[9px] text-slate-500 uppercase tracking-widest border-b border-slate-200 dark:border-slate-800">
+                        <th className="py-2 px-3">Date</th>
+                        <th className="py-2 px-3">Material Code</th>
+                        <th className="py-2 px-3">Job / Ref No</th>
+                        <th className="py-2 px-3">Deducted Qty</th>
+                        <th className="py-2 px-3">Rejection Reason</th>
+                        <th className="py-2 px-3">Remarks / Inspector Notes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {movements
+                        .filter(m => m.fromDepartment === 'Raw Material Store' && (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection))
+                        .slice(0, 15)
+                        .map(m => (
+                          <tr key={m.movementId} className="border-b last:border-b-0 border-slate-100 dark:border-slate-850 hover:bg-slate-50/50">
+                            <td className="py-2.5 px-3 font-mono text-slate-400">
+                              {new Date(m.transferDate || Date.now()).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                              {m.processDetails?.rawMaterialCode || 'Wire Stock'}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono text-slate-600 dark:text-slate-300">
+                              {m.jobCardNo}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono font-extrabold text-rose-600 dark:text-rose-400">
+                              -{(m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0).toLocaleString()} KG
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-900/40">
+                                {m.processDetails?.rejectionReason || 'Wire Defect'}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-slate-500 max-w-xs truncate">
+                              {m.remarks || 'Direct wire quantity store rejection'}
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </div>

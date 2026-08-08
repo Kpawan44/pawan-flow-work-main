@@ -281,7 +281,7 @@ export function exportComprehensiveExcelBackup(
   // 11. Raw Material Stock & Demand
   const rmStockHeaders = [
     'Material Code', 'Material Name', 'Category', 'Bin Location',
-    'Starting Stock (KG)', 'Inwarded Stock (KG)', 'Total Issued (KG)',
+    'Starting Stock (KG)', 'Inwarded Stock (KG)', 'Total Issued (KG)', 'Total Rejected (KG)',
     'Current Stock (KG)', 'Reserve Status (%)'
   ];
   const rmStockRows = INVENTORY_RAW_MATERIALS.map(item => {
@@ -300,10 +300,18 @@ export function exportComprehensiveExcelBackup(
       )
       .reduce((sum, m) => sum + (m.quantity || 0), 0);
 
-    const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued);
+    const totalRejected = movements
+      .filter(m => 
+        m.fromDepartment === 'Raw Material Store' && 
+        (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
+        (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-'))
+      )
+      .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
+
+    const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
     return [
       item.code, item.name, item.category, item.location,
-      item.availableStock, totalPurchased, totalIssued, currentStock,
+      item.availableStock, totalPurchased, totalIssued, totalRejected, currentStock,
       Math.round(item.availableStock > 0 ? (currentStock / item.availableStock) * 100 : 0)
     ];
   });
