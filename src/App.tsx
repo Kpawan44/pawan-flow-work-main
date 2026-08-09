@@ -2161,19 +2161,19 @@ export default function App() {
                 </div>
 
                 {/* Main Category Tabs: Active Production vs Store & Dispatched */}
-                <div className="flex flex-wrap items-center gap-2 bg-slate-100 dark:bg-slate-850 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-800">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-slate-100 dark:bg-slate-850 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-800 w-full">
                   <button
                     type="button"
                     onClick={() => setAllOrdersStageTab('active')}
-                    className={`flex-1 min-w-[200px] py-2.5 px-4 rounded-xl font-bold text-xs font-sans transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                    className={`w-full sm:flex-1 py-2 sm:py-2.5 px-3 sm:px-4 rounded-xl font-bold text-xs font-sans transition-all flex items-center justify-center gap-2 cursor-pointer min-h-[42px] ${
                       allOrdersStageTab === 'active'
                         ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-sm border border-indigo-200/80 dark:border-indigo-800/60'
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                     }`}
                   >
-                    <Factory className="h-4 w-4 text-indigo-500" />
-                    <span className="font-extrabold uppercase tracking-wider text-[11px]">Active Production Line</span>
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                    <Factory className="h-4 w-4 text-indigo-500 shrink-0" />
+                    <span className="font-extrabold uppercase tracking-wider text-[10.5px] sm:text-[11px] text-center break-words">Active Production Line</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold shrink-0 ${
                       allOrdersStageTab === 'active' 
                         ? 'bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300' 
                         : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
@@ -2185,15 +2185,15 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setAllOrdersStageTab('store')}
-                    className={`flex-1 min-w-[200px] py-2.5 px-4 rounded-xl font-bold text-xs font-sans transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                    className={`w-full sm:flex-1 py-2 sm:py-2.5 px-3 sm:px-4 rounded-xl font-bold text-xs font-sans transition-all flex items-center justify-center gap-2 cursor-pointer min-h-[42px] ${
                       allOrdersStageTab === 'store'
                         ? 'bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 shadow-sm border border-emerald-200/80 dark:border-emerald-800/60'
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                     }`}
                   >
-                    <Warehouse className="h-4 w-4 text-emerald-500" />
-                    <span className="font-extrabold uppercase tracking-wider text-[11px]">Store & Dispatched Tab</span>
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                    <Warehouse className="h-4 w-4 text-emerald-500 shrink-0" />
+                    <span className="font-extrabold uppercase tracking-wider text-[10.5px] sm:text-[11px] text-center break-words">Store & Dispatched Tab</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold shrink-0 ${
                       allOrdersStageTab === 'store' 
                         ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300' 
                         : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
@@ -2205,22 +2205,22 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => setAllOrdersStageTab('all')}
-                    className={`py-2.5 px-4 rounded-xl font-bold text-xs font-sans transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                    className={`w-full sm:w-auto py-2 sm:py-2.5 px-3 sm:px-4 rounded-xl font-bold text-xs font-sans transition-all flex items-center justify-center gap-2 cursor-pointer min-h-[42px] ${
                       allOrdersStageTab === 'all'
                         ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-sm border border-slate-300 dark:border-slate-700'
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                     }`}
                   >
-                    <Layers className="h-4 w-4 text-slate-500" />
-                    <span className="font-extrabold uppercase tracking-wider text-[11px]">All Cards</span>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+                    <Layers className="h-4 w-4 text-slate-500 shrink-0" />
+                    <span className="font-extrabold uppercase tracking-wider text-[10.5px] sm:text-[11px] whitespace-nowrap">All Cards</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400 shrink-0">
                       {totalJobsCount}
                     </span>
                   </button>
                 </div>
 
                 {/* Grid search and filtration row */}
-                <div className="bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col gap-3 text-xs">
+                <div className="bg-white dark:bg-slate-900 p-3 sm:p-4 border border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col gap-3 text-xs">
                   <div className="flex flex-col lg:flex-row gap-3 items-center justify-between">
                     
                     {/* Search string */}
@@ -2245,39 +2245,39 @@ export default function App() {
                     </div>
 
                     {/* Scope Selector Tabs */}
-                    <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800/80 p-1 rounded-xl border border-slate-200 dark:border-slate-750 w-full lg:w-auto justify-center">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 sm:gap-1 bg-slate-100 dark:bg-slate-800/80 p-1.5 sm:p-1 rounded-xl border border-slate-200 dark:border-slate-750 w-full lg:w-auto justify-center">
                       <button
                         onClick={() => setAllOrdersSearchScope('all')}
-                        className={`px-3 py-1.5 rounded-lg text-[11px] font-bold font-sans transition cursor-pointer flex items-center gap-1.5 ${
+                        className={`w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-lg text-[11px] font-bold font-sans transition cursor-pointer flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-0 ${
                           allOrdersSearchScope === 'all'
                             ? 'bg-white dark:bg-slate-900 text-amber-600 dark:text-amber-400 shadow-xs'
                             : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                         }`}
                       >
-                        <Layers className="h-3.5 w-3.5" />
-                        <span>All Data ({filteredAllOrders.length + filteredMovements.length})</span>
+                        <Layers className="h-3.5 w-3.5 shrink-0" />
+                        <span className="text-center">All Data ({filteredAllOrders.length + filteredMovements.length})</span>
                       </button>
                       <button
                         onClick={() => setAllOrdersSearchScope('jobs')}
-                        className={`px-3 py-1.5 rounded-lg text-[11px] font-bold font-sans transition cursor-pointer flex items-center gap-1.5 ${
+                        className={`w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-lg text-[11px] font-bold font-sans transition cursor-pointer flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-0 ${
                           allOrdersSearchScope === 'jobs'
                             ? 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 shadow-xs'
                             : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                         }`}
                       >
-                        <FileText className="h-3.5 w-3.5" />
-                        <span>Job Cards ({filteredAllOrders.length})</span>
+                        <FileText className="h-3.5 w-3.5 shrink-0" />
+                        <span className="text-center">Job Cards ({filteredAllOrders.length})</span>
                       </button>
                       <button
                         onClick={() => setAllOrdersSearchScope('movements')}
-                        className={`px-3 py-1.5 rounded-lg text-[11px] font-bold font-sans transition cursor-pointer flex items-center gap-1.5 ${
+                        className={`w-full sm:w-auto px-3 py-2 sm:py-1.5 rounded-lg text-[11px] font-bold font-sans transition cursor-pointer flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-0 ${
                           allOrdersSearchScope === 'movements'
                             ? 'bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 shadow-xs'
                             : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
                         }`}
                       >
-                        <ArrowUpDown className="h-3.5 w-3.5" />
-                        <span>Material Movements ({filteredMovements.length})</span>
+                        <ArrowUpDown className="h-3.5 w-3.5 shrink-0" />
+                        <span className="text-center">Material Movements ({filteredMovements.length})</span>
                       </button>
                     </div>
 
@@ -2509,12 +2509,12 @@ export default function App() {
                             <React.Fragment key={j.jobCardNo}>
                               <tr 
                                 onClick={() => setExpandedJobCardNo(expandedJobCardNo === j.jobCardNo ? null : j.jobCardNo)}
-                                className={`group border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-slate-50/50 dark:hover:bg-slate-850/20 text-slate-700 dark:text-slate-300 ${isPendingHT ? 'bg-orange-50 dark:bg-orange-950/20' : ''} cursor-pointer`}
+                                className={`group border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-blue-50/80 dark:hover:bg-indigo-950/40 text-slate-700 dark:text-slate-300 ${isPendingHT ? 'bg-orange-50 dark:bg-orange-950/20' : ''} cursor-pointer transition-all duration-200 hover:shadow-xs`}
                               >
-                                <td className={`py-3 px-3 text-center w-12 min-w-[48px] max-w-[48px] shrink-0 transition-colors duration-150 ${
+                                <td className={`py-3 px-3 text-center w-12 min-w-[48px] max-w-[48px] shrink-0 transition-colors duration-200 ${
                                   freezeJobCardColumn 
-                                    ? 'sticky left-0 z-20 bg-white dark:bg-slate-900 group-hover:bg-slate-50 dark:group-hover:bg-slate-850/50' 
-                                    : 'bg-white dark:bg-slate-900 group-hover:bg-slate-50 dark:group-hover:bg-slate-850/50'
+                                    ? 'sticky left-0 z-20 bg-white dark:bg-slate-900 group-hover:bg-blue-50/80 dark:group-hover:bg-indigo-950/40' 
+                                    : 'bg-white dark:bg-slate-900 group-hover:bg-blue-50/80 dark:group-hover:bg-indigo-950/40'
                                 }`}>
                                   <input 
                                     type="checkbox"
@@ -2530,10 +2530,10 @@ export default function App() {
                                     className="rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5 cursor-pointer accent-indigo-600"
                                   />
                                 </td>
-                                <td className={`py-3 px-3 font-mono font-bold text-indigo-500 whitespace-nowrap w-32 min-w-[128px] max-w-[128px] shrink-0 transition-colors duration-150 ${
+                                <td className={`py-3 px-3 font-mono font-bold text-indigo-500 whitespace-nowrap w-32 min-w-[128px] max-w-[128px] shrink-0 transition-colors duration-200 ${
                                   freezeJobCardColumn 
-                                    ? 'sticky left-12 z-20 bg-white dark:bg-slate-900 group-hover:bg-slate-50 dark:group-hover:bg-slate-850/50 border-r-2 border-indigo-500/40 dark:border-indigo-500/60 shadow-[4px_0_12px_rgba(0,0,0,0.08)] dark:shadow-[4px_0_16px_rgba(0,0,0,0.4)]' 
-                                    : 'border-r border-slate-200 dark:border-slate-800/80'
+                                    ? 'sticky left-12 z-20 bg-white dark:bg-slate-900 group-hover:bg-blue-50/80 dark:group-hover:bg-indigo-950/40 border-r-2 border-indigo-500/40 dark:border-indigo-500/60 shadow-[4px_0_12px_rgba(0,0,0,0.08)] dark:shadow-[4px_0_16px_rgba(0,0,0,0.4)]' 
+                                    : 'border-r border-slate-200 dark:border-slate-800/80 group-hover:bg-blue-50/80 dark:group-hover:bg-indigo-950/40'
                                 }`}>
                                   <div className="flex items-center justify-between gap-1">
                                     <span className="font-mono font-bold">{j.jobCardNo}</span>

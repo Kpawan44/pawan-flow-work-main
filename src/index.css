@@ -57,6 +57,31 @@ body {
   border-color: #E9D5FF;
 }
 
+/* Optimized Table Rows (.group) for Dense Manufacturing Datasets */
+tr.group {
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+tr.group > td,
+tr.group > th,
+table .group > td,
+table .group > th {
+  padding-top: 0.5rem !important;    /* 8px vertical padding for high readability & density */
+  padding-bottom: 0.5rem !important;
+  padding-left: 0.75rem !important;  /* 12px horizontal padding */
+  padding-right: 0.75rem !important;
+  vertical-align: middle;
+  line-height: 1.35;
+}
+
+/* Ensure sticky frozen columns maintain uniform row height and vertical alignment */
+tr.group > td.sticky,
+tr.group > th.sticky,
+table .group > td.sticky,
+table .group > th.sticky {
+  vertical-align: middle;
+}
+
 /* @media print custom overrides for pristine physical page rendering */
 @media print {
   /* Override backgrounds to white and text to dark/high contrast, and disable flexbox layout constraints */

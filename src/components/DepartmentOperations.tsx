@@ -21,7 +21,11 @@ import {
   Layers,
   Scale,
   Box,
-  Link
+  Link,
+  ChevronDown,
+  ChevronUp,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType } from '../types';
 import { DBService } from '../lib/firebase';
@@ -159,6 +163,7 @@ export default function DepartmentOperations({
 
   const [rejectionNotes, setRejectionNotes] = useState('');
   const [activeRejectionId, setActiveRejectionId] = useState<string | null>(null);
+  const [showLinkedOutsourceDetails, setShowLinkedOutsourceDetails] = useState<boolean>(false);
 
   // Track material movements / job card custody acceptance animations
   const [acceptedMovementIds, setAcceptedMovementIds] = useState<Record<string, 'animating' | 'done'>>({});
@@ -1512,20 +1517,20 @@ Please adjust the quantity or request additional raw material issue.`);
 
         {/* Local operation tabs switcher */}
         {activeDept !== 'Dispatch' && (
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3.5 shrink-0 max-w-full">
+          <div className="flex flex-col md:flex-row md:items-center gap-3 shrink-0 w-full md:w-auto">
             {activeDept === 'Production' && (
-              <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full sm:w-auto">
                 <button
                   type="button"
                   onClick={() => {
                     setSelectedJobCardForRMRequest(null);
                     setShowRawMaterialRequestModal(true);
                   }}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-550 text-white rounded-lg font-bold text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-sm border border-indigo-500/30 cursor-pointer h-[38px] whitespace-nowrap"
+                  className="w-full sm:w-auto px-3.5 py-2 bg-indigo-600 hover:bg-indigo-550 text-white rounded-lg font-bold text-[11px] sm:text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-sm border border-indigo-500/30 cursor-pointer min-h-[40px]"
                 >
                   <span>🪵 Request Raw Materials</span>
                 </button>
-                <div className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 border h-[38px] ${
+                <div className={`w-full sm:w-auto px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 border min-h-[38px] ${
                   isRawMaterialCompulsory
                     ? 'bg-slate-800 text-slate-300 border-slate-700'
                     : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
@@ -1539,11 +1544,11 @@ Please adjust the quantity or request additional raw material issue.`);
                 </div>
               </div>
             )}
-            <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs text-slate-400 overflow-x-auto max-w-full">
+            <div className="flex flex-col sm:flex-row bg-slate-950 p-1.5 sm:p-1 rounded-xl border border-slate-800 text-xs text-slate-400 w-full md:w-auto gap-1">
               <button
                 onClick={() => setActiveSubView('incoming')}
-                className={`flex-1 md:flex-none px-4 py-2.5 lg:py-1.5 min-h-[44px] md:min-h-[36px] rounded-md font-bold transition-all relative whitespace-nowrap text-center flex items-center justify-center gap-1.5 cursor-pointer ${
-                  activeSubView === 'incoming' ? 'bg-slate-800 text-white shadow' : 'hover:text-white'
+                className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
+                  activeSubView === 'incoming' ? 'bg-slate-800 text-white shadow' : 'hover:text-white text-slate-400'
                 }`}
               >
                 <span>Incoming Ingress</span>
@@ -1555,16 +1560,16 @@ Please adjust the quantity or request additional raw material issue.`);
               </button>
               <button
                 onClick={() => setActiveSubView('operations')}
-                className={`flex-1 md:flex-none px-4 py-2.5 lg:py-1.5 min-h-[44px] md:min-h-[36px] rounded-md font-bold transition-all whitespace-nowrap text-center flex items-center justify-center cursor-pointer ${
-                  activeSubView === 'operations' ? 'bg-slate-800 text-white shadow' : 'hover:text-white'
+                className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
+                  activeSubView === 'operations' ? 'bg-slate-800 text-white shadow' : 'hover:text-white text-slate-400'
                 }`}
               >
                 Active Floor Jobs
               </button>
               <button
                 onClick={() => setActiveSubView('completed')}
-                className={`flex-1 md:flex-none px-4 py-2.5 lg:py-1.5 min-h-[44px] md:min-h-[36px] rounded-md font-bold transition-all whitespace-nowrap text-center flex items-center justify-center cursor-pointer ${
-                  activeSubView === 'completed' ? 'bg-slate-800 text-white shadow' : 'hover:text-white'
+                className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
+                  activeSubView === 'completed' ? 'bg-slate-800 text-white shadow' : 'hover:text-white text-slate-400'
                 }`}
               >
                 Completed Logs
@@ -1911,7 +1916,7 @@ Please adjust the quantity or request additional raw material issue.`);
                             </p>
                           </div>
                           
-                          <div className="flex items-center gap-1.5 shrink-0 self-end md:self-auto">
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 shrink-0 w-full sm:w-auto">
                             {job.currentDepartment === 'Dispatch' && job.status === 'Rejected' ? (
                               <button
                                 onClick={() => {
@@ -1919,7 +1924,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   setResendQty(job.currentQty || job.orderQty);
                                   setResendRemarks('Order resent to Production by Dispatch.');
                                 }}
-                                className="bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold py-1.5 px-3 rounded-md transition-all flex items-center gap-1 cursor-pointer"
+                                className="w-full sm:w-auto justify-center bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-bold py-2 sm:py-1.5 px-3 rounded-md transition-all flex items-center gap-1 cursor-pointer min-h-[38px] sm:min-h-0"
                               >
                                 <ArrowRight className="h-3.5 w-3.5" />
                                 Resend to Production
@@ -1930,13 +1935,13 @@ Please adjust the quantity or request additional raw material issue.`);
                                   setActiveDispJob(isClosing ? null : job.jobCardNo);
                                   setDispQty(job.currentQty);
                                 }}
-                                className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold py-1.5 px-3 rounded-md transition-all flex items-center gap-1 cursor-pointer"
+                                className="w-full sm:w-auto justify-center bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold py-2 sm:py-1.5 px-3 rounded-md transition-all flex items-center gap-1 cursor-pointer min-h-[38px] sm:min-h-0"
                               >
                                 <Truck className="h-3.5 w-3.5" />
                                 Invoice & Ship
                               </button>
                             ) : pendingIssueReq ? (
-                              <div className="flex items-center gap-1.5 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900 px-3 py-1.5 rounded-md font-mono text-[10px] font-bold">
+                              <div className="w-full sm:w-auto justify-center flex items-center gap-1.5 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900 px-3 py-2 sm:py-1.5 rounded-md font-mono text-[10px] font-bold">
                                 <span className="animate-pulse">⏳</span>
                                 Pending Store Issue ({pendingIssueReq.requestedQty} {pendingIssueReq.requestedUnit})
                               </div>
@@ -1948,12 +1953,12 @@ Please adjust the quantity or request additional raw material issue.`);
                                   setRequestUnit('KGS');
                                   setRequestRemarks('');
                                 }}
-                                className="bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold py-1.5 px-3 rounded-md transition-all flex items-center gap-1 cursor-pointer"
+                                className="w-full sm:w-auto justify-center bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold py-2 sm:py-1.5 px-3 rounded-md transition-all flex items-center gap-1 cursor-pointer min-h-[38px] sm:min-h-0"
                               >
                                 📩 Request Issue
                               </button>
                             ) : (
-                              <span className="text-[10px] bg-slate-100 text-slate-500 dark:bg-slate-850 px-2.5 py-1.5 rounded-full font-mono inline-flex items-center gap-1.5">
+                              <span className="text-[10px] bg-slate-100 text-slate-500 dark:bg-slate-850 px-2.5 py-1.5 rounded-full font-mono inline-flex items-center justify-center gap-1.5 w-full sm:w-auto">
                                 <span>Floor: {job.currentDepartment}</span>
                                 <JobStatusBadge status={job.status} size="xs" />
                               </span>
@@ -2285,12 +2290,63 @@ Please adjust the quantity or request additional raw material issue.`);
                   ))}
                 </select>
 
-                {selectedOutsourceOrderId && (
-                  <div className="text-[11px] text-purple-900 dark:text-purple-200 bg-purple-100/90 dark:bg-purple-900/60 px-2.5 py-1.5 rounded-lg flex items-center justify-between border border-purple-200 dark:border-purple-800">
-                    <span>Auto-filled details for <strong>{selectedOutsourceOrderId}</strong></span>
-                    <span className="font-bold text-purple-700 dark:text-purple-300">Target: {purchaseTargetDept}</span>
-                  </div>
-                )}
+                {selectedOutsourceOrderId && (() => {
+                  const linkedOrder = outsourceOrders.find(o => o.orderId === selectedOutsourceOrderId);
+                  return (
+                    <div className="space-y-2">
+                      <div className="text-[11px] text-purple-900 dark:text-purple-200 bg-purple-100/90 dark:bg-purple-900/60 px-2.5 py-1.5 rounded-lg flex items-center justify-between border border-purple-200 dark:border-purple-800">
+                        <span>Auto-filled details for <strong>{selectedOutsourceOrderId}</strong></span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold text-purple-700 dark:text-purple-300">Target: {purchaseTargetDept}</span>
+                          <button
+                            type="button"
+                            onClick={() => setShowLinkedOutsourceDetails(!showLinkedOutsourceDetails)}
+                            className="text-[10px] bg-white dark:bg-slate-900 px-2 py-0.5 rounded font-bold text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/80 transition flex items-center gap-1 cursor-pointer border border-purple-200 dark:border-purple-700"
+                          >
+                            {showLinkedOutsourceDetails ? (
+                              <>
+                                <span>Hide Details</span>
+                                <ChevronUp className="h-3 w-3" />
+                              </>
+                            ) : (
+                              <>
+                                <span>Unhide Details</span>
+                                <ChevronDown className="h-3 w-3" />
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {showLinkedOutsourceDetails && linkedOrder && (
+                        <div className="bg-white dark:bg-slate-900 border border-purple-200 dark:border-purple-800/80 rounded-xl p-3 text-xs space-y-1.5 shadow-xs">
+                          <div className="flex justify-between items-center font-bold text-purple-900 dark:text-purple-200">
+                            <span>Party: {linkedOrder.partyName}</span>
+                            <span className="text-purple-600 dark:text-purple-400 font-mono">{linkedOrder.orderQty} {linkedOrder.unit}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-[11px] text-slate-600 dark:text-slate-300">
+                            <span>Item: {linkedOrder.itemName} {linkedOrder.itemCode && `(${linkedOrder.itemCode})`}</span>
+                            <span className="font-bold text-indigo-600 dark:text-indigo-400">{linkedOrder.outsourceMaterialType}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-[11px] text-slate-500">
+                            <span>Process: {linkedOrder.processType}</span>
+                            <span>Status: <strong>{linkedOrder.status}</strong></span>
+                          </div>
+                          {linkedOrder.supplierName && (
+                            <div className="text-[11px] text-slate-500">
+                              Supplier: <strong>{linkedOrder.supplierName}</strong> {linkedOrder.supplierPoNo && `(PO: ${linkedOrder.supplierPoNo})`}
+                            </div>
+                          )}
+                          {linkedOrder.assignedToUserName && (
+                            <div className="text-[11px] text-slate-500">
+                              Assigned Purchaser: <strong>{linkedOrder.assignedToUserName}</strong>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               <div>
                 <label className="block text-slate-400 font-semibold mb-1">Supplier / Vendor Name</label>
@@ -2923,7 +2979,7 @@ Please adjust the quantity or request additional raw material issue.`);
                       </thead>
                       <tbody>
                         {completedDepartmentLogs.map(m => (
-                          <tr key={m.movementId} className="border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-slate-50/50">
+                          <tr key={m.movementId} className="group border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-blue-50/70 dark:hover:bg-slate-800/60 transition-all duration-200">
                             <td className="py-3 px-3 font-mono font-bold text-indigo-500">{m.jobCardNo}</td>
                             <td className="py-3 px-3 font-semibold">{m.toDepartment}</td>
                             <td className="py-3 px-3 font-mono font-semibold">{m.quantity} KG</td>
@@ -3908,7 +3964,7 @@ Please adjust the quantity or request additional raw material issue.`);
                         .filter(m => m.fromDepartment === 'Raw Material Store' && (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection))
                         .slice(0, 15)
                         .map(m => (
-                          <tr key={m.movementId} className="border-b last:border-b-0 border-slate-100 dark:border-slate-850 hover:bg-slate-50/50">
+                          <tr key={m.movementId} className="group border-b last:border-b-0 border-slate-100 dark:border-slate-850 hover:bg-blue-50/70 dark:hover:bg-slate-800/60 transition-all duration-200">
                             <td className="py-2.5 px-3 font-mono text-slate-400">
                               {new Date(m.transferDate || Date.now()).toLocaleDateString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
                             </td>
@@ -5034,7 +5090,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     </thead>
                     <tbody>
                       {completedDepartmentLogs.map(m => (
-                        <tr key={m.movementId} className="border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-slate-50/50">
+                        <tr key={m.movementId} className="group border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-blue-50/70 dark:hover:bg-slate-800/60 transition-all duration-200">
                           <td className="py-3 px-3 font-mono font-bold text-indigo-500">{m.jobCardNo}</td>
                           <td className="py-3 px-3 font-semibold">{m.toDepartment}</td>
                           <td className="py-3 px-3 font-mono font-semibold">{m.quantity} KG</td>
