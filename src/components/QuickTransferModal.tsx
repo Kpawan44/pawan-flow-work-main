@@ -46,8 +46,16 @@ export default function QuickTransferModal({
   ];
 
   // Helper to determine the next logical department step
-  const getNextLogicalDepartment = (from: Department, htRequired: boolean): Department | 'Completed' => {
-    if (from === 'Purchase') return 'Store';
+  const getNextLogicalDepartment = (from: Department, htRequired: boolean, jCard?: JobCard | null): Department | 'Completed' => {
+    if (from === 'Purchase') {
+      const matType = jCard?.materialType || jCard?.outsourceDetails?.outsourceMaterialType;
+      if (matType === 'Finished Goods') {
+        return 'Packing';
+      } else {
+        // Semi-Finished Goods or Default Purchase Inward
+        return htRequired ? 'Heat Treatment' : 'Production';
+      }
+    }
     if (from === 'Production') return htRequired ? 'Heat Treatment' : 'Plating';
     if (from === 'Heat Treatment') return 'Plating';
     if (from === 'Plating') return 'Packing';
@@ -71,7 +79,7 @@ export default function QuickTransferModal({
     setFromDept(initialFromDept);
 
     // Pre-fill "To" department based on logical step
-    const nextTarget = getNextLogicalDepartment(initialFromDept, jobCard.heatTreatmentRequired);
+    const nextTarget = getNextLogicalDepartment(initialFromDept, jobCard.heatTreatmentRequired, jobCard);
     setToDept(nextTarget);
 
     // Calculate initial quantity based on department metrics
@@ -104,7 +112,7 @@ export default function QuickTransferModal({
   const handleFromDeptChange = (selectedFrom: Department) => {
     setFromDept(selectedFrom);
     if (jobCard) {
-      const nextTarget = getNextLogicalDepartment(selectedFrom, jobCard.heatTreatmentRequired);
+      const nextTarget = getNextLogicalDepartment(selectedFrom, jobCard.heatTreatmentRequired, jobCard);
       setToDept(nextTarget);
 
       const m = getJobCardProcessMetrics(jobCard, movements);

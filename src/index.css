@@ -58,8 +58,37 @@ body {
 }
 
 /* Optimized Table Rows (.group) for Dense Manufacturing Datasets */
-tr.group {
+tr.group,
+table .group,
+tr.group > td,
+tr.group > th,
+table .group > td,
+table .group > th {
   transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+tr.group:hover,
+table .group:hover,
+tr.group:hover > td,
+tr.group:hover > th,
+table .group:hover > td,
+table .group:hover > th {
+  background-color: #EEF2FF !important; /* Light indigo-50 tint for light mode tracking */
+}
+
+.dark tr.group:hover,
+.dark table .group:hover,
+.dark tr.group:hover > td,
+.dark tr.group:hover > th,
+.dark table .group:hover > td,
+.dark table .group:hover > th,
+:where(.dark, .dark *) tr.group:hover,
+:where(.dark, .dark *) table .group:hover,
+:where(.dark, .dark *) tr.group:hover > td,
+:where(.dark, .dark *) tr.group:hover > th,
+:where(.dark, .dark *) table .group:hover > td,
+:where(.dark, .dark *) table .group:hover > th {
+  background-color: #1E1B4B !important; /* Subtle indigo-950 dark tint for dark mode tracking */
 }
 
 tr.group > td,

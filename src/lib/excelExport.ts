@@ -167,6 +167,45 @@ export function exportComprehensiveExcelBackup(
   const wsPacking = XLSX.utils.aoa_to_sheet([packingHeaders, ...packingRows]);
   XLSX.utils.book_append_sheet(wb, wsPacking, '7. Packaging Weights');
 
+  // 7b. Incoming Store Report
+  const incomingCards = jobCards.filter(c => 
+    c.currentDepartment === 'Purchase' || 
+    c.processType === 'Purchase' || 
+    c.status === 'Stored' || 
+    !!c.purchaseDetails ||
+    movements.some(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && (m.toDepartment === 'Purchase' || (m.toDepartment === 'Store' && m.fromDepartment === 'Purchase')))
+  );
+
+  const incomingHeaders = [
+    'Job Card No', 'Order/PO No', 'Supplier/Party', 'Item Name', 'Item Code',
+    'Material Type', 'Received Qty', 'Unit', 'Bill/Invoice No', 'Location Bin', 'Current Dept', 'Status', 'Date'
+  ];
+  const incomingRows = incomingCards.map(c => {
+    const storeMovs = movements.filter(mov => 
+      mov.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && 
+      (mov.toDepartment === 'Purchase' || mov.fromDepartment === 'Purchase' || mov.toDepartment === 'Store')
+    );
+    const latestMov = storeMovs[storeMovs.length - 1];
+
+    return [
+      c.jobCardNo,
+      c.orderNo || c.purchaseDetails?.billNo || 'N/A',
+      c.partyName || c.purchaseDetails?.supplierName || 'N/A',
+      c.itemName,
+      c.itemCode || 'N/A',
+      c.materialType || c.processType || 'Purchase Inward',
+      c.currentQty || c.orderQty || 0,
+      c.unit || 'KG',
+      c.purchaseDetails?.billNo || 'N/A',
+      latestMov?.allottedLocation || c.storeDetails?.locationBin || 'Purchase Buffer',
+      c.currentDepartment,
+      c.status || 'Stored',
+      c.createdAt
+    ];
+  });
+  const wsIncomingStore = XLSX.utils.aoa_to_sheet([incomingHeaders, ...incomingRows]);
+  XLSX.utils.book_append_sheet(wb, wsIncomingStore, '7b. Incoming Store Report');
+
   // 8. Store & Warehousing Report
   const storeHeaders = [
     'Job Card No', 'Party Name', 'Item Name', 'Bin Location', 'Rack No',

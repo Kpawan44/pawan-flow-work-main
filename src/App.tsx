@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Factory, 
@@ -456,7 +456,44 @@ export default function App() {
   const [allOrdersStageTab, setAllOrdersStageTab] = useState<'active' | 'store' | 'all'>('active');
   const [allOrdersDeptFilter, setAllOrdersDeptFilter] = useState<string>('All');
   const [allOrdersStatusFilter, setAllOrdersStatusFilter] = useState<string>('All');
+  const [allOrdersPersonFilter, setAllOrdersPersonFilter] = useState<string>('All');
+  const [allOrdersPartyFilter, setAllOrdersPartyFilter] = useState<string>('All');
+  const [allOrdersOrderNoFilter, setAllOrdersOrderNoFilter] = useState<string>('All');
   const [allOrdersMyDeptOnly, setAllOrdersMyDeptOnly] = useState(false);
+
+  // Computed unique option lists for filters
+  const uniqueParties = useMemo(() => {
+    return Array.from(new Set(jobCards.map(j => j.partyName).filter(Boolean))).sort();
+  }, [jobCards]);
+
+  const uniquePersons = useMemo(() => {
+    const set = new Set<string>();
+    jobCards.forEach(j => {
+      if (j.createdBy) set.add(j.createdBy);
+      if (j.operatorName) set.add(j.operatorName);
+      if (j.assignedToUserName) set.add(j.assignedToUserName);
+      if (j.productionDetails?.operatorName) set.add(j.productionDetails.operatorName);
+      if (j.purchaseDetails?.supplierName) set.add(j.purchaseDetails.supplierName);
+      if (j.outsourceDetails?.poPlacedByUserName) set.add(j.outsourceDetails.poPlacedByUserName);
+      if (j.outsourceDetails?.supplierName) set.add(j.outsourceDetails.supplierName);
+    });
+    movements.forEach(m => {
+      if (m.transferBy) set.add(m.transferBy);
+      if (m.acceptedBy) set.add(m.acceptedBy);
+    });
+    return Array.from(set).sort();
+  }, [jobCards, movements]);
+
+  const uniqueOrderNos = useMemo(() => {
+    const set = new Set<string>();
+    jobCards.forEach(j => {
+      if (j.orderNo) set.add(j.orderNo);
+      if (j.outsourceOrderId) set.add(j.outsourceOrderId);
+      if (j.outsourceDetails?.poNumber) set.add(j.outsourceDetails.poNumber);
+      if (j.purchaseDetails?.billNo) set.add(j.purchaseDetails.billNo);
+    });
+    return Array.from(set).sort();
+  }, [jobCards]);
   const [mobileSortBy, setMobileSortBy] = useState<'Priority' | 'Newest' | 'Department'>('Priority');
   const [mobileViewMode, setMobileViewMode] = useState<'cards' | 'table'>('cards');
   const [freezeJobCardColumn, setFreezeJobCardColumn] = useState<boolean>(true);
@@ -1177,7 +1214,41 @@ export default function App() {
   ) => {
     if (!currentUser) return;
     try {
+      const mov = movements.find(m => m.movementId === movementId);
+
       await DBService.acceptMovement(movementId, currentUser.userId, currentUser.name, remarks, extraFields);
+
+      // Conditional logic: If a job card movement is received/transferred from the Purchase Department,
+      // inspect its 'itemFinished' status to automatically set the next currentDepartment to either 'Packing' or 'Production'/'Heat Treatment'.
+      if (mov && (mov.fromDepartment === 'Purchase' || mov.toDepartment === 'Purchase')) {
+        const card = jobCards.find(j => j.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
+        if (card) {
+          const isItemFinished = Boolean(
+            (card as any).itemFinished ||
+            (mov as any).itemFinished ||
+            card.materialType === 'Finished Goods' ||
+            card.receivedMaterialType === 'Finished Goods' ||
+            card.outsourceDetails?.outsourceMaterialType === 'Finished Goods'
+          );
+
+          const nextDepartment: Department = isItemFinished
+            ? 'Packing'
+            : (card.heatTreatmentRequired ? 'Heat Treatment' : 'Production');
+
+          if (mov.fromDepartment === 'Purchase') {
+            await DBService.updateJobCard(
+              card.jobCardNo,
+              {
+                currentDepartment: nextDepartment,
+                status: nextDepartment === 'Production' ? 'Pending' : 'In Process'
+              },
+              currentUser.userId,
+              currentUser.name
+            );
+          }
+        }
+      }
+
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to accept movement", err);
@@ -1433,8 +1504,57 @@ export default function App() {
   // --- FILTERS LOGIC FOR ALL JOB CARDS VIEW & MATERIAL MOVEMENTS ---
   const getFilteredAllOrdersList = () => {
     const q = allOrdersSearch.trim().toLowerCase();
+    const personQ = allOrdersPersonFilter.trim().toLowerCase();
+    const partyQ = allOrdersPartyFilter.trim().toLowerCase();
+    const orderQ = allOrdersOrderNoFilter.trim().toLowerCase();
+
     return jobCards.filter(j => {
-      // 1. Search term match (checks Job Card fields & associated movements)
+      // 1. Filter by Person's Name
+      let personMatch = true;
+      if (personQ && personQ !== 'all') {
+        const persons = [
+          j.createdBy,
+          j.operatorName,
+          j.productionDetails?.operatorName,
+          j.assignedToUserName,
+          j.outsourceDetails?.poPlacedByUserName,
+          j.outsourceDetails?.receivedByUserName,
+          j.purchaseDetails?.supplierName,
+          j.outsourceDetails?.supplierName,
+          j.outsourceDetails?.assignedToUserName,
+        ].filter((val): val is string => Boolean(val)).map(s => s.toLowerCase());
+
+        const movementPersons = movements
+          .filter(m => m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase())
+          .flatMap(m => [m.transferBy, m.acceptedBy])
+          .filter((val): val is string => Boolean(val))
+          .map(s => s.toLowerCase());
+
+        const allPersons = [...persons, ...movementPersons];
+        personMatch = allPersons.some(p => p.includes(personQ));
+      }
+
+      // 2. Filter by Customer / Party Name
+      let partyMatch = true;
+      if (partyQ && partyQ !== 'all') {
+        partyMatch = j.partyName.toLowerCase().includes(partyQ);
+      }
+
+      // 3. Filter by Place Orders / Order No
+      let orderMatch = true;
+      if (orderQ && orderQ !== 'all') {
+        const orderRefs = [
+          j.orderNo,
+          j.jobCardNo,
+          j.outsourceOrderId,
+          j.outsourceDetails?.poNumber,
+          j.purchaseDetails?.billNo
+        ].filter((val): val is string => Boolean(val)).map(s => s.toLowerCase());
+
+        orderMatch = orderRefs.some(o => o.includes(orderQ));
+      }
+
+      // 4. Search term match (checks Job Card fields, persons, orders, & associated movements)
       let searchMatch = !q;
       if (q) {
         const matchesBasic = 
@@ -1446,7 +1566,13 @@ export default function App() {
           j.status.toLowerCase().includes(q) ||
           (j.orderNo && j.orderNo.toLowerCase().includes(q)) ||
           (j.materialType && j.materialType.toLowerCase().includes(q)) ||
-          (j.createdBy && j.createdBy.toLowerCase().includes(q));
+          (j.createdBy && j.createdBy.toLowerCase().includes(q)) ||
+          (j.operatorName && j.operatorName.toLowerCase().includes(q)) ||
+          (j.productionDetails?.operatorName && j.productionDetails.operatorName.toLowerCase().includes(q)) ||
+          (j.assignedToUserName && j.assignedToUserName.toLowerCase().includes(q)) ||
+          (j.purchaseDetails?.supplierName && j.purchaseDetails.supplierName.toLowerCase().includes(q)) ||
+          (j.purchaseDetails?.billNo && j.purchaseDetails.billNo.toLowerCase().includes(q)) ||
+          (j.outsourceDetails?.poNumber && j.outsourceDetails.poNumber.toLowerCase().includes(q));
 
         // Also check if any associated material movement matches the search term
         const matchesMovement = movements.some(m => 
@@ -1463,7 +1589,7 @@ export default function App() {
         searchMatch = matchesBasic || matchesMovement;
       }
 
-      // 2. Stage Group (Active Production Line vs Store & Dispatched Tab)
+      // 5. Stage Group (Active Production Line vs Store & Dispatched Tab)
       const isAtStore = j.currentDepartment === 'Store' || j.currentDepartment === 'Completed' || j.currentDepartment === 'Dispatch' || j.status === 'Completed';
       let stageMatch = true;
       if (allOrdersStageTab === 'active') {
@@ -1472,26 +1598,36 @@ export default function App() {
         stageMatch = isAtStore;
       }
 
-      // 3. Department
+      // 6. Department
       const deptMatch = allOrdersDeptFilter === 'All' || j.currentDepartment === allOrdersDeptFilter;
 
-      // 4. Status
+      // 7. Status
       const statusMatch = allOrdersStatusFilter === 'All' || j.status === allOrdersStatusFilter;
 
-      // 5. My Department Only
+      // 8. My Department Only
+      const userAuthorizedDepts = [
+        currentUser?.department,
+        ...(currentUser?.accessList || []),
+        ...(currentUser?.allowedDepartments || [])
+      ];
       const myDeptMatch = !allOrdersMyDeptOnly || (
         currentUser && (
           currentUser.department === 'Admin' || 
-          j.currentDepartment === currentUser.department
+          currentUser.role === 'super_admin' ||
+          userAuthorizedDepts.includes(j.currentDepartment as Department)
         )
       );
 
-      return searchMatch && stageMatch && deptMatch && statusMatch && myDeptMatch;
+      return personMatch && partyMatch && orderMatch && searchMatch && stageMatch && deptMatch && statusMatch && myDeptMatch;
     });
   };
 
   const getFilteredMovementsList = () => {
     const q = allOrdersSearch.trim().toLowerCase();
+    const personQ = allOrdersPersonFilter.trim().toLowerCase();
+    const partyQ = allOrdersPartyFilter.trim().toLowerCase();
+    const orderQ = allOrdersOrderNoFilter.trim().toLowerCase();
+
     const jobCardMap = new Map<string, JobCard>();
     jobCards.forEach(j => jobCardMap.set(j.jobCardNo.toLowerCase(), j));
 
@@ -1517,16 +1653,44 @@ export default function App() {
       }
 
       // 3. My Department Only
+      const userAuthorizedDepts = [
+        currentUser?.department,
+        ...(currentUser?.accessList || []),
+        ...(currentUser?.allowedDepartments || [])
+      ];
       const myDeptMatch = !allOrdersMyDeptOnly || (
         currentUser && (
           currentUser.department === 'Admin' ||
-          m.fromDepartment === currentUser.department ||
-          m.toDepartment === currentUser.department
+          currentUser.role === 'super_admin' ||
+          userAuthorizedDepts.includes(m.fromDepartment as Department) ||
+          userAuthorizedDepts.includes(m.toDepartment as Department)
         )
       );
 
-      // 4. Search query match
-      if (!q) return deptMatch && statusMatch && myDeptMatch;
+      // 4. Person filter
+      let personMatch = true;
+      if (personQ && personQ !== 'all') {
+        const movementPersons = [m.transferBy, m.acceptedBy, parentJob?.createdBy, parentJob?.operatorName, parentJob?.assignedToUserName]
+          .filter((val): val is string => Boolean(val))
+          .map(s => s.toLowerCase());
+        personMatch = movementPersons.some(p => p.includes(personQ));
+      }
+
+      // 5. Party filter
+      let partyMatch = true;
+      if (partyQ && partyQ !== 'all' && parentJob) {
+        partyMatch = parentJob.partyName.toLowerCase().includes(partyQ);
+      }
+
+      // 6. Order No filter
+      let orderMatch = true;
+      if (orderQ && orderQ !== 'all') {
+        const orderRefs = [parentJob?.orderNo, m.jobCardNo, m.movementId].filter((val): val is string => Boolean(val)).map(s => s.toLowerCase());
+        orderMatch = orderRefs.some(o => o.includes(orderQ));
+      }
+
+      // 7. Search query match
+      if (!q) return deptMatch && statusMatch && myDeptMatch && personMatch && partyMatch && orderMatch;
 
       const searchMatch =
         m.movementId.toLowerCase().includes(q) ||
@@ -1540,10 +1704,11 @@ export default function App() {
         (parentJob && (
           parentJob.partyName.toLowerCase().includes(q) ||
           parentJob.itemName.toLowerCase().includes(q) ||
-          parentJob.itemCode.toLowerCase().includes(q)
+          parentJob.itemCode.toLowerCase().includes(q) ||
+          (parentJob.orderNo && parentJob.orderNo.toLowerCase().includes(q))
         ));
 
-      return searchMatch && deptMatch && statusMatch && myDeptMatch;
+      return searchMatch && deptMatch && statusMatch && myDeptMatch && personMatch && partyMatch && orderMatch;
     });
   };
 
@@ -2096,6 +2261,7 @@ export default function App() {
               onAcceptMovement={handleAcceptMovement}
               onRejectMovement={handleRejectMovement}
               onSelectJobCard={setSelectedJob}
+              onQuickTransfer={(j) => setQuickTransferJob(j)}
             />
           )}
 
@@ -2288,6 +2454,43 @@ export default function App() {
                         <span className="text-slate-400 text-[11px] uppercase font-bold">Filters</span>
                       </div>
                       
+                      {/* Custom Specific Filters: Party, Person, Order No */}
+                      <select
+                        value={allOrdersPartyFilter}
+                        onChange={(e) => setAllOrdersPartyFilter(e.target.value)}
+                        className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none max-w-[150px] truncate"
+                        title="Filter by Customer / Party Name"
+                      >
+                        <option value="All">🏢 Customer: All</option>
+                        {uniqueParties.map(p => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={allOrdersPersonFilter}
+                        onChange={(e) => setAllOrdersPersonFilter(e.target.value)}
+                        className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none max-w-[150px] truncate"
+                        title="Filter by Person's Name (Operator / Creator / Assignee)"
+                      >
+                        <option value="All">👤 Person: All</option>
+                        {uniquePersons.map(p => (
+                          <option key={p} value={p}>{p}</option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={allOrdersOrderNoFilter}
+                        onChange={(e) => setAllOrdersOrderNoFilter(e.target.value)}
+                        className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none max-w-[150px] truncate"
+                        title="Filter by Order No / Order Ref"
+                      >
+                        <option value="All">📑 Order: All</option>
+                        {uniqueOrderNos.map(o => (
+                          <option key={o} value={o}>{o}</option>
+                        ))}
+                      </select>
+
                       <select
                         value={allOrdersDeptFilter}
                         onChange={(e) => setAllOrdersDeptFilter(e.target.value)}
@@ -2328,6 +2531,25 @@ export default function App() {
                           My Dept Only {currentUser?.department && currentUser.department !== 'Admin' ? `(${currentUser.department})` : ''}
                         </span>
                       </label>
+
+                      {(allOrdersPersonFilter !== 'All' || allOrdersPartyFilter !== 'All' || allOrdersOrderNoFilter !== 'All' || allOrdersDeptFilter !== 'All' || allOrdersStatusFilter !== 'All' || allOrdersSearch || allOrdersMyDeptOnly) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAllOrdersSearch('');
+                            setAllOrdersPersonFilter('All');
+                            setAllOrdersPartyFilter('All');
+                            setAllOrdersOrderNoFilter('All');
+                            setAllOrdersDeptFilter('All');
+                            setAllOrdersStatusFilter('All');
+                            setAllOrdersMyDeptOnly(false);
+                          }}
+                          className="px-2.5 py-1.5 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 hover:bg-red-100 rounded-lg text-[11px] font-bold transition-all border border-red-200 dark:border-red-800 flex items-center gap-1 cursor-pointer"
+                        >
+                          <X className="h-3 w-3" />
+                          <span>Reset</span>
+                        </button>
+                      )}
                     </div>
                   </div>
 

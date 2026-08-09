@@ -372,11 +372,48 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       if (mainItem.jobCardNo) orderPayload.jobCardNo = mainItem.jobCardNo;
       if (dispatchRemarks && dispatchRemarks.trim()) orderPayload.dispatchRemarks = dispatchRemarks.trim();
 
-      await DBService.createOutsourceOrder(
+      const newOrder = await DBService.createOutsourceOrder(
         orderPayload,
         currentUser?.userId || 'u-dispatch',
         currentUser?.name || 'Dispatch Person'
       );
+
+      // Route all referenced job cards to Purchase department for outsourcing
+      for (const item of itemsList) {
+        if (item.jobCardNo) {
+          try {
+            const card = jobCards.find(j => j.jobCardNo === item.jobCardNo);
+            const fromDept = card?.currentDepartment || 'Production';
+
+            await DBService.updateJobCard(
+              item.jobCardNo,
+              {
+                currentDepartment: 'Purchase',
+                isOutsource: true,
+                outsourceOrderId: newOrder.orderId,
+                outsourceStatus: 'Assigned'
+              },
+              currentUser?.userId || 'u-dispatch',
+              currentUser?.name || 'Dispatch Person'
+            );
+
+            await DBService.createMovement(
+              {
+                jobCardNo: item.jobCardNo,
+                fromDepartment: fromDept,
+                toDepartment: 'Purchase',
+                quantity: item.orderQty || card?.currentQty || 0,
+                transferBy: currentUser?.name || 'Outsource Initiator',
+                remarks: `Transferred internal job card to Purchase for External Process (${item.processType || mainItem.processType}). Outsource Order ID: ${newOrder.orderId}`
+              },
+              currentUser?.userId || 'u-dispatch',
+              currentUser?.name || 'Dispatch Person'
+            );
+          } catch (err) {
+            console.warn(`Could not update job card ${item.jobCardNo} to Purchase department:`, err);
+          }
+        }
+      }
 
       showToast(`Outsource order placed with ${itemsList.length} item(s) & assigned to ${assignee.name}`, 'success');
       setShowCreateModal(false);
@@ -503,7 +540,7 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
 
     // Default destination department based on material type and process
     if (order.outsourceMaterialType === 'Finished Goods') {
-      setTargetDepartmentAfterReceipt('Store');
+      setTargetDepartmentAfterReceipt('Packing');
     } else {
       const proc = (order.processType || '').toLowerCase();
       if (proc.includes('plat')) {
@@ -519,13 +556,15 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
   const handleReceiptMaterialTypeChange = (type: 'Semi Finished Goods' | 'Finished Goods') => {
     setReceivedMaterialType(type);
     if (type === 'Finished Goods') {
-      setTargetDepartmentAfterReceipt('Store');
+      setTargetDepartmentAfterReceipt('Packing');
     } else {
       const proc = (receiptModalOrder?.processType || '').toLowerCase();
       if (proc.includes('plat')) {
         setTargetDepartmentAfterReceipt('Plating');
-      } else {
+      } else if (proc.includes('heat') || proc.includes('treat')) {
         setTargetDepartmentAfterReceipt('Heat Treatment');
+      } else {
+        setTargetDepartmentAfterReceipt('Production');
       }
     }
   };
@@ -562,6 +601,34 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
         currentUser?.userId || 'u-purchase',
         currentUser?.name || 'Purchase Received'
       );
+
+      // Update associated Job Card(s) route & status
+      const cardNosToUpdate = new Set<string>();
+      if (receiptModalOrder.jobCardNo) {
+        cardNosToUpdate.add(receiptModalOrder.jobCardNo);
+      }
+      if (receiptModalOrder.items) {
+        receiptModalOrder.items.forEach(it => {
+          if (it.jobCardNo) cardNosToUpdate.add(it.jobCardNo);
+        });
+      }
+
+      for (const jcNo of cardNosToUpdate) {
+        try {
+          await DBService.updateJobCard(
+            jcNo,
+            {
+              currentDepartment: targetDepartmentAfterReceipt,
+              outsourceStatus: 'Completed',
+              materialType: receivedMaterialType
+            },
+            currentUser?.userId || 'u-purchase',
+            currentUser?.name || 'Purchase Received'
+          );
+        } catch (cardErr) {
+          console.warn(`Could not update job card ${jcNo} department:`, cardErr);
+        }
+      }
 
       // Create material movement / log transfer from Purchase to target department
       await DBService.createMovement(
@@ -2121,22 +2188,27 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
                 >
                   {receivedMaterialType === 'Finished Goods' ? (
                     <>
+                      <option value="Packing">Packing (Final Packing & Inspection)</option>
                       <option value="Store">Store (Finished Goods Warehouse / Stock)</option>
                       <option value="Dispatch">Dispatch (Ready for Direct Customer Shipment)</option>
+                      <option value="Purchase">Purchase Incoming Store (Hold in Purchase & Send Later)</option>
                     </>
                   ) : (
                     <>
+                      <option value="Production">Production (Machining / Shop Floor Work)</option>
                       <option value="Heat Treatment">Heat Treatment (Furnace / Hardening / Annealing)</option>
                       <option value="Plating">Plating (Surface Coating / Zinc / Nickel)</option>
-                      <option value="Production">Production (Machining / Shop Floor Work)</option>
                       <option value="Store">Store (Semi-Finished Buffer Storage)</option>
+                      <option value="Purchase">Purchase Incoming Store (Hold in Purchase & Send Later)</option>
                     </>
                   )}
                 </select>
                 <p className="text-[10px] text-slate-600 dark:text-slate-400 leading-tight">
-                  {receivedMaterialType === 'Finished Goods'
-                    ? 'Finished goods accepted from vendor will be transferred directly to Store.'
-                    : `Semi-finished goods accepted from vendor will be routed to ${targetDepartmentAfterReceipt} for subsequent processing.`}
+                  {targetDepartmentAfterReceipt === 'Purchase'
+                    ? 'Material will be stored in Purchase Incoming Store. Purchase team can transfer it later for further processing whenever needed.'
+                    : (receivedMaterialType === 'Finished Goods'
+                      ? 'Finished goods accepted from vendor will be routed directly to Packing/Store for final inspection and packing.'
+                      : `Semi-finished goods accepted from vendor will be routed to ${targetDepartmentAfterReceipt} for subsequent processing.`)}
                 </p>
               </div>
 

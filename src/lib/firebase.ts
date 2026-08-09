@@ -275,18 +275,24 @@ const defaultSavedItems: SavedItem[] = [
     id: 'item-1',
     itemName: 'Grade 8 High-Tensile Bolt M12',
     itemCode: 'BOLT-M12-G8',
+    partyName: 'Apex Engineering Solutions',
+    customerName: 'Apex Engineering Solutions',
     createdAt: new Date().toISOString()
   },
   {
     id: 'item-2',
     itemName: 'Engine Valve Gear Shaft',
     itemCode: 'SHAFT-EVG-102',
+    partyName: 'Titan Dynamics Ltd',
+    customerName: 'Titan Dynamics Ltd',
     createdAt: new Date().toISOString()
   },
   {
     id: 'item-3',
     itemName: 'Industrial Galvanized Washer',
     itemCode: 'WASH-GALV-50',
+    partyName: 'Apex Engineering Solutions',
+    customerName: 'Apex Engineering Solutions',
     createdAt: new Date().toISOString()
   }
 ];
@@ -546,6 +552,7 @@ function setLocalStorageItem<T>(key: string, value: T) {
 // Unified API for direct retrieval (works for both modes, defaulting to local persistence during preview)
 export class DBService {
   private static seedingPromise: Promise<void> | null = null;
+  private static isSeededInSession = false;
 
   static isOfflineMode(): boolean {
     return !navigator.onLine || isFirestoreOffline || localStorage.getItem('mfr_force_offline') === 'true';
@@ -556,13 +563,14 @@ export class DBService {
   }
 
   static async ensureSeeded(): Promise<void> {
-    if (!useRealFirebase || !db || this.isOfflineMode()) return;
+    if (!useRealFirebase || !db || this.isOfflineMode() || this.isSeededInSession) return;
     if (this.seedingPromise) return this.seedingPromise;
 
     this.seedingPromise = (async () => {
       try {
         const seededRef = doc(db, 'mfr_company_config', 'seeded');
         const snap = await withTimeout(getDoc(seededRef), 3500);
+        this.isSeededInSession = true;
         if (snap.exists()) {
           return;
         }
@@ -636,15 +644,18 @@ export class DBService {
         console.log("Seeding process completed cleanly.");
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
+        const lowerMsg = errMsg.toLowerCase();
         const isOffline = 
-          errMsg.includes('offline') || 
-          errMsg.includes('Failed to get document because the client is offline') || 
-          errMsg.includes('unavailable') ||
-          errMsg.includes('could not be reached') ||
-          errMsg.includes('network');
+          lowerMsg.includes('offline') || 
+          lowerMsg.includes('failed to get document because the client is offline') || 
+          lowerMsg.includes('unavailable') ||
+          lowerMsg.includes('could not be reached') ||
+          lowerMsg.includes('fallback mode') ||
+          lowerMsg.includes('network') ||
+          lowerMsg.includes('timeout');
           
         if (isOffline) {
-          console.info("[Offline Mode] Firestore seeding deferred. High-fidelity pre-seeded data is active in local storage fallback.");
+          console.info("[Offline Mode] Firestore seeding deferred. Local pre-seeded data is active.");
         } else {
           console.warn("Seeding process bypassed or deferred due to network/permissions:", err);
         }
@@ -1051,7 +1062,7 @@ export class DBService {
     
     // Automatically save item name and code to master list
     try {
-      await this.saveItem(job.itemName, job.itemCode);
+      await this.saveItem(job.itemName, job.itemCode, job.partyName);
     } catch (saveErr) {
       console.warn("Failed to automatically save item:", saveErr);
     }
@@ -1154,10 +1165,10 @@ export class DBService {
     }
     setLocalStorageItem('mfr_job_cards', cards);
 
-    // 2. Physical Firestore write
-    for (const jobCardNo of jobCardNos) {
+    // 2. Physical Firestore write in parallel background batch
+    const writePromises = jobCardNos.map(jobCardNo => {
       const updates = { status: newStatus, completed: isCompleted };
-      await this.tryPhysicalWrite(
+      return this.tryPhysicalWrite(
         'Bulk Update Job Card Status',
         `Bulk status update for ${jobCardNo} to ${newStatus}`,
         [
@@ -1179,7 +1190,8 @@ export class DBService {
           }
         }
       );
-    }
+    });
+    Promise.all(writePromises).catch(err => console.warn('Bulk status sync warning:', err));
 
     await this.logAction(
       userId, 
@@ -1906,20 +1918,16 @@ export class DBService {
       details
     };
 
-    if (useRealFirebase && db) {
-      try {
-        await setDoc(doc(db, 'mfr_audit_logs', newId), newLog);
-        logActionToSheets(newLog).catch(err => console.warn('Google Sheets action log failed:', err));
-        return;
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `mfr_audit_logs/${newId}`);
-      }
-    }
-
     logs.unshift(newLog);
     setLocalStorageItem('mfr_audit_logs', logs.slice(0, 500)); // keep last 500 logs
-    
-    // Log to Google Sheets
+
+    if (useRealFirebase && db) {
+      setDoc(doc(db, 'mfr_audit_logs', newId), newLog).catch(err => {
+        handleFirestoreError(err, OperationType.WRITE, `mfr_audit_logs/${newId}`);
+      });
+    }
+
+    // Log to Google Sheets asynchronously in background
     logActionToSheets(newLog).catch(err => console.warn('Google Sheets action log failed:', err));
   }
 
@@ -1958,24 +1966,43 @@ export class DBService {
     return getLocalStorageItem<SavedItem[]>('mfr_items', defaultSavedItems);
   }
 
-  static async saveItem(itemName: string, itemCode?: string): Promise<void> {
-    if (!itemName) return;
+  static async saveItem(itemName: string, itemCode?: string, partyName?: string): Promise<SavedItem> {
+    if (!itemName) throw new Error("Item Name is required");
     const items = await this.getSavedItems();
     const normalizedName = itemName.trim().toLowerCase();
     const safeCode = (itemCode || '-').trim();
     const normalizedCode = safeCode.toLowerCase();
+    const safeParty = (partyName || '').trim();
+    const normalizedParty = safeParty.toLowerCase();
     
-    const exists = items.some(item => 
+    const existing = items.find(item => 
       item.itemName.trim().toLowerCase() === normalizedName && 
-      (item.itemCode || '-').trim().toLowerCase() === normalizedCode
+      (item.itemCode || '-').trim().toLowerCase() === normalizedCode &&
+      ((item.partyName || item.customerName || '').trim().toLowerCase() === normalizedParty || !normalizedParty)
     );
-    if (exists) return;
+
+    if (existing) {
+      if (safeParty && !existing.partyName) {
+        existing.partyName = safeParty;
+        existing.customerName = safeParty;
+        setLocalStorageItem('mfr_items', items);
+        this.tryPhysicalWrite(
+          'Update Saved Item Customer',
+          `Update Item ${existing.id} for Customer ${safeParty}`,
+          [{ collection: 'mfr_items', docId: existing.id, data: existing, operation: 'set' }],
+          async () => { await setDoc(doc(db, 'mfr_items', existing.id), existing); }
+        ).catch(e => console.warn(e));
+      }
+      return existing;
+    }
 
     const newId = `item-${Date.now()}`;
     const newItem: SavedItem = {
       id: newId,
       itemName: itemName.trim(),
       itemCode: safeCode,
+      partyName: safeParty || undefined,
+      customerName: safeParty || undefined,
       createdAt: new Date().toISOString()
     };
 
@@ -1984,13 +2011,28 @@ export class DBService {
 
     await this.tryPhysicalWrite(
       'Save Item Autocomplete',
-      `Save Item Autocomplete: ${itemName} (${itemCode})`,
+      `Save Item Autocomplete: ${itemName} (${itemCode}) [Customer: ${safeParty || 'General'}]`,
       [
         { collection: 'mfr_items', docId: newId, data: newItem, operation: 'set' }
       ],
       async () => {
         await setDoc(doc(db, 'mfr_items', newId), newItem);
       }
+    );
+
+    return newItem;
+  }
+
+  static async deleteSavedItem(id: string): Promise<void> {
+    const items = await this.getSavedItems();
+    const filtered = items.filter(i => i.id !== id);
+    setLocalStorageItem('mfr_items', filtered);
+
+    await this.tryPhysicalWrite(
+      'Delete Saved Item',
+      `Delete Item ${id}`,
+      [{ collection: 'mfr_items', docId: id, operation: 'delete' }],
+      async () => { await deleteDoc(doc(db, 'mfr_items', id)); }
     );
   }
 
@@ -2007,9 +2049,8 @@ export class DBService {
         await this.addToSyncQueue(action, description, operations);
         return;
       }
-      try {
-        await physicalWriteFn();
-      } catch (err: any) {
+      // Execute physical write asynchronously in background so caller gets instantaneous local response
+      physicalWriteFn().catch(async (err: any) => {
         handleFirestoreError(err, OperationType.WRITE, operations[0]?.collection || 'unknown');
         
         const errorMessage = err instanceof Error ? err.message : String(err);
@@ -2023,10 +2064,8 @@ export class DBService {
 
         if (isOffline) {
           await this.addToSyncQueue(action, description, operations);
-        } else {
-          throw err;
         }
-      }
+      });
     } else {
       if (this.isOfflineMode()) {
         await this.addToSyncQueue(action, description, operations);

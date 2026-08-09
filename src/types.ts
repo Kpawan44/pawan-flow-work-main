@@ -7,13 +7,38 @@ export interface UserProfile {
   email: string;
   pin: string;
   department: Department | 'Admin';
+  allowedDepartments?: (Department | 'Admin')[]; // Additional departments user is authorized to access (assigned by Super Admin)
+  accessList?: (Department | 'Admin')[]; // Access list of departments authorized by Super Admin
   role: UserRole;
   active: boolean;
   createdAt: string;
   canOutsource?: boolean; // Authorized Outsourcing Assignee
 }
 
-export type JobCardStatus = 'Pending' | 'In Process' | 'Completed' | 'Rejected' | 'Pending Acceptance';
+export interface AssemblyComponent {
+  jobCardNo: string;
+  itemCode?: string;
+  itemName: string;
+  consumedQty: number;
+  unit?: 'KGS' | 'PCS';
+  consumedDate?: string;
+}
+
+export interface AssemblyRecord {
+  assemblyId: string;
+  assemblyName: string;
+  assembledProductCode: string;
+  assembledQty: number;
+  unit: 'KGS' | 'PCS' | 'SETS' | 'BOXES';
+  assembledAt: string;
+  assembledBy: string;
+  boxCount?: number;
+  pcsPerBox?: number;
+  components: AssemblyComponent[];
+  remarks?: string;
+}
+
+export type JobCardStatus = 'Pending' | 'In Process' | 'Completed' | 'Rejected' | 'Pending Acceptance' | 'Stored';
 export type OutsourceStatus = 'Assigned' | 'Supplier PO Placed' | 'In Transit' | 'Material Received' | 'Completed' | 'Cancelled';
 export type OutsourceMaterialType = 'Semi Finished Goods' | 'Finished Goods';
 
@@ -111,6 +136,9 @@ export interface JobCard {
   customRoutedToPacking?: number;
   customRoutedToStore?: number;
   
+  isAssemblyProduct?: boolean;
+  assemblyComponents?: AssemblyComponent[];
+
   // Custom processing fields recorded from departments
   operatorName?: string;
   wireScrapQty?: number;
@@ -162,6 +190,9 @@ export interface JobCard {
     qtyRemaining?: number;
     pcsPerBagOrBox?: number;
     totalPcs?: number;
+    isAssemblyProduct?: boolean;
+    assemblyComponents?: AssemblyComponent[];
+    assemblyHistory?: AssemblyRecord[];
   };
   storeDetails?: {
     verifiedQty?: number;
@@ -259,6 +290,7 @@ export interface CompanyConfig {
   gstIn?: string;
   logoUrl?: string; // in case we want support for generated or custom logos
   requireRawMaterialForProduction?: boolean;
+  customerItemFilterEnabled?: boolean;
   whatsappEnabled?: boolean;
   whatsappPhoneNumber?: string; // Group link or phone number for group alerts
   whatsappApiUrl?: string; // Optional custom API webhook
@@ -270,7 +302,9 @@ export interface CompanyConfig {
 export interface SavedItem {
   id: string;
   itemName: string;
-  itemCode: string;
+  itemCode?: string;
+  partyName?: string;
+  customerName?: string;
   createdAt?: string;
 }
 

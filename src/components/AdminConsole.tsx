@@ -164,7 +164,24 @@ export default function AdminConsole({
   const [newUserDept, setNewUserDept] = useState<Department | 'Admin'>('Production');
   const [newUserRole, setNewUserRole] = useState<'staff' | 'admin' | 'super_admin'>('staff');
   const [newUserCanOutsource, setNewUserCanOutsource] = useState<boolean>(false);
+  const [newUserAllowedDepts, setNewUserAllowedDepts] = useState<(Department | 'Admin')[]>([]);
   const [pinError, setPinError] = useState('');
+
+  // Editing User Department Authority State (Super Admin Only)
+  const [editingDeptUser, setEditingDeptUser] = useState<UserProfile | null>(null);
+  const [editingAllowedDepts, setEditingAllowedDepts] = useState<(Department | 'Admin')[]>([]);
+
+  const ALL_DEPARTMENTS: (Department | 'Admin')[] = [
+    'Dispatch',
+    'Purchase',
+    'Raw Material Store',
+    'Production',
+    'Heat Treatment',
+    'Plating',
+    'Packing',
+    'Store',
+    'Admin'
+  ];
 
   // Synchronize onboarding presets depending on creator's level
   useEffect(() => {
@@ -615,12 +632,15 @@ export default function AdminConsole({
       }
     }
 
+    const allowedDepts = currentUser?.role === 'super_admin' ? newUserAllowedDepts : [];
     const newProfile: UserProfile = {
       userId: `u-${Math.floor(Math.random() * 9000) + 1000}`,
       name: newUserName,
       email: `${newUserName.toLowerCase().replace(/\s+/g, '')}@factory.com`,
       pin: generatedPin,
       department: newUserDept,
+      allowedDepartments: allowedDepts,
+      accessList: allowedDepts,
       role: newUserRole,
       active: true,
       canOutsource: newUserCanOutsource,
@@ -628,13 +648,40 @@ export default function AdminConsole({
     };
 
     onSaveUser(newProfile);
-    onLogAction('CREATE_USER', `Created new user account '${newProfile.name}' for department ${newProfile.department} with role ${newUserRole}${newUserCanOutsource ? ' [Outsource Authorized]' : ''}`);
+    onLogAction('CREATE_USER', `Created new user account '${newProfile.name}' for department ${newProfile.department} with role ${newUserRole}${newUserCanOutsource ? ' [Outsource Authorized]' : ''}${newProfile.allowedDepartments?.length ? ` [Multi-Dept Allowed: ${newProfile.allowedDepartments.join(', ')}]` : ''}`);
     
     // Reset Form
     setNewUserName('');
     setNewUserPin('');
     setNewUserCanOutsource(false);
+    setNewUserAllowedDepts([]);
     setShowAddForm(false);
+  };
+
+  const handleSaveDeptAuthority = async () => {
+    if (currentUser?.role !== 'super_admin') {
+      showToast('Unauthorized: Only Super Admins are authorized to assign multi-department access.', 'error');
+      return;
+    }
+    if (!editingDeptUser) return;
+
+    try {
+      const updated: UserProfile = {
+        ...editingDeptUser,
+        allowedDepartments: editingAllowedDepts,
+        accessList: editingAllowedDepts
+      };
+      await onSaveUser(updated);
+      onLogAction(
+        'UPDATE_MULTI_DEPT_AUTHORITY',
+        `Updated multi-department access for user '${editingDeptUser.name}': Primary: ${editingDeptUser.department}, Allowed: [${editingAllowedDepts.join(', ')}]`
+      );
+      showToast(`Successfully updated multi-department authority for ${editingDeptUser.name}.`, 'success');
+      setEditingDeptUser(null);
+    } catch (err: any) {
+      console.error("Failed to update department authority", err);
+      showToast(`Failed to update department authority: ${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
   };
 
   const toggleUserOutsource = (user: UserProfile) => {
@@ -1115,6 +1162,39 @@ export default function AdminConsole({
                 </span>
               </label>
             </div>
+
+            {currentUser?.role === 'super_admin' && (
+              <div className="col-span-1 md:col-span-2 pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                <label className="block text-xs font-bold text-indigo-600 dark:text-indigo-400 font-sans uppercase">
+                  👑 Multi-Department Access Authority (Super Admin Only)
+                </label>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Select additional departments this user is authorized to access and operate on:
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {ALL_DEPARTMENTS.filter(d => d !== newUserDept).map(dept => {
+                    const isChecked = newUserAllowedDepts.includes(dept);
+                    return (
+                      <label key={dept} className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 font-medium cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={e => {
+                            if (e.target.checked) {
+                              setNewUserAllowedDepts([...newUserAllowedDepts, dept]);
+                            } else {
+                              setNewUserAllowedDepts(newUserAllowedDepts.filter(d => d !== dept));
+                            }
+                          }}
+                          className="rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
+                        />
+                        <span>{dept}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {pinError && (
@@ -1326,7 +1406,40 @@ export default function AdminConsole({
                         )}
                         <span className="block text-[10px] text-slate-450 font-sans tracking-normal font-normal">{u.email}</span>
                       </td>
-                      <td className="py-3.5 px-4 text-slate-500 dark:text-slate-400 font-sans">{u.department}</td>
+                      <td className="py-3.5 px-4 font-sans">
+                        <div className="flex flex-col gap-1 items-start">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-slate-800 dark:text-slate-200">{u.department}</span>
+                            {currentUser?.role === 'super_admin' && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingDeptUser(u);
+                                  setEditingAllowedDepts(u.accessList || u.allowedDepartments || []);
+                                }}
+                                className="px-1.5 py-0.5 rounded text-[10px] bg-indigo-50 hover:bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 dark:hover:bg-indigo-900 border border-indigo-200 dark:border-indigo-800 transition font-bold flex items-center gap-1 cursor-pointer"
+                                title="Super Admin: Edit multi-department authority for this user"
+                              >
+                                <Building2 className="h-3 w-3" />
+                                Assign Depts
+                              </button>
+                            )}
+                          </div>
+                          {(() => {
+                            const userAccess = u.accessList || u.allowedDepartments || [];
+                            if (userAccess.length === 0) return null;
+                            return (
+                              <div className="flex flex-wrap gap-1 mt-0.5">
+                                {userAccess.map(dept => (
+                                  <span key={dept} className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-purple-50 text-purple-700 border border-purple-200 dark:bg-purple-950/50 dark:text-purple-300 dark:border-purple-800">
+                                    +{dept}
+                                  </span>
+                                ))}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </td>
                       <td className="py-3.5 px-4">
                         <span className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold border ${
                           u.role === 'super_admin' ? 'bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-950/40 dark:text-purple-400 dark:border-purple-900/50' :
@@ -1476,6 +1589,31 @@ export default function AdminConsole({
                             </button>
                           )}
                         </div>
+                      )}
+                    </div>
+
+                    <div className="col-span-2 pt-1 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                      <div>
+                        <span className="block text-[8px] text-slate-400 uppercase font-bold tracking-wider mb-0.5">Multi-Dept Access</span>
+                        <span className="text-[10px] font-medium text-slate-700 dark:text-slate-300">
+                          {(() => {
+                            const list = u.accessList || u.allowedDepartments || [];
+                            return list.length > 0 ? list.join(', ') : 'Primary Only';
+                          })()}
+                        </span>
+                      </div>
+                      {currentUser?.role === 'super_admin' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingDeptUser(u);
+                            setEditingAllowedDepts(u.accessList || u.allowedDepartments || []);
+                          }}
+                          className="px-2 py-1 rounded text-[10px] bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-bold border border-indigo-200 dark:border-indigo-800 flex items-center gap-1 cursor-pointer"
+                        >
+                          <Building2 className="h-3 w-3" />
+                          Assign Depts
+                        </button>
                       )}
                     </div>
                   </div>
@@ -1866,6 +2004,64 @@ export default function AdminConsole({
                   }`}
                 >
                   {companyConfig?.requireRawMaterialForProduction !== false ? 'Disable Option' : 'Enable Option'}
+                </button>
+              </div>
+            </div>
+
+            {/* CUSTOMER-SPECIFIC ITEM MAPPING POLICY CARD */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-slate-50 dark:bg-slate-850 rounded-xl border border-slate-200 dark:border-slate-750 mt-3">
+              <div className="space-y-1">
+                <div className="font-bold text-xs text-slate-800 dark:text-slate-100 flex items-center gap-2">
+                  <Sliders className="h-4 w-4 text-indigo-500" />
+                  <span>Customer-Specific Item Mapping & Filtering</span>
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                    companyConfig?.customerItemFilterEnabled !== false
+                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                      : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                  }`}>
+                    {companyConfig?.customerItemFilterEnabled !== false ? 'ENABLED' : 'DISABLED'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-normal">
+                  {companyConfig?.customerItemFilterEnabled !== false
+                    ? "Currently Enabled: Order Placement & Purchase forms auto-filter items belonging specifically to the selected customer/supplier, and enable customer item creation."
+                    : "Currently Disabled: Order Placement & Purchase forms show all items in database without customer-specific filtering restriction."}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3 shrink-0">
+                <button
+                  type="button"
+                  disabled={currentUser?.role !== 'super_admin'}
+                  onClick={async () => {
+                    if (currentUser?.role !== 'super_admin') return;
+                    const newValue = !(companyConfig?.customerItemFilterEnabled !== false);
+                    try {
+                      const updatedWithMeta = {
+                        ...companyConfig,
+                        companyName: companyConfig?.companyName || 'Precision Metal Works',
+                        details: companyConfig?.details || 'Specialists in high-tensile fasteners, engine components, and industrial finishes.',
+                        customerItemFilterEnabled: newValue,
+                        updatedBy: currentUser?.name || 'Pawan Kumar',
+                        updatedAt: new Date().toISOString()
+                      };
+                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                      showToast(`Customer Item Filtering feature ${newValue ? 'ENABLED' : 'DISABLED'}!`, "success");
+                      if (onRefreshCompany) onRefreshCompany();
+                    } catch (err) {
+                      console.error("Failed to update customer item filtering setting", err);
+                      showToast("Failed to update policy.", "error");
+                    }
+                  }}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition shadow-xs cursor-pointer border flex items-center gap-2 ${
+                    currentUser?.role !== 'super_admin'
+                      ? 'opacity-50 cursor-not-allowed bg-slate-200 dark:bg-slate-800 text-slate-500 border-slate-300'
+                      : companyConfig?.customerItemFilterEnabled !== false
+                      ? 'bg-amber-600 hover:bg-amber-500 text-white border-amber-700'
+                      : 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-700'
+                  }`}
+                >
+                  {companyConfig?.customerItemFilterEnabled !== false ? 'Disable Feature' : 'Enable Feature'}
                 </button>
               </div>
             </div>
@@ -3317,6 +3513,101 @@ export default function AdminConsole({
       )}
 
 
+      {/* ASSIGN MULTI-DEPARTMENT AUTHORITY MODAL (SUPER ADMIN ONLY) */}
+      {editingDeptUser && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200/50">
+                  <Building2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="font-sans font-extrabold text-slate-900 dark:text-white text-base">
+                    Assign Multi-Department Access
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 font-sans">
+                    User: <span className="font-bold text-indigo-600 dark:text-indigo-400">{editingDeptUser.name}</span> ({editingDeptUser.email})
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingDeptUser(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/50 rounded-xl p-3 text-xs text-amber-800 dark:text-amber-300 font-sans leading-relaxed">
+              <strong>🔒 Super Admin Authority Enforcement:</strong> Only Super Admins can grant or revoke multi-department operating permissions. Selected departments will allow this user to view and execute operations on those department workbenches.
+            </div>
+
+            <div className="space-y-3">
+              <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider font-sans">
+                Primary Department (Default):
+              </label>
+              <div className="px-3.5 py-2.5 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center justify-between">
+                <span>{editingDeptUser.department}</span>
+                <span className="text-[10px] text-slate-400 uppercase font-mono">(Primary Base)</span>
+              </div>
+
+              <label className="block text-xs font-bold text-slate-700 dark:text-slate-200 uppercase tracking-wider font-sans pt-2">
+                Select Additional Authorized Departments:
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-y-auto p-1">
+                {ALL_DEPARTMENTS.filter(d => d !== editingDeptUser.department).map(dept => {
+                  const isChecked = editingAllowedDepts.includes(dept);
+                  return (
+                    <label
+                      key={dept}
+                      className={`flex items-center gap-2.5 p-2.5 rounded-xl border text-xs font-medium cursor-pointer transition select-none ${
+                        isChecked
+                          ? 'bg-indigo-50/80 dark:bg-indigo-950/50 border-indigo-300 dark:border-indigo-700 text-indigo-900 dark:text-indigo-200 font-semibold'
+                          : 'bg-slate-50/50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setEditingAllowedDepts([...editingAllowedDepts, dept]);
+                          } else {
+                            setEditingAllowedDepts(editingAllowedDepts.filter(d => d !== dept));
+                          }
+                        }}
+                        className="rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                      />
+                      <span>{dept}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex gap-3 justify-end pt-2 border-t border-slate-100 dark:border-slate-800 text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => setEditingDeptUser(null)}
+                className="bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 px-4 py-2.5 rounded-xl transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveDeptAuthority}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl transition shadow-sm flex items-center gap-2 cursor-pointer"
+              >
+                <Check className="h-4 w-4" />
+                Save Department Authority
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -3335,6 +3626,7 @@ function CompanyForm({ companyConfig, currentUser, onSave, showToast }: CompanyF
   const [address, setAddress] = useState(companyConfig?.address || 'Shed No. 12, Phase II, Industrial Area, Pune, MH, India');
   const [gstIn, setGstIn] = useState(companyConfig?.gstIn || '27AAAAA1111A1Z1');
   const [requireRawMaterialForProduction, setRequireRawMaterialForProduction] = useState<boolean>(companyConfig?.requireRawMaterialForProduction !== false);
+  const [customerItemFilterEnabled, setCustomerItemFilterEnabled] = useState<boolean>(companyConfig?.customerItemFilterEnabled !== false);
   const [whatsappEnabled, setWhatsappEnabled] = useState<boolean>(companyConfig?.whatsappEnabled !== false);
   const [whatsappPhoneNumber, setWhatsappPhoneNumber] = useState(companyConfig?.whatsappPhoneNumber || '');
   const [whatsappApiUrl, setWhatsappApiUrl] = useState(companyConfig?.whatsappApiUrl || '');
@@ -3349,6 +3641,7 @@ function CompanyForm({ companyConfig, currentUser, onSave, showToast }: CompanyF
       setAddress(companyConfig.address || '');
       setGstIn(companyConfig.gstIn || '');
       setRequireRawMaterialForProduction(companyConfig.requireRawMaterialForProduction !== false);
+      setCustomerItemFilterEnabled(companyConfig.customerItemFilterEnabled !== false);
       setWhatsappEnabled(companyConfig.whatsappEnabled !== false);
       setWhatsappPhoneNumber(companyConfig.whatsappPhoneNumber || '');
       setWhatsappApiUrl(companyConfig.whatsappApiUrl || '');
@@ -3375,6 +3668,7 @@ function CompanyForm({ companyConfig, currentUser, onSave, showToast }: CompanyF
         address, 
         gstIn, 
         requireRawMaterialForProduction,
+        customerItemFilterEnabled,
         whatsappEnabled,
         whatsappPhoneNumber,
         whatsappApiUrl,

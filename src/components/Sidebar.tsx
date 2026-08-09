@@ -11,7 +11,6 @@ import {
   FileText, 
   Bell, 
   Activity, 
-  UserPlus,
   X,
   BookOpen
 } from 'lucide-react';
@@ -132,6 +131,23 @@ export default function Sidebar({
               <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold tracking-wide ${getDepartmentColor(currentUser.department)}`}>
                 {currentUser.department}
               </span>
+              {(() => {
+                const extraDepts = Array.from(new Set([
+                  ...(currentUser.accessList || []),
+                  ...(currentUser.allowedDepartments || [])
+                ])).filter(d => d !== currentUser.department);
+                if (extraDepts.length > 0 && currentUser.role !== 'super_admin') {
+                  return (
+                    <span 
+                      className="text-[9px] bg-indigo-900/80 text-indigo-200 border border-indigo-700/60 px-1.5 py-0.5 rounded font-bold uppercase cursor-help"
+                      title={`Multi-Dept Authority: ${extraDepts.join(', ')}`}
+                    >
+                      +{extraDepts.length} Depts
+                    </span>
+                  );
+                }
+                return null;
+              })()}
               {currentUser.role === 'super_admin' && (
                 <span className="text-[9px] bg-purple-700 text-purple-100 px-1 py-0.5 rounded font-bold uppercase">
                   SUPER
@@ -179,31 +195,6 @@ export default function Sidebar({
           );
         })}
       </nav>
-
-      {/* DEMO Persona Switcher Block */}
-      {isSystemAdmin && (
-        <div className="p-3 bg-[#0F172A]/90 border-t border-[#1E293B]">
-          <label className="block text-[9px] text-[#3B82F6] font-bold uppercase tracking-wider mb-1.5">
-            🛠️ Simulate Persona
-          </label>
-          <div className="relative">
-            <select
-              value={currentUser.userId}
-              onChange={(e) => onSwitchUser(e.target.value)}
-              className="w-full bg-[#1E293B] text-white text-[11px] py-1.5 px-2 pr-6 rounded border border-slate-700 focus:outline-none focus:border-[#3B82F6] cursor-pointer appearance-none"
-            >
-              {availableUsers.map(user => (
-                <option key={user.userId} value={user.userId}>
-                  {user.department} - {user.name}
-                </option>
-              ))}
-            </select>
-            <div className="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none text-slate-400">
-              <UserPlus className="h-3 w-3" />
-            </div>
-          </div>
-        </div>
-      )}
     </aside>
   );
 }

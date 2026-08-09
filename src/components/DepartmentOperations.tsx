@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { getJobCardProcessMetrics, getRawMaterialIssuedQty, getWireScrapQty } from '../lib/metrics';
 import { 
@@ -25,9 +25,14 @@ import {
   ChevronDown,
   ChevronUp,
   Eye,
-  EyeOff
+  EyeOff,
+  Search,
+  Filter,
+  User,
+  Building,
+  FileText
 } from 'lucide-react';
-import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord } from '../types';
 import { DBService } from '../lib/firebase';
 import RawMaterialRequestModal, { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 import JobStatusBadge from './JobStatusBadge';
@@ -69,6 +74,7 @@ interface DepartmentOperationsProps {
   ) => Promise<void> | any;
   onRejectMovement: (movementId: string, remarks: string) => void;
   onSelectJobCard: (jobCard: JobCard) => void;
+  onQuickTransfer?: (jobCard: JobCard) => void;
 }
 
 export const PREDEFINED_RAW_MATERIALS = [
@@ -91,13 +97,64 @@ export default function DepartmentOperations({
   onCreateMovement,
   onAcceptMovement,
   onRejectMovement,
-  onSelectJobCard
+  onSelectJobCard,
+  onQuickTransfer
 }: DepartmentOperationsProps) {
   const isRawMaterialCompulsory = companyConfig?.requireRawMaterialForProduction !== false;
-  // Determine relevant department
-  const activeDept = currentUser.department === 'Admin' ? 'Dispatch' : currentUser.department as Department;
+  
+  // Determine relevant departments user is authorized to access
+  const ALL_WORKBENCH_DEPTS: Department[] = [
+    'Dispatch',
+    'Purchase',
+    'Raw Material Store',
+    'Production',
+    'Heat Treatment',
+    'Plating',
+    'Packing',
+    'Store'
+  ];
 
-  const [activeSubView, setActiveSubView] = useState<'incoming' | 'operations' | 'completed'>('operations');
+  const userDepts = useMemo(() => {
+    if (currentUser.role === 'super_admin' || currentUser.department === 'Admin') {
+      return ALL_WORKBENCH_DEPTS;
+    }
+    const deptsSet = new Set<Department>();
+    deptsSet.add(currentUser.department as Department);
+    const multiDepts = [
+      ...(Array.isArray(currentUser.accessList) ? currentUser.accessList : []),
+      ...(Array.isArray(currentUser.allowedDepartments) ? currentUser.allowedDepartments : [])
+    ];
+    multiDepts.forEach(d => {
+      if ((d as string) !== 'Admin' && ALL_WORKBENCH_DEPTS.includes(d as Department)) {
+        deptsSet.add(d as Department);
+      }
+    });
+    return Array.from(deptsSet);
+  }, [currentUser]);
+
+  const [selectedDept, setSelectedDept] = useState<Department>(() => {
+    return userDepts[0] || 'Dispatch';
+  });
+
+  useEffect(() => {
+    if (!userDepts.includes(selectedDept)) {
+      setSelectedDept(userDepts[0] || 'Dispatch');
+    }
+  }, [userDepts]);
+
+  const activeDept = selectedDept;
+
+  const [activeSubView, setActiveSubView] = useState<'incoming' | 'incoming_store' | 'operations' | 'completed' | 'assembly'>('operations');
+
+  // Reset activeSubView if user switches department away
+  useEffect(() => {
+    if (activeSubView === 'incoming_store' && activeDept !== 'Purchase') {
+      setActiveSubView('operations');
+    }
+    if (activeSubView === 'assembly' && activeDept !== 'Packing') {
+      setActiveSubView('operations');
+    }
+  }, [activeDept, activeSubView]);
 
   // --- HORIZONTAL SWIPE FOR DEPARTMENT SUBVIEWS ---
   const touchStartX = useRef<number>(0);
@@ -142,7 +199,12 @@ export default function DepartmentOperations({
   const handleTouchEnd = () => {
     if (!isSwiping.current) return;
     const deltaX = touchCurrentX.current - touchStartX.current;
-    const subViews: ('incoming' | 'operations' | 'completed')[] = ['incoming', 'operations', 'completed'];
+    const subViews: ('incoming' | 'incoming_store' | 'operations' | 'completed' | 'assembly')[] = 
+      activeDept === 'Purchase' 
+        ? ['incoming', 'incoming_store', 'operations', 'completed']
+        : activeDept === 'Packing'
+        ? ['incoming', 'operations', 'assembly', 'completed']
+        : ['incoming', 'operations', 'completed'];
     const curIndex = subViews.indexOf(activeSubView);
 
     if (Math.abs(deltaX) > 75 && curIndex !== -1) {
@@ -190,6 +252,15 @@ export default function DepartmentOperations({
   const [showItemDropdown, setShowItemDropdown] = useState(false);
   const [showPurchaseItemDropdown, setShowPurchaseItemDropdown] = useState(false);
 
+  // Customer Item Master Modal State
+  const [showCustomerItemMasterModal, setShowCustomerItemMasterModal] = useState(false);
+  const [masterCustomerFilter, setMasterCustomerFilter] = useState('All');
+  const [masterSearchQuery, setMasterSearchQuery] = useState('');
+  const [newMasterCustomer, setNewMasterCustomer] = useState('');
+  const [newMasterItemName, setNewMasterItemName] = useState('');
+  const [newMasterItemCode, setNewMasterItemCode] = useState('');
+  const [isSavingMasterItem, setIsSavingMasterItem] = useState(false);
+
   const [outsourceOrders, setOutsourceOrders] = useState<OutsourceOrder[]>([]);
   const [selectedOutsourceOrderId, setSelectedOutsourceOrderId] = useState<string>('');
 
@@ -220,7 +291,7 @@ export default function DepartmentOperations({
   const [purchaseItemCode, setPurchaseItemCode] = useState('');
   const [purchaseUnit, setPurchaseUnit] = useState<'KGS' | 'PCS'>('KGS');
   const [activePurchaseJob, setActivePurchaseJob] = useState<string | null>(null);
-  const [purchaseTargetDept, setPurchaseTargetDept] = useState<'Store' | 'Plating' | 'Heat Treatment' | 'Raw Material Store'>('Raw Material Store');
+  const [purchaseTargetDept, setPurchaseTargetDept] = useState<'Store' | 'Plating' | 'Heat Treatment' | 'Raw Material Store' | 'Packing' | 'Production'>('Raw Material Store');
   const [purchaseMaterialType, setPurchaseMaterialType] = useState<'Raw Material' | 'Semi Finished Goods' | 'Finished Goods'>('Raw Material');
   const [purchaseMultiItems, setPurchaseMultiItems] = useState<{
     itemName: string;
@@ -236,6 +307,12 @@ export default function DepartmentOperations({
 
   // Store Department target selection for Purchase route
   const [storeTargetDept, setStoreTargetDept] = useState<'Packing' | 'Dispatch'>('Dispatch');
+
+  // Incoming Store Release Inputs
+  const [releasingStoreJobNo, setReleasingStoreJobNo] = useState<string | null>(null);
+  const [storeReleaseDept, setStoreReleaseDept] = useState<Department>('Production');
+  const [storeReleaseQty, setStoreReleaseQty] = useState<number | string>('');
+  const [storeReleaseRemarks, setStoreReleaseRemarks] = useState<string>('');
 
   // Production Inputs
   const [prodOpName, setProdOpName] = useState('');
@@ -272,6 +349,27 @@ export default function DepartmentOperations({
   const [packQtyReceived, setPackQtyReceived] = useState<number>(0);
   const [packQtySentToStore, setPackQtySentToStore] = useState<number>(0);
   const [activePackingJob, setActivePackingJob] = useState<string | null>(null);
+
+  // Packing Multi-Item Assembly State
+  const [showAssemblyModal, setShowAssemblyModal] = useState<boolean>(false);
+  const [assemblyTargetMode, setAssemblyTargetMode] = useState<'new' | 'existing'>('new');
+  const [selectedAssemblyTargetJobNo, setSelectedAssemblyTargetJobNo] = useState<string>('');
+  const [assembledProductName, setAssembledProductName] = useState<string>('');
+  const [assembledProductCode, setAssembledProductCode] = useState<string>('');
+  const [assembledPartyName, setAssembledPartyName] = useState<string>('Assembled Finished Product / Kit');
+  const [assembledQty, setAssembledQty] = useState<number>(0);
+  const [assembledUnit, setAssembledUnit] = useState<'KGS' | 'PCS' | 'SETS' | 'BOXES'>('SETS');
+  const [assembledBoxCount, setAssembledBoxCount] = useState<number>(5);
+  const [assembledPcsPerBox, setAssembledPcsPerBox] = useState<number>(100);
+  const [assemblyPackingType, setAssemblyPackingType] = useState<string>('Corrugated Box with Pallet Support');
+  const [assemblyRemarks, setAssemblyRemarks] = useState<string>('');
+  const [assemblyComponents, setAssemblyComponents] = useState<{
+    jobCardNo: string;
+    itemName: string;
+    itemCode?: string;
+    consumedQty: number;
+    unit: 'KGS' | 'PCS';
+  }[]>([]);
 
   // Store Inputs
   const [storeVerifiedQty, setStoreVerifiedQty] = useState<number>(0);
@@ -375,13 +473,72 @@ export default function DepartmentOperations({
     }
   };
 
-  const filteredItems = savedItems.filter(item => 
-    item.itemName.toLowerCase().includes(itemName.toLowerCase())
-  );
+  // Master list of known customer names
+  const knownCustomers = useMemo(() => {
+    const set = new Set<string>();
+    jobCards.forEach(j => { if (j.partyName?.trim()) set.add(j.partyName.trim()); });
+    savedItems.forEach(i => {
+      const p = (i.partyName || i.customerName)?.trim();
+      if (p) set.add(p);
+    });
+    return Array.from(set).sort();
+  }, [jobCards, savedItems]);
 
-  const filteredPurchaseItems = savedItems.filter(item => 
-    item.itemName.toLowerCase().includes(purchaseItemName.toLowerCase())
-  );
+  // Customer-specific item filter for Dispatch (Order Placement)
+  const filteredItems = useMemo(() => {
+    const activeParty = partyName.trim().toLowerCase();
+    const query = itemName.trim().toLowerCase();
+
+    return savedItems.filter(item => {
+      const itemParty = (item.partyName || item.customerName || '').trim().toLowerCase();
+      // When a customer is selected, ONLY show items that belong to that customer
+      const matchesParty = activeParty ? (itemParty === activeParty) : true;
+      const matchesQuery = !query || 
+        item.itemName.toLowerCase().includes(query) || 
+        (item.itemCode && item.itemCode.toLowerCase().includes(query));
+
+      return matchesParty && matchesQuery;
+    });
+  }, [savedItems, partyName, itemName]);
+
+  // Customer/Supplier-specific item filter for Purchase Department
+  const filteredPurchaseItems = useMemo(() => {
+    const activeSupplier = purchaseSupplier.trim().toLowerCase();
+    const query = purchaseItemName.trim().toLowerCase();
+
+    return savedItems.filter(item => {
+      const itemParty = (item.partyName || item.customerName || '').trim().toLowerCase();
+      const matchesSupplier = activeSupplier ? (itemParty === activeSupplier) : true;
+      const matchesQuery = !query || 
+        item.itemName.toLowerCase().includes(query) || 
+        (item.itemCode && item.itemCode.toLowerCase().includes(query));
+
+      return matchesSupplier && matchesQuery;
+    });
+  }, [savedItems, purchaseSupplier, purchaseItemName]);
+
+  const handleSaveCustomerItemQuick = async (custName: string, iName: string, iCode?: string) => {
+    if (!custName.trim()) {
+      alert("Please enter a Customer / Party Name first.");
+      return;
+    }
+    if (!iName.trim()) {
+      alert("Please enter an Item Name.");
+      return;
+    }
+    try {
+      const cleanCode = iCode?.trim() ? iCode.trim().toUpperCase() : '-';
+      const saved = await DBService.saveItem(iName.trim(), cleanCode, custName.trim());
+      setSavedItems(prev => {
+        if (prev.some(x => x.id === saved.id)) return prev;
+        return [saved, ...prev];
+      });
+      alert(`✅ Item "${iName.trim()}" successfully created & saved under customer "${custName.trim()}"!`);
+    } catch (err) {
+      console.error("Failed to save item:", err);
+      alert("Failed to save item. Please try again.");
+    }
+  };
 
   const handleRawMaterialModalSubmit = async (request: {
     jobCardNo: string;
@@ -410,18 +567,31 @@ export default function DepartmentOperations({
   };
 
   // --- ACTIONS ---
-  const handleAddItemToOrder = () => {
+  const handleAddItemToOrder = async () => {
     const numQty = typeof orderQty === 'number' ? orderQty : (parseInt(String(orderQty), 10) || 0);
     if (!itemName.trim() || numQty <= 0) {
       alert("Please specify Item Name and a valid Quantity.");
       return;
     }
+
+    const cleanCode = itemCode.trim() ? itemCode.trim().toUpperCase() : '-';
+    const cleanParty = partyName.trim();
+
+    if (cleanParty) {
+      try {
+        const saved = await DBService.saveItem(itemName.trim(), cleanCode, cleanParty);
+        setSavedItems(prev => prev.some(x => x.id === saved.id) ? prev : [saved, ...prev]);
+      } catch (err) {
+        console.warn("Auto save item error:", err);
+      }
+    }
+
     // Add to multiItems state
     setMultiItems(prev => [
       ...prev,
       {
         itemName: itemName.trim(),
-        itemCode: itemCode.trim() ? itemCode.trim().toUpperCase() : '-',
+        itemCode: cleanCode,
         orderQty: numQty,
         htRequired,
         remarks: dispatchRemarks.trim() || undefined
@@ -439,7 +609,7 @@ export default function DepartmentOperations({
     setMultiItems(prev => prev.filter((_, i) => i !== index));
   };
 
-  const handleCreateOrder = (e: React.FormEvent) => {
+  const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!partyName.trim()) {
       alert("Please specify Customer / Party Name.");
@@ -455,10 +625,18 @@ export default function DepartmentOperations({
         return;
       }
 
+      const cleanCode = itemCode.trim() ? itemCode.trim().toUpperCase() : '-';
+      try {
+        const saved = await DBService.saveItem(itemName.trim(), cleanCode, partyName.trim());
+        setSavedItems(prev => prev.some(x => x.id === saved.id) ? prev : [saved, ...prev]);
+      } catch (err) {
+        console.warn("Save item error:", err);
+      }
+
       onCreateJobCard({
         partyName: partyName.trim(),
         itemName: itemName.trim(),
-        itemCode: itemCode.trim() ? itemCode.trim().toUpperCase() : '-',
+        itemCode: cleanCode,
         orderQty: numQty,
         heatTreatmentRequired: processType === 'Purchase' ? false : htRequired,
         currentQty: numQty,
@@ -475,6 +653,16 @@ export default function DepartmentOperations({
       setHtRequired(false);
       setDispatchRemarks('');
     } else {
+      // Save all multiItems to customer database
+      for (const item of multiItems) {
+        try {
+          const saved = await DBService.saveItem(item.itemName, item.itemCode, partyName.trim());
+          setSavedItems(prev => prev.some(x => x.id === saved.id) ? prev : [saved, ...prev]);
+        } catch (err) {
+          console.warn("Save item error:", err);
+        }
+      }
+
       // Place all items in the multiItems list
       const jobs = multiItems.map(item => ({
         partyName: partyName.trim(),
@@ -501,7 +689,7 @@ export default function DepartmentOperations({
     }
   };
 
-  const handleAddItemToPurchase = () => {
+  const handleAddItemToPurchase = async () => {
     const recNum = typeof purchaseRecQty === 'number' ? purchaseRecQty : (parseInt(String(purchaseRecQty), 10) || 0);
     const rejNum = typeof purchaseRejQty === 'number' ? purchaseRejQty : (parseInt(String(purchaseRejQty), 10) || 0);
 
@@ -518,11 +706,23 @@ export default function DepartmentOperations({
       return;
     }
 
+    const cleanCode = purchaseItemCode.trim() ? purchaseItemCode.trim().toUpperCase() : '-';
+    const cleanSupplier = purchaseSupplier.trim();
+
+    if (cleanSupplier) {
+      try {
+        const saved = await DBService.saveItem(purchaseItemName.trim(), cleanCode, cleanSupplier);
+        setSavedItems(prev => prev.some(x => x.id === saved.id) ? prev : [saved, ...prev]);
+      } catch (err) {
+        console.warn("Auto save item error:", err);
+      }
+    }
+
     setPurchaseMultiItems(prev => [
       ...prev,
       {
         itemName: purchaseItemName.trim(),
-        itemCode: purchaseItemCode.trim() ? purchaseItemCode.trim().toUpperCase() : '-',
+        itemCode: cleanCode,
         recQty: recNum,
         rejQty: rejNum,
         sentQty: purchaseSentQty,
@@ -768,6 +968,8 @@ export default function DepartmentOperations({
       return;
     }
 
+    const isHoldingInPurchase = purchaseTargetDept === 'Purchase';
+
     onUpdateJobCard(jCard.jobCardNo, {
       materialType: purchaseMaterialType,
       purchaseDetails: {
@@ -781,16 +983,20 @@ export default function DepartmentOperations({
       },
       currentQty: purchaseSentQty,
       balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - purchaseRejQty),
-      heatTreatmentRequired: jCard.heatTreatmentRequired || purchaseTargetDept === 'Heat Treatment'
+      heatTreatmentRequired: jCard.heatTreatmentRequired || purchaseTargetDept === 'Heat Treatment',
+      currentDepartment: isHoldingInPurchase ? 'Purchase' : purchaseTargetDept,
+      status: isHoldingInPurchase ? 'In Process' : 'Pending Acceptance'
     });
 
-    onCreateMovement({
-      jobCardNo: jCard.jobCardNo,
-      fromDepartment: 'Purchase',
-      toDepartment: purchaseTargetDept, // Dynamically route to selected department
-      quantity: purchaseSentQty,
-      remarks: `Material inwarded from supplier: ${purchaseSupplier}. Received: ${purchaseRecQty} KG, Dispatched to ${purchaseTargetDept}: ${purchaseSentQty} KG, Rejections: ${purchaseRejQty} KG. Remarks: ${purchaseRemarks}`
-    });
+    if (!isHoldingInPurchase) {
+      onCreateMovement({
+        jobCardNo: jCard.jobCardNo,
+        fromDepartment: 'Purchase',
+        toDepartment: purchaseTargetDept, // Dynamically route to selected department
+        quantity: purchaseSentQty,
+        remarks: `Material inwarded from supplier: ${purchaseSupplier}. Received: ${purchaseRecQty} KG, Dispatched to ${purchaseTargetDept}: ${purchaseSentQty} KG, Rejections: ${purchaseRejQty} KG. Remarks: ${purchaseRemarks}`
+      });
+    }
 
     setPurchaseSupplier('');
     setPurchaseBill('');
@@ -1077,6 +1283,159 @@ Please adjust the quantity or request additional raw material issue.`);
     setPackQtyReceived(0);
     setPackQtySentToStore(0);
     setActivePackingJob(null);
+  };
+
+  const handleExecuteAssembly = () => {
+    if (assemblyComponents.length < 2) {
+      alert('Please select at least 2 component items to assemble into a single product.');
+      return;
+    }
+
+    if (assembledQty <= 0) {
+      alert('Please enter a valid Assembled Output Quantity (> 0).');
+      return;
+    }
+
+    if (assemblyTargetMode === 'new' && (!assembledProductName.trim() || !assembledProductCode.trim())) {
+      alert('Please enter a valid Assembled Product Name and Product Code.');
+      return;
+    }
+
+    if (assemblyTargetMode === 'existing' && !selectedAssemblyTargetJobNo) {
+      alert('Please select a target Job Card for the assembly output.');
+      return;
+    }
+
+    for (const comp of assemblyComponents) {
+      if (comp.consumedQty <= 0) {
+        alert(`Please enter a valid consumed quantity for component '${comp.itemName}'.`);
+        return;
+      }
+    }
+
+    const timestamp = new Date().toISOString();
+
+    const compRecords: AssemblyComponent[] = assemblyComponents.map(c => ({
+      jobCardNo: c.jobCardNo,
+      itemName: c.itemName,
+      itemCode: c.itemCode,
+      consumedQty: Number(c.consumedQty),
+      unit: c.unit,
+      consumedDate: timestamp
+    }));
+
+    const targetName = assemblyTargetMode === 'new' 
+      ? assembledProductName 
+      : (jobCards.find(j => j.jobCardNo === selectedAssemblyTargetJobNo)?.itemName || assembledProductName);
+    
+    const targetCode = assemblyTargetMode === 'new' 
+      ? assembledProductCode 
+      : (jobCards.find(j => j.jobCardNo === selectedAssemblyTargetJobNo)?.itemCode || assembledProductCode);
+
+    const assemblyRecord: AssemblyRecord = {
+      assemblyId: `ASSM-REC-${Date.now()}`,
+      assemblyName: targetName,
+      assembledProductCode: targetCode,
+      assembledQty: Number(assembledQty),
+      unit: assembledUnit,
+      assembledAt: timestamp,
+      assembledBy: currentUser.name,
+      boxCount: Number(assembledBoxCount),
+      pcsPerBox: Number(assembledPcsPerBox),
+      components: compRecords,
+      remarks: assemblyRemarks
+    };
+
+    let targetJobNo = selectedAssemblyTargetJobNo;
+
+    if (assemblyTargetMode === 'new') {
+      targetJobNo = `ASSM-${Math.floor(100000 + Math.random() * 900000)}`;
+      const newJob: JobCard = {
+        jobCardNo: targetJobNo,
+        orderNo: `ORD-ASSM-${Math.floor(1000 + Math.random() * 9000)}`,
+        partyName: assembledPartyName || 'Multi-Item Assembly Kit',
+        itemName: assembledProductName,
+        itemCode: assembledProductCode,
+        orderQty: Number(assembledQty),
+        currentQty: Number(assembledQty),
+        unit: assembledUnit === 'KGS' ? 'KGS' : 'PCS',
+        balanceQty: 0,
+        currentDepartment: 'Packing',
+        status: 'In Process',
+        createdBy: currentUser.name,
+        createdAt: timestamp,
+        completed: false,
+        heatTreatmentRequired: false,
+        isAssemblyProduct: true,
+        assemblyComponents: compRecords,
+        packingDetails: {
+          packedQty: Number(assembledQty),
+          qtyReceivedFromPlating: Number(assembledQty),
+          qtySentToStore: 0,
+          qtyRemaining: Number(assembledQty),
+          boxCount: Number(assembledBoxCount),
+          pcsPerBagOrBox: Number(assembledPcsPerBox),
+          totalPcs: Number(assembledBoxCount) * Number(assembledPcsPerBox),
+          packingType: assemblyPackingType,
+          remarks: `Assembled from ${assemblyComponents.length} components: ${compRecords.map(c => `${c.itemName} (${c.consumedQty} ${c.unit})`).join(', ')}. ${assemblyRemarks}`,
+          isAssemblyProduct: true,
+          assemblyComponents: compRecords,
+          assemblyHistory: [assemblyRecord]
+        }
+      };
+      onCreateJobCard(newJob);
+    } else {
+      const existingJob = jobCards.find(j => j.jobCardNo === targetJobNo);
+      if (existingJob) {
+        const prevPacking = existingJob.packingDetails;
+        const prevComps = prevPacking?.assemblyComponents || existingJob.assemblyComponents || [];
+        const prevHist = prevPacking?.assemblyHistory || [];
+
+        onUpdateJobCard(targetJobNo, {
+          isAssemblyProduct: true,
+          assemblyComponents: [...prevComps, ...compRecords],
+          packingDetails: {
+            ...prevPacking,
+            packedQty: (prevPacking?.packedQty || 0) + Number(assembledQty),
+            isAssemblyProduct: true,
+            assemblyComponents: [...prevComps, ...compRecords],
+            assemblyHistory: [...prevHist, assemblyRecord]
+          }
+        });
+      }
+    }
+
+    // Update consumed component job cards & movements
+    assemblyComponents.forEach(comp => {
+      const compJob = jobCards.find(j => j.jobCardNo === comp.jobCardNo);
+      if (compJob) {
+        const updatedRemarks = `${compJob.packingDetails?.remarks || ''} [Assembly Consumption: Consumed ${comp.consumedQty} ${comp.unit} for Assembled Product '${targetName}' (${targetCode}) on ${new Date().toLocaleDateString()}]`.trim();
+        
+        onUpdateJobCard(comp.jobCardNo, {
+          packingDetails: {
+            ...compJob.packingDetails,
+            remarks: updatedRemarks
+          }
+        });
+
+        onCreateMovement([{
+          jobCardNo: comp.jobCardNo,
+          fromDepartment: 'Packing',
+          toDepartment: 'Packing',
+          quantity: Number(comp.consumedQty),
+          remarks: `Assembly Consumption: ${comp.consumedQty} ${comp.unit} consumed into Assembled Product '${targetName}' (${targetCode}) [Target Job: ${targetJobNo}]`
+        }]);
+      }
+    });
+
+    alert(`✅ Multi-Item Assembly Successful!\nTarget Assembled Product '${targetName}' (${targetJobNo}) generated from ${assemblyComponents.length} component items.`);
+
+    setShowAssemblyModal(false);
+    setAssembledProductName('');
+    setAssembledProductCode('');
+    setAssembledQty(0);
+    setAssemblyRemarks('');
+    setAssemblyComponents([]);
   };
 
   const handleCompleteStore = (jCard: JobCard) => {
@@ -1384,6 +1743,132 @@ Please adjust the quantity or request additional raw material issue.`);
 
   const totalDeptWipQty = activeDepartmentJobs.reduce((acc, job) => acc + getJobWipQtyForDept(job), 0);
 
+  // --- DEPARTMENT WORKBENCH SEARCH & FILTERS ---
+  const [deptSearchQuery, setDeptSearchQuery] = useState('');
+  const [deptPersonFilter, setDeptPersonFilter] = useState('All');
+  const [deptPartyFilter, setDeptPartyFilter] = useState('All');
+  const [deptOrderNoFilter, setDeptOrderNoFilter] = useState('All');
+  const [deptSortBy, setDeptSortBy] = useState<'oldest' | 'newest' | 'job_no'>('oldest');
+
+  // Computed unique option lists for Department workbench
+  const uniqueParties = useMemo(() => {
+    return Array.from(new Set(jobCards.map(j => j.partyName).filter(Boolean))).sort();
+  }, [jobCards]);
+
+  const uniquePersons = useMemo(() => {
+    const set = new Set<string>();
+    jobCards.forEach(j => {
+      if (j.createdBy) set.add(j.createdBy);
+      if (j.operatorName) set.add(j.operatorName);
+      if (j.assignedToUserName) set.add(j.assignedToUserName);
+      if (j.productionDetails?.operatorName) set.add(j.productionDetails.operatorName);
+      if (j.purchaseDetails?.supplierName) set.add(j.purchaseDetails.supplierName);
+      if (j.outsourceDetails?.poPlacedByUserName) set.add(j.outsourceDetails.poPlacedByUserName);
+      if (j.outsourceDetails?.supplierName) set.add(j.outsourceDetails.supplierName);
+    });
+    movements.forEach(m => {
+      if (m.transferBy) set.add(m.transferBy);
+      if (m.acceptedBy) set.add(m.acceptedBy);
+    });
+    return Array.from(set).sort();
+  }, [jobCards, movements]);
+
+  const uniqueOrderNos = useMemo(() => {
+    const set = new Set<string>();
+    jobCards.forEach(j => {
+      if (j.orderNo) set.add(j.orderNo);
+      if (j.outsourceOrderId) set.add(j.outsourceOrderId);
+      if (j.outsourceDetails?.poNumber) set.add(j.outsourceDetails.poNumber);
+      if (j.purchaseDetails?.billNo) set.add(j.purchaseDetails.billNo);
+    });
+    return Array.from(set).sort();
+  }, [jobCards]);
+
+  const filterJobCard = (j: JobCard) => {
+    const q = deptSearchQuery.trim().toLowerCase();
+    const personQ = deptPersonFilter.trim().toLowerCase();
+    const partyQ = deptPartyFilter.trim().toLowerCase();
+    const orderQ = deptOrderNoFilter.trim().toLowerCase();
+
+    // 1. Person
+    if (personQ && personQ !== 'all') {
+      const persons = [
+        j.createdBy,
+        j.operatorName,
+        j.productionDetails?.operatorName,
+        j.assignedToUserName,
+        j.purchaseDetails?.supplierName,
+        j.outsourceDetails?.poPlacedByUserName,
+        j.outsourceDetails?.supplierName,
+      ].filter((v): v is string => Boolean(v)).map(s => s.toLowerCase());
+
+      const movementPersons = movements
+        .filter(m => m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase())
+        .flatMap(m => [m.transferBy, m.acceptedBy])
+        .filter((v): v is string => Boolean(v))
+        .map(s => s.toLowerCase());
+
+      const allPersons = [...persons, ...movementPersons];
+      if (!allPersons.some(p => p.includes(personQ))) return false;
+    }
+
+    // 2. Party / Customer
+    if (partyQ && partyQ !== 'all') {
+      if (!j.partyName.toLowerCase().includes(partyQ)) return false;
+    }
+
+    // 3. Order No
+    if (orderQ && orderQ !== 'all') {
+      const refs = [j.orderNo, j.jobCardNo, j.outsourceOrderId, j.outsourceDetails?.poNumber, j.purchaseDetails?.billNo].filter((v): v is string => Boolean(v)).map(s => s.toLowerCase());
+      if (!refs.some(r => r.includes(orderQ))) return false;
+    }
+
+    // 4. Global query
+    if (q) {
+      const matchesBasic = 
+        j.jobCardNo.toLowerCase().includes(q) ||
+        j.partyName.toLowerCase().includes(q) ||
+        j.itemName.toLowerCase().includes(q) ||
+        j.itemCode.toLowerCase().includes(q) ||
+        (j.orderNo && j.orderNo.toLowerCase().includes(q)) ||
+        (j.createdBy && j.createdBy.toLowerCase().includes(q)) ||
+        (j.operatorName && j.operatorName.toLowerCase().includes(q)) ||
+        (j.productionDetails?.operatorName && j.productionDetails.operatorName.toLowerCase().includes(q));
+
+      const matchesMovements = movements.some(m => 
+        m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase() && (
+          (m.transferBy && m.transferBy.toLowerCase().includes(q)) ||
+          (m.acceptedBy && m.acceptedBy.toLowerCase().includes(q)) ||
+          (m.remarks && m.remarks.toLowerCase().includes(q))
+        )
+      );
+
+      if (!matchesBasic && !matchesMovements) return false;
+    }
+
+    return true;
+  };
+
+  const filteredActiveDepartmentJobs = useMemo(() => {
+    const list = activeDepartmentJobs.filter(filterJobCard);
+    return list.sort((a, b) => {
+      if (deptSortBy === 'oldest') {
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return timeA - timeB;
+      }
+      if (deptSortBy === 'newest') {
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return timeB - timeA;
+      }
+      if (deptSortBy === 'job_no') {
+        return a.jobCardNo.localeCompare(b.jobCardNo, undefined, { numeric: true });
+      }
+      return 0;
+    });
+  }, [activeDepartmentJobs, deptSearchQuery, deptPersonFilter, deptPartyFilter, deptOrderNoFilter, deptSortBy, movements]);
+
   // C. Archived Outbound transfers from this department (both accepted and pending custody downstream)
   const completedDepartmentLogs = movements.filter(m => {
     return m.fromDepartment === activeDept;
@@ -1500,7 +1985,45 @@ Please adjust the quantity or request additional raw material issue.`);
       onTouchEnd={handleTouchEnd}
       className="space-y-6"
     >
-      
+      {/* Multi-Department Access Switcher Bar (Authorized by Super Admin) */}
+      {userDepts.length > 1 && (
+        <div className="bg-slate-900/90 border border-indigo-900/50 rounded-2xl p-3.5 shadow-lg space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="flex h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
+              <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-300 font-mono">
+                🏢 Multi-Department Operating Authority
+              </span>
+            </div>
+            <span className="text-[10px] text-slate-400 font-mono">
+              Authorized Workbenches: {userDepts.length}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
+            {userDepts.map((dept) => {
+              const isActive = activeDept === dept;
+              return (
+                <button
+                  key={dept}
+                  type="button"
+                  onClick={() => setSelectedDept(dept)}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition flex items-center gap-1.5 cursor-pointer border ${
+                    isActive
+                      ? 'bg-indigo-600 text-white border-indigo-400 shadow-md shadow-indigo-950'
+                      : 'bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-700/80'
+                  }`}
+                >
+                  <span>{dept}</span>
+                  {isActive && (
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Department Context Top bar */}
       <div className="bg-[#0F172A] text-white rounded-2xl p-5 border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -1544,6 +2067,18 @@ Please adjust the quantity or request additional raw material issue.`);
                 </div>
               </div>
             )}
+            {activeDept === 'Packing' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAssemblyModal(true);
+                }}
+                className="w-full sm:w-auto px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-bold text-[11px] sm:text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-sm border border-purple-400/30 cursor-pointer min-h-[40px]"
+              >
+                <Layers className="h-4 w-4" />
+                <span>🧩 Assemble Multi-Item Product</span>
+              </button>
+            )}
             <div className="flex flex-col sm:flex-row bg-slate-950 p-1.5 sm:p-1 rounded-xl border border-slate-800 text-xs text-slate-400 w-full md:w-auto gap-1">
               <button
                 onClick={() => setActiveSubView('incoming')}
@@ -1558,6 +2093,21 @@ Please adjust the quantity or request additional raw material issue.`);
                   </span>
                 )}
               </button>
+              {activeDept === 'Purchase' && (
+                <button
+                  onClick={() => setActiveSubView('incoming_store')}
+                  className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
+                    activeSubView === 'incoming_store' ? 'bg-purple-900 text-purple-100 border border-purple-500/40 shadow-sm' : 'hover:text-white text-slate-400'
+                  }`}
+                >
+                  <span>🏬 Incoming Store</span>
+                  {jobCards.filter(j => !j.completed && (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails)).length > 0 && (
+                    <span className="bg-purple-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
+                      {jobCards.filter(j => !j.completed && (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails)).length}
+                    </span>
+                  )}
+                </button>
+              )}
               <button
                 onClick={() => setActiveSubView('operations')}
                 className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
@@ -1566,6 +2116,22 @@ Please adjust the quantity or request additional raw material issue.`);
               >
                 Active Floor Jobs
               </button>
+              {activeDept === 'Packing' && (
+                <button
+                  onClick={() => setActiveSubView('assembly')}
+                  className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
+                    activeSubView === 'assembly' ? 'bg-purple-900 text-purple-100 border border-purple-500/40 shadow-sm' : 'hover:text-white text-slate-400'
+                  }`}
+                >
+                  <Layers className="h-3.5 w-3.5 text-purple-300" />
+                  <span>🧩 Assembly Management</span>
+                  {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length > 0 && (
+                    <span className="bg-purple-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
+                      {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length}
+                    </span>
+                  )}
+                </button>
+              )}
               <button
                 onClick={() => setActiveSubView('completed')}
                 className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
@@ -1648,7 +2214,121 @@ Please adjust the quantity or request additional raw material issue.`);
             </div>
           </div>
         </div>
-      )}      {/* ======================================================== */}
+      )}
+
+      {/* ======================================================== */}
+      {/* DEPARTMENT SEARCH & FILTERS BAR */}
+      {/* ======================================================== */}
+      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 space-y-3 shadow-xs">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          
+          {/* Main Search Input */}
+          <div className="relative flex-1">
+            <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Search job cards by Person's Name, Order No, Customer, Item..."
+              value={deptSearchQuery}
+              onChange={(e) => setDeptSearchQuery(e.target.value)}
+              className="bg-slate-50 dark:bg-slate-950 pl-10 pr-9 py-2.5 text-xs rounded-xl border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:border-indigo-500 w-full"
+            />
+            {deptSearchQuery && (
+              <button
+                type="button"
+                onClick={() => setDeptSearchQuery('')}
+                className="absolute right-3 top-3 text-slate-400 hover:text-slate-600 dark:hover:text-white cursor-pointer"
+                title="Clear search query"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Quick Filter Selectors */}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider shrink-0">
+              <Filter className="h-3.5 w-3.5 text-indigo-500" />
+              <span>Filters:</span>
+            </div>
+
+            {/* Customer Filter */}
+            <select
+              value={deptPartyFilter}
+              onChange={(e) => setDeptPartyFilter(e.target.value)}
+              className="bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[150px] truncate"
+              title="Filter by Customer / Party Name"
+            >
+              <option value="All">🏢 Customer: All</option>
+              {uniqueParties.map(p => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+
+            {/* Person Filter */}
+            <select
+              value={deptPersonFilter}
+              onChange={(e) => setDeptPersonFilter(e.target.value)}
+              className="bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[150px] truncate"
+              title="Filter by Person's Name (Operator / Created By / Assignee)"
+            >
+              <option value="All">👤 Person: All</option>
+              {uniquePersons.map(p => (
+                <option key={p} value={p}>{p}</option>
+              ))}
+            </select>
+
+            {/* Order No Filter */}
+            <select
+              value={deptOrderNoFilter}
+              onChange={(e) => setDeptOrderNoFilter(e.target.value)}
+              className="bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[150px] truncate"
+              title="Filter by Place Order / Order No"
+            >
+              <option value="All">📑 Order: All</option>
+              {uniqueOrderNos.map(o => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+
+            {/* Sort Option */}
+            <select
+              value={deptSortBy}
+              onChange={(e) => setDeptSortBy(e.target.value as any)}
+              className="bg-indigo-50/80 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-bold border border-indigo-200/80 dark:border-indigo-800/80 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[190px] truncate cursor-pointer"
+              title="Sort Job Cards"
+            >
+              <option value="oldest">⏳ Date: Oldest First (FIFO)</option>
+              <option value="newest">✨ Date: Newest First</option>
+              <option value="job_no">🔢 Job Card No</option>
+            </select>
+
+            {(deptSearchQuery || deptPersonFilter !== 'All' || deptPartyFilter !== 'All' || deptOrderNoFilter !== 'All') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setDeptSearchQuery('');
+                  setDeptPersonFilter('All');
+                  setDeptPartyFilter('All');
+                  setDeptOrderNoFilter('All');
+                }}
+                className="px-2.5 py-2 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 text-red-600 dark:text-red-300 border border-red-200 dark:border-red-800 rounded-xl text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
+              >
+                <X className="h-3 w-3" />
+                <span>Reset</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {(deptSearchQuery || deptPersonFilter !== 'All' || deptPartyFilter !== 'All' || deptOrderNoFilter !== 'All') && (
+          <div className="flex items-center gap-2 text-[11px] text-indigo-600 dark:text-indigo-300 font-medium pt-1 border-t border-slate-100 dark:border-slate-800/60">
+            <span>Filtering active department view:</span>
+            <span className="font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-800/60">
+              {filteredActiveDepartmentJobs.length} of {activeDepartmentJobs.length} Job Cards match
+            </span>
+          </div>
+        )}
+      </div>      {/* ======================================================== */}
       {/* DISPATCH SPECIFIC MODULE: BOOK ORDER (STEP 1) */}
       {/* ======================================================== */}
       {activeDept === 'Dispatch' && (
@@ -1664,15 +2344,47 @@ Please adjust the quantity or request additional raw material issue.`);
 
             <form onSubmit={handleCreateOrder} className="space-y-4 text-xs font-sans">
               <div>
-                <label className="block text-slate-400 font-semibold mb-1">Customer / Party Name</label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block text-slate-400 font-semibold">Customer / Party Name *</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomerItemMasterModal(true)}
+                    className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Sliders className="h-3 w-3" />
+                    <span>Manage Customer Items</span>
+                  </button>
+                </div>
                 <input
                   type="text"
-                  placeholder="Apex Engineering Solutions"
+                  placeholder="Type or select Customer Name (e.g. Apex Engineering Solutions)"
                   required
+                  list="dispatch-customers-list"
                   value={partyName}
                   onChange={e => setPartyName(e.target.value)}
                   className="w-full bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-lg px-4 py-3.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6]"
                 />
+                <datalist id="dispatch-customers-list">
+                  {knownCustomers.map(cust => (
+                    <option key={cust} value={cust} />
+                  ))}
+                </datalist>
+
+                {/* Customer Item Mapping Badge */}
+                <div className="mt-1.5">
+                  {partyName.trim() ? (
+                    <div className="flex items-center justify-between text-[10.5px]">
+                      <span className="font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-1 rounded-md border border-emerald-200 dark:border-emerald-800/60 flex items-center gap-1.5 w-full">
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                        <span>Filter active: Showing {filteredItems.length} item(s) mapped to "{partyName.trim()}"</span>
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-[10.5px] text-amber-600 dark:text-amber-400 font-medium bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-md border border-amber-200 dark:border-amber-800/40 block">
+                      ⚠️ Select or type a Customer Name first to auto-filter items mapped to that customer
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* Box container for Item details to highlight multi-add capability */}
@@ -1694,22 +2406,44 @@ Please adjust the quantity or request additional raw material issue.`);
                       onBlur={() => setTimeout(() => setShowItemDropdown(false), 200)}
                       className="w-full bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-lg px-4 py-3.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6]"
                     />
-                    {showItemDropdown && filteredItems.length > 0 && (
-                      <div className="absolute z-50 left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-lg">
-                        {filteredItems.map(item => (
-                          <div
-                            key={item.id}
-                            onMouseDown={() => {
-                              setItemName(item.itemName);
-                              setItemCode(item.itemCode);
-                              setShowItemDropdown(false);
-                            }}
-                            className="px-3 py-2 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer flex justify-between items-center text-xs text-slate-700 dark:text-slate-300 transition-colors"
-                          >
-                            <span className="font-medium truncate">{item.itemName}</span>
-                            <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded ml-2 shrink-0">{item.itemCode}</span>
+                    {showItemDropdown && (
+                      <div className="absolute z-50 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xl p-1.5">
+                        {!partyName.trim() ? (
+                          <div className="p-2.5 text-center text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-lg font-medium">
+                            ⚠️ Select Customer Name first to see mapped items.
                           </div>
-                        ))}
+                        ) : filteredItems.length > 0 ? (
+                          <>
+                            <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 bg-slate-50 dark:bg-slate-800/50 rounded mb-1">
+                              Items mapped to {partyName.trim()}
+                            </div>
+                            {filteredItems.map(item => (
+                              <div
+                                key={item.id}
+                                onMouseDown={() => {
+                                  setItemName(item.itemName);
+                                  setItemCode(item.itemCode || '');
+                                  setShowItemDropdown(false);
+                                }}
+                                className="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 rounded-lg cursor-pointer flex justify-between items-center text-xs text-slate-800 dark:text-slate-200 transition-colors"
+                              >
+                                <span className="font-semibold text-slate-800 dark:text-slate-100 truncate">{item.itemName}</span>
+                                {item.itemCode && item.itemCode !== '-' && (
+                                  <span className="font-mono text-[10px] text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950 px-1.5 py-0.5 rounded border border-indigo-200 dark:border-indigo-800 shrink-0">
+                                    {item.itemCode}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </>
+                        ) : (
+                          <div className="p-2.5 text-center text-xs text-slate-500 dark:text-slate-400 space-y-1">
+                            <div>No saved items found for <strong>"{partyName.trim()}"</strong></div>
+                            <span className="text-[10.5px] text-indigo-600 dark:text-indigo-400 font-semibold block">
+                              Type name & code above and click "Add Item" to save it for this customer!
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1863,14 +2597,14 @@ Please adjust the quantity or request additional raw material issue.`);
                 Verify & Ingest Inbound Packed Stocks to Dispatched
               </h3>
 
-              {activeDepartmentJobs.length === 0 ? (
+              {filteredActiveDepartmentJobs.length === 0 ? (
                 <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
                   <span className="text-2xl">📦</span>
-                  <p className="text-slate-400 text-xs font-mono font-medium">No outstanding dispatch shipping queues</p>
+                  <p className="text-slate-400 text-xs font-mono font-medium">No matching dispatch shipping queues</p>
                 </div>
               ) : (
                 <div className="space-y-3.5">
-                  {activeDepartmentJobs.map(job => {
+                  {filteredActiveDepartmentJobs.map(job => {
                     const isClosing = activeDispJob === job.jobCardNo;
                     const isRequesting = activeRequestJob === job.jobCardNo;
                     const isResending = activeResendJob === job.jobCardNo;
@@ -2266,16 +3000,16 @@ Please adjust the quantity or request additional raw material issue.`);
                           setPurchaseMaterialType('Semi Finished Goods');
                         }
 
-                        // Target department logic based on processType
+                        // Target department logic based on processType and material classification
                         const proc = (order.processType || '').toLowerCase();
-                        if (proc.includes('plating') || proc.includes('zinc') || proc.includes('surface')) {
+                        if (order.outsourceMaterialType === 'Finished Goods' || proc.includes('finish')) {
+                          setPurchaseTargetDept('Packing');
+                        } else if (proc.includes('plating') || proc.includes('zinc') || proc.includes('surface')) {
                           setPurchaseTargetDept('Plating');
                         } else if (proc.includes('heat') || proc.includes('hardening') || proc.includes('annealing')) {
                           setPurchaseTargetDept('Heat Treatment');
-                        } else if (order.outsourceMaterialType === 'Finished Goods' || proc.includes('finish')) {
-                          setPurchaseTargetDept('Store');
                         } else {
-                          setPurchaseTargetDept('Heat Treatment');
+                          setPurchaseTargetDept('Production');
                         }
                       }
                     }
@@ -2349,15 +3083,47 @@ Please adjust the quantity or request additional raw material issue.`);
                 })()}
               </div>
               <div>
-                <label className="block text-slate-400 font-semibold mb-1">Supplier / Vendor Name</label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block text-slate-400 font-semibold">Supplier / Vendor Name *</label>
+                  <button
+                    type="button"
+                    onClick={() => setShowCustomerItemMasterModal(true)}
+                    className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline font-bold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Sliders className="h-3 w-3" />
+                    <span>Manage Customer Items</span>
+                  </button>
+                </div>
                 <input
                   type="text"
                   placeholder="e.g. Jindal Steel Power"
                   required
+                  list="purchase-suppliers-list"
                   value={purchaseSupplier}
                   onChange={e => setPurchaseSupplier(e.target.value)}
                   className="w-full bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-lg px-4 py-3.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6]"
                 />
+                <datalist id="purchase-suppliers-list">
+                  {knownCustomers.map(cust => (
+                    <option key={cust} value={cust} />
+                  ))}
+                </datalist>
+
+                {/* Supplier Item Mapping Badge */}
+                <div className="mt-1.5">
+                  {purchaseSupplier.trim() ? (
+                    <div className="flex items-center justify-between text-[10.5px]">
+                      <span className="font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2.5 py-1 rounded-md border border-emerald-200 dark:border-emerald-800/60 flex items-center gap-1.5 w-full">
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                        <span>Filter active: Showing {filteredPurchaseItems.length} item(s) mapped to "{purchaseSupplier.trim()}"</span>
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="text-[10.5px] text-amber-600 dark:text-amber-400 font-medium bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-md border border-amber-200 dark:border-amber-800/40 block">
+                      ⚠️ Select or type a Supplier Name first to auto-filter items mapped to that supplier
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* Box container for Item details to highlight multi-add capability */}
@@ -2379,22 +3145,44 @@ Please adjust the quantity or request additional raw material issue.`);
                       onBlur={() => setTimeout(() => setShowPurchaseItemDropdown(false), 200)}
                       className="w-full bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-lg px-4 py-3.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6]"
                     />
-                    {showPurchaseItemDropdown && filteredPurchaseItems.length > 0 && (
-                      <div className="absolute z-50 left-0 right-0 mt-1 max-h-48 overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg shadow-lg">
-                        {filteredPurchaseItems.map(item => (
-                          <div
-                            key={item.id}
-                            onMouseDown={() => {
-                              setPurchaseItemName(item.itemName);
-                              setPurchaseItemCode(item.itemCode);
-                              setShowPurchaseItemDropdown(false);
-                            }}
-                            className="px-3 py-2 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer flex justify-between items-center text-xs text-slate-700 dark:text-slate-300 transition-colors"
-                          >
-                            <span className="font-medium truncate">{item.itemName}</span>
-                            <span className="font-mono text-[10px] text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded ml-2 shrink-0">{item.itemCode}</span>
+                    {showPurchaseItemDropdown && (
+                      <div className="absolute z-50 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xl p-1.5">
+                        {!purchaseSupplier.trim() ? (
+                          <div className="p-2.5 text-center text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-lg font-medium">
+                            ⚠️ Select Supplier / Customer Name first to see mapped items.
                           </div>
-                        ))}
+                        ) : filteredPurchaseItems.length > 0 ? (
+                          <>
+                            <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400 bg-slate-50 dark:bg-slate-800/50 rounded mb-1">
+                              Items mapped to {purchaseSupplier.trim()}
+                            </div>
+                            {filteredPurchaseItems.map(item => (
+                              <div
+                                key={item.id}
+                                onMouseDown={() => {
+                                  setPurchaseItemName(item.itemName);
+                                  setPurchaseItemCode(item.itemCode || '');
+                                  setShowPurchaseItemDropdown(false);
+                                }}
+                                className="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 rounded-lg cursor-pointer flex justify-between items-center text-xs text-slate-800 dark:text-slate-200 transition-colors"
+                              >
+                                <span className="font-semibold text-slate-800 dark:text-slate-100 truncate">{item.itemName}</span>
+                                {item.itemCode && item.itemCode !== '-' && (
+                                  <span className="font-mono text-[10px] text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950 px-1.5 py-0.5 rounded border border-indigo-200 dark:border-indigo-800 shrink-0">
+                                    {item.itemCode}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </>
+                        ) : (
+                          <div className="p-2.5 text-center text-xs text-slate-500 dark:text-slate-400 space-y-1">
+                            <div>No saved items found for <strong>"{purchaseSupplier.trim()}"</strong></div>
+                            <span className="text-[10.5px] text-indigo-600 dark:text-indigo-400 font-semibold block">
+                              Type name & code above and click "Add Item" to save it for this supplier!
+                            </span>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2543,41 +3331,117 @@ Please adjust the quantity or request additional raw material issue.`);
 
                 <div>
                   <label className="block text-slate-400 font-semibold mb-1">Send / Route Material To</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(purchaseMaterialType === 'Raw Material' || purchaseMaterialType === 'Finished Goods') && (
-                      <button
-                        type="button"
-                        onClick={() => setPurchaseTargetDept(purchaseMaterialType === 'Raw Material' ? 'Raw Material Store' : 'Store')}
-                        className={`py-2 px-3 rounded-lg font-bold border text-center transition cursor-pointer text-xs col-span-2 bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 text-emerald-700 dark:text-emerald-400`}
-                      >
-                        🏢 {purchaseMaterialType === 'Raw Material' ? 'Raw Material Store' : 'Finished Goods Store'}
-                      </button>
+                  <div className="space-y-1.5">
+                    {purchaseMaterialType === 'Raw Material' && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPurchaseTargetDept('Raw Material Store')}
+                          className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
+                            purchaseTargetDept === 'Raw Material Store'
+                              ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
+                              : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                          }`}
+                        >
+                          🏢 Raw Material Store
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPurchaseTargetDept('Purchase')}
+                          className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
+                            purchaseTargetDept === 'Purchase'
+                              ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
+                              : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
+                          }`}
+                        >
+                          🛒 Purchase Incoming Store
+                        </button>
+                      </div>
+                    )}
+                    {purchaseMaterialType === 'Finished Goods' && (
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setPurchaseTargetDept('Packing')}
+                          className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                            purchaseTargetDept === 'Packing'
+                              ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
+                              : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                          }`}
+                        >
+                          📦 Packing
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPurchaseTargetDept('Store')}
+                          className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                            purchaseTargetDept === 'Store'
+                              ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
+                              : 'bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-800'
+                          }`}
+                        >
+                          🏢 FG Store
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setPurchaseTargetDept('Purchase')}
+                          className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                            purchaseTargetDept === 'Purchase'
+                              ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
+                              : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
+                          }`}
+                        >
+                          🛒 Purchase Store
+                        </button>
+                      </div>
                     )}
                     {purchaseMaterialType === 'Semi Finished Goods' && (
-                      <>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setPurchaseTargetDept('Production')}
+                          className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                            purchaseTargetDept === 'Production'
+                              ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
+                              : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                          }`}
+                        >
+                          ⚙️ Production
+                        </button>
                         <button
                           type="button"
                           onClick={() => setPurchaseTargetDept('Heat Treatment')}
-                          className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                          className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
                             purchaseTargetDept === 'Heat Treatment'
-                              ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-500 text-amber-700 dark:text-amber-400'
-                              : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
+                              ? 'bg-amber-600 text-white border-amber-700 shadow-sm'
+                              : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                           }`}
                         >
-                          🔥 Heat Treatment
+                          🔥 Heat Treat
                         </button>
                         <button
                           type="button"
                           onClick={() => setPurchaseTargetDept('Plating')}
-                          className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                          className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
                             purchaseTargetDept === 'Plating'
-                              ? 'bg-indigo-50 dark:bg-indigo-950/40 border-indigo-500 text-indigo-700 dark:text-indigo-400'
-                              : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
+                              ? 'bg-indigo-600 text-white border-indigo-700 shadow-sm'
+                              : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                           }`}
                         >
-                          💿 Plating Process
+                          ⚡ Plating
                         </button>
-                      </>
+                        <button
+                          type="button"
+                          onClick={() => setPurchaseTargetDept('Purchase')}
+                          className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                            purchaseTargetDept === 'Purchase'
+                              ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
+                              : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
+                          }`}
+                        >
+                          🛒 Purchase Store
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -2678,31 +3542,482 @@ Please adjust the quantity or request additional raw material issue.`);
             {activeSubView === 'incoming' && (
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4 flex items-center gap-2">
-                  📥 Pending Custody Receipts 
+                  📥 Pending Custody Receipts {incomingTransfers.length > 0 && `(${incomingTransfers.length})`}
                 </h3>
-                <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                  <span className="text-xl">🙌</span>
-                  <p className="text-slate-400 text-xs font-mono font-medium">Direct Inwarding Enabled. No incoming transfer receipts required.</p>
+                {incomingTransfers.length === 0 ? (
+                  <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
+                    <span className="text-2xl">📦</span>
+                    <p className="text-slate-400 text-xs font-mono font-medium">Floor queue clean. No pending inbound shipments found for Purchase Department.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <AnimatePresence mode="popLayout">
+                      {incomingTransfers.map(mov => {
+                        const isRejecting = activeRejectionId === mov.movementId;
+                        const isAccepting = acceptedMovementIds[mov.movementId] === 'animating';
+                        return (
+                          <motion.div 
+                            key={mov.movementId}
+                            layout
+                            initial={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.9, height: 0, y: -15, marginBottom: 0, padding: 0 }}
+                            transition={{ duration: 0.4, ease: 'easeInOut' }}
+                            className="relative bg-slate-50 dark:bg-slate-950 p-4 rounded-xl border border-slate-200 dark:border-slate-800 flex flex-col gap-3 overflow-hidden"
+                          >
+                            {/* Success confirmation overlay */}
+                            {isAccepting && (
+                              <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                className="absolute inset-0 z-10 bg-emerald-50/95 dark:bg-emerald-950/95 flex flex-col items-center justify-center gap-1.5 p-4 text-center"
+                              >
+                                <motion.div
+                                  initial={{ scale: 0.5, rotate: -30 }}
+                                  animate={{ scale: [0.5, 1.25, 1], rotate: 0 }}
+                                  transition={{ duration: 0.45, ease: 'easeOut' }}
+                                  className="bg-emerald-500 text-white rounded-full p-2 shadow-lg shadow-emerald-500/20"
+                                >
+                                  <CheckCircle2 className="h-6 w-6 stroke-[2.5]" />
+                                </motion.div>
+                                <motion.p
+                                  initial={{ opacity: 0, y: 10 }}
+                                  animate={{ opacity: 1, y: 0 }}
+                                  transition={{ delay: 0.15, duration: 0.35 }}
+                                  className="text-emerald-700 dark:text-emerald-300 font-extrabold text-xs uppercase tracking-wider font-sans"
+                                >
+                                  Inward Custody Accepted! 🎉
+                                </motion.p>
+                                <motion.p
+                                  initial={{ opacity: 0 }}
+                                  animate={{ opacity: 0.75 }}
+                                  transition={{ delay: 0.3 }}
+                                  className="text-emerald-600/90 dark:text-emerald-400 text-[10px] font-mono"
+                                >
+                                  Storing in Purchase Floor Store...
+                                </motion.p>
+                              </motion.div>
+                            )}
+
+                            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 text-xs">
+                              <div>
+                                <div className="flex items-center gap-2 font-mono">
+                                  <span className="text-amber-500 font-bold bg-amber-500/10 px-2 py-0.5 rounded">{mov.jobCardNo}</span>
+                                  <span className="text-slate-400 font-bold">Transfer Ref: {mov.movementId}</span>
+                                </div>
+                                {(() => {
+                                  const matchingJob = jobCards.find(j => j.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
+                                  if (!matchingJob) return null;
+                                  return (
+                                    <div className="mt-2 p-2 bg-white dark:bg-slate-900/90 rounded-lg border border-slate-200/80 dark:border-slate-800 flex items-center gap-2 flex-wrap text-xs">
+                                      <span className="font-bold text-slate-900 dark:text-slate-100 font-sans">{matchingJob.itemName}</span>
+                                      <span className="font-mono text-[11px] font-extrabold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/70 border border-indigo-200 dark:border-indigo-800 px-2 py-0.5 rounded">
+                                        Item Code: {matchingJob.itemCode || '-'}
+                                      </span>
+                                      {matchingJob.partyName && (
+                                        <span className="text-[10.5px] text-slate-500 font-medium">({matchingJob.partyName})</span>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+                                <p className="font-semibold text-slate-850 dark:text-white mt-1.5 font-sans">
+                                  Sender: {mov.fromDepartment} department ({mov.transferBy})
+                                </p>
+                                <p className="text-[11px] text-slate-500 mt-0.5 font-mono">
+                                  Quantity Transferred: <strong className="text-indigo-600 dark:text-indigo-400">{mov.quantity} KG</strong> | Date: {new Date(mov.transferDate).toLocaleDateString([], {hour:'2-digit', minute:'2-digit'})}
+                                </p>
+                                {mov.remarks && (
+                                  <p className="mt-1 text-[10px] text-slate-400 bg-white dark:bg-slate-900 p-1.5 rounded italic">
+                                    "{mov.remarks}"
+                                  </p>
+                                )}
+                              </div>
+
+                              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 mt-3 sm:mt-0 w-full sm:w-auto shrink-0">
+                                <button
+                                  onClick={() => handleLocalAccept(mov)}
+                                  disabled={isAccepting}
+                                  className="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold py-2.5 px-4 rounded-xl transition duration-200 flex-1 sm:flex-none flex items-center justify-center gap-1.5 min-h-[44px] cursor-pointer shadow-xs"
+                                >
+                                  <Check className="h-4 w-4" />
+                                  <span>Accept Into Purchase Store</span>
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setActiveRejectionId(isRejecting ? null : mov.movementId);
+                                    setRejectionNotes('');
+                                  }}
+                                  disabled={isAccepting}
+                                  className="bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold py-2.5 px-4 rounded-xl transition duration-200 flex-1 sm:flex-none flex items-center justify-center min-h-[44px] cursor-pointer"
+                                >
+                                  <span>Reject</span>
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Rejection expansion */}
+                            {isRejecting && (
+                              <div className="mt-2 pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                                <label className="block text-[11px] text-rose-500 font-bold uppercase tracking-wider">
+                                  Reason for Rejection / Return to {mov.fromDepartment}
+                                </label>
+                                <textarea
+                                  value={rejectionNotes}
+                                  onChange={e => setRejectionNotes(e.target.value)}
+                                  placeholder="Provide reason for rejecting custody..."
+                                  className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-rose-500"
+                                  rows={2}
+                                />
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={() => setActiveRejectionId(null)}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      if (!rejectionNotes.trim()) return;
+                                      onRejectMovement(mov.movementId, rejectionNotes);
+                                      setActiveRejectionId(null);
+                                    }}
+                                    disabled={!rejectionNotes.trim()}
+                                    className="px-3 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-50"
+                                  >
+                                    Confirm Rejection
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </motion.div>
+                        );
+                      })}
+                    </AnimatePresence>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeSubView === 'incoming_store' && activeDept === 'Purchase' && (
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800/80 pb-4">
+                  <div>
+                    <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
+                      <span>🏬 Incoming Store / Temporary Inventory Buffer</span>
+                    </h3>
+                    <p className="text-[11.5px] text-slate-500 dark:text-slate-400 mt-0.5 font-sans">
+                      Goods received into department custody and held in temporary inventory state before release to further processing.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
+                    <span className="text-xs font-bold px-2.5 py-1 rounded-xl bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800 flex items-center gap-1.5">
+                      <Box className="h-3.5 w-3.5" />
+                      {jobCards.filter(j => !j.completed && (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails)).length} Stored Items
+                    </span>
+                  </div>
                 </div>
+
+                {(() => {
+                  const storedItems = jobCards.filter(j => 
+                    !j.completed && 
+                    (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && 
+                    (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails) &&
+                    filterJobCard(j)
+                  ).sort((a, b) => {
+                    if (deptSortBy === 'oldest') {
+                      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                      return timeA - timeB;
+                    }
+                    if (deptSortBy === 'newest') {
+                      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+                      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+                      return timeB - timeA;
+                    }
+                    if (deptSortBy === 'job_no') {
+                      return a.jobCardNo.localeCompare(b.jobCardNo, undefined, { numeric: true });
+                    }
+                    return 0;
+                  });
+
+                  if (storedItems.length === 0) {
+                    return (
+                      <div className="text-center py-12 space-y-3 border border-dashed border-slate-200 dark:border-slate-800 rounded-2xl bg-slate-50/50 dark:bg-slate-950/40">
+                        <span className="text-3xl block">🏬</span>
+                        <p className="text-slate-700 dark:text-slate-200 text-xs font-bold font-sans">No Job Cards Currently Stored in Buffer</p>
+                        <p className="text-slate-400 text-[11px] max-w-md mx-auto font-sans">
+                          All incoming goods have been routed to active floor production queues or dispatched to destination departments.
+                        </p>
+                      </div>
+                    );
+                  }
+
+                  const totalWeight = storedItems.reduce((acc, j) => acc + (j.currentQty || j.orderQty || 0), 0);
+
+                  return (
+                    <div className="space-y-4">
+                      {/* Summary Banner */}
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="bg-purple-50/70 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-900/60 p-3.5 rounded-xl">
+                          <span className="text-[10px] font-extrabold uppercase tracking-wider text-purple-600 dark:text-purple-400 font-mono block">Stored Jobs</span>
+                          <span className="text-xl font-black font-mono text-purple-950 dark:text-purple-100">{storedItems.length} Cards</span>
+                        </div>
+                        <div className="bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200 dark:border-indigo-900/60 p-3.5 rounded-xl">
+                          <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 font-mono block">Total Stored Quantity</span>
+                          <span className="text-xl font-black font-mono text-indigo-950 dark:text-indigo-100">{totalWeight.toLocaleString()} KG / PCS</span>
+                        </div>
+                        <div className="bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/60 p-3.5 rounded-xl">
+                          <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-600 dark:text-emerald-400 font-mono block">Department Buffer</span>
+                          <span className="text-xl font-black font-mono text-emerald-950 dark:text-emerald-100">{activeDept} Store</span>
+                        </div>
+                      </div>
+
+                      {/* Stored Items Cards */}
+                      <div className="space-y-3">
+                        {storedItems.map(job => {
+                          const isReleasing = releasingStoreJobNo === job.jobCardNo;
+                          return (
+                            <div 
+                              key={job.jobCardNo}
+                              className="bg-slate-50 dark:bg-slate-950 p-4 rounded-xl border border-purple-200/80 dark:border-purple-900/50 flex flex-col gap-3 shadow-2xs hover:border-purple-300 dark:hover:border-purple-700 transition"
+                            >
+                              <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
+                                <div onClick={() => onSelectJobCard(job)} className="cursor-pointer min-w-0 flex-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-mono text-[11px] font-bold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 px-2 py-0.5 rounded">
+                                      {job.jobCardNo}
+                                    </span>
+                                    {job.orderNo && (
+                                      <span className="font-mono text-[10.5px] text-slate-500 bg-slate-200/60 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                                        PO: {job.orderNo}
+                                      </span>
+                                    )}
+                                    <span className="px-2 py-0.5 rounded font-extrabold uppercase text-[9px] bg-purple-100 text-purple-700 dark:bg-purple-950/90 dark:text-purple-300 border border-purple-300 dark:border-purple-800 flex items-center gap-1">
+                                      🛒 Stored in {activeDept} Store
+                                    </span>
+                                    {job.materialType && (
+                                      <span className="px-1.5 py-0.5 rounded font-bold uppercase text-[9px] bg-amber-50 dark:bg-amber-950/40 border border-amber-200 text-amber-700 dark:text-amber-400">
+                                        {job.materialType}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="mt-2 flex items-baseline gap-2 flex-wrap">
+                                    <span className="font-sans font-extrabold text-sm text-slate-900 dark:text-slate-100">
+                                      {job.itemName}
+                                    </span>
+                                    {job.itemCode && (
+                                      <span className="font-mono text-xs text-indigo-600 dark:text-indigo-400 font-bold">
+                                        ({job.itemCode})
+                                      </span>
+                                    )}
+                                    {job.partyName && (
+                                      <span className="text-xs text-slate-500 font-medium">
+                                        • Supplier: {job.partyName}
+                                      </span>
+                                    )}
+                                  </div>
+
+                                  <div className="mt-1 flex items-center gap-4 text-[11px] text-slate-500 font-mono flex-wrap">
+                                    <span>Quantity Held: <strong className="text-purple-700 dark:text-purple-300">{job.currentQty || job.orderQty} {job.unit || 'KG'}</strong></span>
+                                    {job.purchaseDetails?.billNo && (
+                                      <span>Bill/Invoice: <strong className="text-slate-700 dark:text-slate-300">{job.purchaseDetails.billNo}</strong></span>
+                                    )}
+                                    {job.purchaseDetails?.supplierName && (
+                                      <span>Supplier: <strong>{job.purchaseDetails.supplierName}</strong></span>
+                                    )}
+                                  </div>
+
+                                  {job.purchaseDetails?.remarks && (
+                                    <p className="mt-1 text-[10.5px] text-slate-500 italic bg-white dark:bg-slate-900 p-2 rounded-lg border border-slate-200 dark:border-slate-800">
+                                      "{job.purchaseDetails.remarks}"
+                                    </p>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0 self-end md:self-auto flex-wrap">
+                                  {onQuickTransfer && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onQuickTransfer(job)}
+                                      className="bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 text-slate-800 dark:text-slate-200 text-[11px] font-bold py-2 px-3 rounded-xl transition flex items-center gap-1 leading-none cursor-pointer"
+                                    >
+                                      <ArrowRight className="h-3.5 w-3.5" />
+                                      Quick Transfer
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => {
+                                      setReleasingStoreJobNo(isReleasing ? null : job.jobCardNo);
+                                      if (!isReleasing) {
+                                        setStoreReleaseQty(job.currentQty || job.orderQty);
+                                        setStoreReleaseDept(job.heatTreatmentRequired ? 'Heat Treatment' : 'Production');
+                                        setStoreReleaseRemarks('');
+                                      }
+                                    }}
+                                    className="bg-purple-600 hover:bg-purple-500 text-white text-[11.5px] font-extrabold py-2 px-3.5 rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                                  >
+                                    <Truck className="h-4 w-4" />
+                                    {isReleasing ? 'Cancel Move' : 'Move to Next Department'}
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Release / Movement Drawer */}
+                              {isReleasing && (
+                                <div className="mt-3 pt-3 border-t border-purple-200 dark:border-purple-900/60 space-y-3 bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800">
+                                  <h4 className="font-extrabold text-slate-900 dark:text-slate-100 text-xs uppercase tracking-wider flex items-center gap-2 font-sans">
+                                    <span>🚀 Move Material From Incoming Store to Next Department</span>
+                                  </h4>
+
+                                  <div>
+                                    <label className="block text-slate-400 font-semibold mb-1.5 text-[10.5px] uppercase tracking-wider">
+                                      Select Destination Processing Department
+                                    </label>
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
+                                      {[
+                                        { id: 'Production', label: 'Production', icon: '🪵' },
+                                        { id: 'Heat Treatment', label: 'Heat Treatment', icon: '🔥' },
+                                        { id: 'Plating', label: 'Plating', icon: '⚡' },
+                                        { id: 'Packing', label: 'Packing', icon: '📦' },
+                                        { id: 'Store', label: 'Store (Stock)', icon: '🏬' },
+                                        { id: 'Raw Material Store', label: 'RM Store', icon: '🏭' },
+                                      ].map(dept => (
+                                        <button
+                                          key={dept.id}
+                                          type="button"
+                                          onClick={() => setStoreReleaseDept(dept.id as Department)}
+                                          className={`py-2 px-2.5 rounded-lg border text-xs font-bold flex flex-col items-center justify-center gap-1 transition cursor-pointer ${
+                                            storeReleaseDept === dept.id
+                                              ? 'bg-purple-600 text-white border-purple-600 shadow-xs'
+                                              : 'bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:border-purple-300'
+                                          }`}
+                                        >
+                                          <span className="text-base">{dept.icon}</span>
+                                          <span className="text-[10px] leading-tight text-center">{dept.label}</span>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                                    <div>
+                                      <label className="block text-slate-400 font-semibold mb-1 text-[10.5px] uppercase tracking-wider">
+                                        Quantity to Move ({job.unit || 'KG'})
+                                      </label>
+                                      <input
+                                        type="number"
+                                        value={storeReleaseQty}
+                                        onChange={e => setStoreReleaseQty(e.target.value)}
+                                        placeholder="Enter quantity..."
+                                        className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg p-2.5 font-mono font-bold text-xs"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="block text-slate-400 font-semibold mb-1 text-[10.5px] uppercase tracking-wider">
+                                        Movement Remarks / Gate Pass
+                                      </label>
+                                      <input
+                                        type="text"
+                                        value={storeReleaseRemarks}
+                                        onChange={e => setStoreReleaseRemarks(e.target.value)}
+                                        placeholder="Optional remarks or handling notes..."
+                                        className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-300 dark:border-slate-700 rounded-lg p-2.5 text-xs font-sans"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <div className="flex justify-end gap-2 pt-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => setReleasingStoreJobNo(null)}
+                                      className="px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                                    >
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const qtyNum = typeof storeReleaseQty === 'number' ? storeReleaseQty : (parseFloat(String(storeReleaseQty)) || job.currentQty || job.orderQty);
+                                        onUpdateJobCard(job.jobCardNo, {
+                                          currentDepartment: storeReleaseDept,
+                                          status: 'Pending Acceptance',
+                                          currentQty: qtyNum,
+                                          heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment'
+                                        });
+                                        onCreateMovement({
+                                          jobCardNo: job.jobCardNo,
+                                          fromDepartment: activeDept,
+                                          toDepartment: storeReleaseDept,
+                                          quantity: qtyNum,
+                                          remarks: storeReleaseRemarks || `Material released from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`
+                                        });
+                                        setReleasingStoreJobNo(null);
+                                        setStoreReleaseRemarks('');
+                                      }}
+                                      className="px-5 py-2.5 rounded-xl text-xs font-black bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5 shadow-sm cursor-pointer"
+                                    >
+                                      <Check className="h-4 w-4" />
+                                      <span>Confirm & Move Material to {storeReleaseDept}</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
             {activeSubView === 'operations' && (
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
-                <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4">
-                  Active Floor Inwards Queue
-                </h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider">
+                    Active Floor Inwards Queue
+                  </h3>
+                  {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length > 0 && (
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800">
+                      🛒 {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length} Goods Stored
+                    </span>
+                  )}
+                </div>
+
+                {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length > 0 && (
+                  <div className="bg-purple-50/80 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/80 p-3 rounded-xl flex items-center justify-between text-xs mb-4">
+                    <div className="flex items-center gap-2.5">
+                      <span className="p-1.5 bg-purple-100 dark:bg-purple-900/60 rounded-lg text-purple-700 dark:text-purple-300 text-lg">🛒</span>
+                      <div>
+                        <p className="font-bold text-purple-950 dark:text-purple-200">
+                          {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length} Item(s) Stored in Purchase Incoming Store
+                        </p>
+                        <p className="text-[10.5px] text-purple-700 dark:text-purple-400">
+                          Goods received and held in store buffer. You can route them to Production, Heat Treatment, Plating, Packing, or Store at any time.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase').length === 0 ? (
                   <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
                     <span className="text-2xl">🌱</span>
-                    <p className="text-slate-400 text-xs font-mono font-medium">No purchase items currently in physical inwarding</p>
+                    <p className="text-slate-400 text-xs font-mono font-medium">No purchase items currently in physical inwarding or store buffer</p>
                   </div>
                 ) : (
                   <div className="space-y-4">
                     {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase').map(job => {
                       const isProcessing = activePurchaseJob === job.jobCardNo;
+                      const isHeldInStore = job.status === 'In Process' || !!job.purchaseDetails;
+
                       return (
-                        <div key={job.jobCardNo} className="bg-slate-50 dark:bg-slate-950 p-4 rounded-xl border border-slate-200 dark:border-slate-800/80">
+                        <div key={job.jobCardNo} className={`p-4 rounded-xl border transition-all ${
+                          isHeldInStore
+                            ? 'bg-purple-50/30 dark:bg-purple-950/20 border-purple-200 dark:border-purple-800/60'
+                            : 'bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800/80'
+                        }`}>
                           <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 text-xs">
                             <div onClick={() => onSelectJobCard(job)} className="cursor-pointer hover:underline min-w-0 flex-1">
                               <div className="flex items-center gap-2 flex-wrap">
@@ -2723,13 +4038,19 @@ Please adjust the quantity or request additional raw material issue.`);
                                     {job.materialType === 'Raw Material' ? '🪵 Raw Mat' : job.materialType === 'Semi Finished Goods' ? '⚙️ Semi Fin' : '📦 Fin Goods'}
                                   </span>
                                 )}
+                                {isHeldInStore && (
+                                  <span className="px-1.5 py-0.2 rounded font-bold uppercase text-[8.5px] bg-purple-100 text-purple-700 dark:bg-purple-950/80 dark:text-purple-300 border border-purple-300 dark:border-purple-800">
+                                    🛒 Stored in Purchase Store
+                                  </span>
+                                )}
                               </div>
                               <p className="text-[11px] text-slate-500 mt-1">
                                 <strong>{job.itemName}</strong> | Target: {job.orderQty} KG
+                                {job.currentQty ? ` | Current Qty: ${job.currentQty} KG` : ''}
                               </p>
                             </div>
                             
-                            <div className="flex items-center gap-1.5 shrink-0 self-end md:self-auto">
+                            <div className="flex items-center gap-1.5 shrink-0 self-end md:self-auto flex-wrap">
                               {job.status === 'Pending' ? (
                                 <button
                                   onClick={() => handleStartPurchase(job)}
@@ -2739,19 +4060,31 @@ Please adjust the quantity or request additional raw material issue.`);
                                   Start Inwarding
                                 </button>
                               ) : (
-                                <button
-                                  onClick={() => {
-                                    setActivePurchaseJob(isProcessing ? null : job.jobCardNo);
-                                    if (!isProcessing) {
-                                      setPurchaseRecQty(job.orderQty);
-                                      setPurchaseSentQty(job.orderQty);
-                                    }
-                                  }}
-                                  className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold py-1.5 px-3.5 rounded-md transition flex items-center gap-1 leading-none cursor-pointer"
-                                >
-                                  <Check className="h-3.5 w-3.5" />
-                                  Record Metrics
-                                </button>
+                                <>
+                                  {onQuickTransfer && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onQuickTransfer(job)}
+                                      className="bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-bold py-1.5 px-3 rounded-md transition flex items-center gap-1 leading-none cursor-pointer shadow-xs"
+                                    >
+                                      <ArrowRight className="h-3.5 w-3.5" />
+                                      Send / Transfer to Process
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => {
+                                      setActivePurchaseJob(isProcessing ? null : job.jobCardNo);
+                                      if (!isProcessing) {
+                                        setPurchaseRecQty(job.orderQty);
+                                        setPurchaseSentQty(job.orderQty);
+                                      }
+                                    }}
+                                    className="bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 text-slate-800 dark:text-slate-200 text-[11px] font-bold py-1.5 px-2.5 rounded-md transition flex items-center gap-1 leading-none cursor-pointer"
+                                  >
+                                    <Check className="h-3.5 w-3.5" />
+                                    {isProcessing ? 'Close Metrics' : 'Record / Edit Metrics'}
+                                  </button>
+                                </>
                               )}
                             </div>
                           </div>
@@ -2852,7 +4185,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     type="button"
                                     onClick={() => {
                                       setPurchaseMaterialType('Semi Finished Goods');
-                                      setPurchaseTargetDept('Heat Treatment');
+                                      setPurchaseTargetDept(job.heatTreatmentRequired ? 'Heat Treatment' : 'Production');
                                     }}
                                     className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
                                       purchaseMaterialType === 'Semi Finished Goods'
@@ -2866,7 +4199,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     type="button"
                                     onClick={() => {
                                       setPurchaseMaterialType('Finished Goods');
-                                      setPurchaseTargetDept('Store');
+                                      setPurchaseTargetDept('Packing');
                                     }}
                                     className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
                                       purchaseMaterialType === 'Finished Goods'
@@ -2881,41 +4214,117 @@ Please adjust the quantity or request additional raw material issue.`);
 
                               <div>
                                 <label className="block text-slate-400 font-semibold mb-1">Send / Route Material To</label>
-                                <div className="grid grid-cols-2 gap-2">
-                                  {(purchaseMaterialType === 'Raw Material' || purchaseMaterialType === 'Finished Goods') && (
-                                    <button
-                                      type="button"
-                                      onClick={() => setPurchaseTargetDept(purchaseMaterialType === 'Raw Material' ? 'Raw Material Store' : 'Store')}
-                                      className={`py-2 px-3 rounded-lg font-bold border text-center transition cursor-pointer text-xs col-span-2 bg-emerald-50 dark:bg-emerald-950/40 border-emerald-500 text-emerald-700 dark:text-emerald-400`}
-                                    >
-                                      🏢 {purchaseMaterialType === 'Raw Material' ? 'Raw Material Store' : 'Store'}
-                                    </button>
+                                <div className="space-y-1.5">
+                                  {purchaseMaterialType === 'Raw Material' && (
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setPurchaseTargetDept('Raw Material Store')}
+                                        className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
+                                          purchaseTargetDept === 'Raw Material Store'
+                                            ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
+                                            : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                                        }`}
+                                      >
+                                        🏢 Raw Material Store
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setPurchaseTargetDept('Purchase')}
+                                        className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
+                                          purchaseTargetDept === 'Purchase'
+                                            ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
+                                            : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
+                                        }`}
+                                      >
+                                        🛒 Purchase Store
+                                      </button>
+                                    </div>
+                                  )}
+                                  {purchaseMaterialType === 'Finished Goods' && (
+                                    <div className="grid grid-cols-3 gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => setPurchaseTargetDept('Packing')}
+                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                                          purchaseTargetDept === 'Packing'
+                                            ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
+                                            : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                                        }`}
+                                      >
+                                        📦 Packing
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setPurchaseTargetDept('Store')}
+                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                                          purchaseTargetDept === 'Store'
+                                            ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
+                                            : 'bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-800'
+                                        }`}
+                                      >
+                                        🏢 FG Store
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setPurchaseTargetDept('Purchase')}
+                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                                          purchaseTargetDept === 'Purchase'
+                                            ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
+                                            : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
+                                        }`}
+                                      >
+                                        🛒 Purchase Store
+                                      </button>
+                                    </div>
                                   )}
                                   {purchaseMaterialType === 'Semi Finished Goods' && (
-                                    <>
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => setPurchaseTargetDept('Production')}
+                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                                          purchaseTargetDept === 'Production'
+                                            ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
+                                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                                        }`}
+                                      >
+                                        ⚙️ Production
+                                      </button>
                                       <button
                                         type="button"
                                         onClick={() => setPurchaseTargetDept('Heat Treatment')}
-                                        className={`py-2 px-3 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
+                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
                                           purchaseTargetDept === 'Heat Treatment'
-                                            ? 'bg-amber-50 dark:bg-amber-950/40 border-amber-500 text-amber-700 dark:text-amber-400'
-                                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
+                                            ? 'bg-amber-600 text-white border-amber-700 shadow-sm'
+                                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                                         }`}
                                       >
-                                        🔥 Heat Treatment
+                                        🔥 Heat Treat
                                       </button>
                                       <button
                                         type="button"
                                         onClick={() => setPurchaseTargetDept('Plating')}
-                                        className={`py-2 px-3 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
+                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
                                           purchaseTargetDept === 'Plating'
-                                            ? 'bg-indigo-50 dark:bg-indigo-950/40 border-indigo-500 text-indigo-700 dark:text-indigo-400'
-                                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
+                                            ? 'bg-indigo-600 text-white border-indigo-700 shadow-sm'
+                                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                                         }`}
                                       >
-                                        💿 Plating Process
+                                        ⚡ Plating
                                       </button>
-                                    </>
+                                      <button
+                                        type="button"
+                                        onClick={() => setPurchaseTargetDept('Purchase')}
+                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
+                                          purchaseTargetDept === 'Purchase'
+                                            ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
+                                            : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
+                                        }`}
+                                      >
+                                        🛒 Purchase Store
+                                      </button>
+                                    </div>
                                   )}
                                 </div>
                               </div>
@@ -4001,7 +5410,7 @@ Please adjust the quantity or request additional raw material issue.`);
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 border-b border-slate-100 dark:border-slate-800 pb-3">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
                   <span>⚙️ In-Process Shop Floor Queue</span>
-                  <span className="text-xs text-slate-400 font-mono font-normal">({activeDepartmentJobs.length} active)</span>
+                  <span className="text-xs text-slate-400 font-mono font-normal">({filteredActiveDepartmentJobs.length} active)</span>
                 </h3>
                 <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200/80 dark:border-indigo-800/50 rounded-xl font-mono text-xs font-extrabold text-indigo-700 dark:text-indigo-300 self-start sm:self-auto">
                   <span className="text-[10px] text-indigo-500 uppercase font-bold font-sans">Queue Total WIP:</span>
@@ -4009,14 +5418,14 @@ Please adjust the quantity or request additional raw material issue.`);
                 </div>
               </div>
 
-              {activeDepartmentJobs.length === 0 ? (
+              {filteredActiveDepartmentJobs.length === 0 ? (
                 <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
                   <span className="text-2xl">⚡</span>
-                  <p className="text-slate-400 text-xs font-mono font-medium">Floor queue clear. Await material ingestion or dispatch approvals.</p>
+                  <p className="text-slate-400 text-xs font-mono font-medium">Floor queue clear or no matching job cards for active filter.</p>
                 </div>
               ) : (
                 <div className="space-y-4">
-                  {activeDepartmentJobs.map(job => {
+                  {filteredActiveDepartmentJobs.map(job => {
                     const isProcessing = 
                       ((activeDept as any) === 'Purchase' && activePurchaseJob === job.jobCardNo) ||
                       (activeDept === 'Production' && activeProdJob === job.jobCardNo) ||
@@ -4291,6 +5700,27 @@ Please adjust the quantity or request additional raw material issue.`);
                                 {isPackingRoutedDownstream && (
                                   <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
                                     <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                  </div>
+                                )}
+                                {(job.isAssemblyProduct || job.packingDetails?.isAssemblyProduct) && (
+                                  <div className="mt-2 p-2.5 bg-purple-50/80 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800/80 rounded-xl space-y-1">
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] font-bold text-purple-900 dark:text-purple-200 flex items-center gap-1.5">
+                                        <span>🧩 Assembled Multi-Item Product</span>
+                                      </span>
+                                      <span className="text-[10px] font-mono text-purple-700 dark:text-purple-300 font-extrabold bg-purple-100 dark:bg-purple-900/60 px-2 py-0.5 rounded">
+                                        {(job.assemblyComponents || job.packingDetails?.assemblyComponents || []).length} Components
+                                      </span>
+                                    </div>
+                                    {((job.assemblyComponents && job.assemblyComponents.length > 0) || (job.packingDetails?.assemblyComponents && job.packingDetails.assemblyComponents.length > 0)) && (
+                                      <div className="flex flex-wrap gap-1.5 pt-1">
+                                        {(job.assemblyComponents || job.packingDetails?.assemblyComponents || []).map((comp, idx) => (
+                                          <span key={idx} className="text-[10px] bg-white dark:bg-slate-900 border border-purple-200 dark:border-purple-800 text-slate-800 dark:text-slate-200 px-2 py-0.5 rounded font-mono font-semibold">
+                                            {comp.itemName} ({comp.consumedQty} {comp.unit || 'KG'})
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -5063,6 +6493,446 @@ Please adjust the quantity or request additional raw material issue.`);
             </div>
           )}
 
+          {/* B2. ASSEMBLY MANAGEMENT SUBVIEW FOR PACKING DEPARTMENT */}
+          {activeSubView === 'assembly' && activeDept === 'Packing' && (
+            <div className="space-y-6">
+              {/* Header Banner & Summary Analytics */}
+              <div className="bg-gradient-to-r from-purple-900 via-indigo-900 to-slate-900 border border-purple-500/30 rounded-2xl p-6 text-white shadow-xl relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+                  <Layers className="w-64 h-64 text-purple-300" />
+                </div>
+                
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
+                  <div>
+                    <div className="inline-flex items-center gap-2 bg-purple-500/20 border border-purple-400/30 px-3 py-1 rounded-full text-xs font-mono font-bold text-purple-300 mb-2">
+                      <Layers className="h-3.5 w-3.5" />
+                      <span>PACKING DEPARTMENT WORKBENCH</span>
+                    </div>
+                    <h2 className="text-xl font-black text-white flex items-center gap-2">
+                      <span>🧩 Multi-Item Assembly & Bundling Hub</span>
+                    </h2>
+                    <p className="text-xs text-purple-200/80 mt-1 max-w-xl leading-relaxed">
+                      Merge 2 or more component items or Job Cards into a single assembled kit or product. Track quantity-based deductions, component consumption breakdown, and stock ready for Store transfer or Dispatch.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setShowAssemblyModal(true)}
+                      className="px-4 py-2.5 bg-purple-500 hover:bg-purple-400 text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all shadow-lg shadow-purple-950/50 flex items-center gap-2 cursor-pointer border border-purple-300/30"
+                    >
+                      <Layers className="h-4 w-4" />
+                      <span>✨ Quick Assembly Builder</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Metrics Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6 pt-5 border-t border-purple-800/50">
+                  <div className="bg-purple-950/60 border border-purple-800/60 rounded-xl p-3">
+                    <span className="text-[10px] font-mono text-purple-300 uppercase font-bold block">Assembled Products</span>
+                    <span className="text-xl font-black font-mono text-white mt-1 block">
+                      {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length}
+                    </span>
+                  </div>
+                  <div className="bg-purple-950/60 border border-purple-800/60 rounded-xl p-3">
+                    <span className="text-[10px] font-mono text-purple-300 uppercase font-bold block">Components Consumed</span>
+                    <span className="text-xl font-black font-mono text-purple-200 mt-1 block">
+                      {jobCards
+                        .filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct)
+                        .reduce((acc, j) => acc + (j.assemblyComponents?.length || j.packingDetails?.assemblyComponents?.length || 0), 0)}
+                    </span>
+                  </div>
+                  <div className="bg-purple-950/60 border border-purple-800/60 rounded-xl p-3">
+                    <span className="text-[10px] font-mono text-purple-300 uppercase font-bold block">Total Output (Packed)</span>
+                    <span className="text-xl font-black font-mono text-emerald-300 mt-1 block">
+                      {jobCards
+                        .filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct)
+                        .reduce((acc, j) => acc + (j.packingDetails?.packedQty || j.currentQty || 0), 0)
+                        .toLocaleString()} <span className="text-xs font-sans text-purple-300 font-normal">PCS/SETS</span>
+                    </span>
+                  </div>
+                  <div className="bg-purple-950/60 border border-purple-800/60 rounded-xl p-3">
+                    <span className="text-[10px] font-mono text-purple-300 uppercase font-bold block">Available Component Jobs</span>
+                    <span className="text-xl font-black font-mono text-amber-300 mt-1 block">
+                      {jobCards.filter(j => j.currentDepartment === 'Packing' || !!j.packingDetails).length}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Inline Assembly Form & Selection Matrix */}
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+                  <div>
+                    <h3 className="font-sans font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+                      <span>🔨 Multi-Item Assembly Execution Workbench</span>
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                      Select 2+ existing Job Cards in Packing, enter component consumption quantities, and generate the target Assembled Product.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-200 dark:border-slate-800 self-start sm:self-auto">
+                    <button
+                      type="button"
+                      onClick={() => setAssemblyTargetMode('new')}
+                      className={`px-3 py-1.5 rounded-lg font-bold text-xs transition cursor-pointer ${
+                        assemblyTargetMode === 'new'
+                          ? 'bg-purple-600 text-white shadow'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      ✨ New Product
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAssemblyTargetMode('existing')}
+                      className={`px-3 py-1.5 rounded-lg font-bold text-xs transition cursor-pointer ${
+                        assemblyTargetMode === 'existing'
+                          ? 'bg-purple-600 text-white shadow'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      📦 Merge to Existing Job Card
+                    </button>
+                  </div>
+                </div>
+
+                {/* Target Specs */}
+                <div className="bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-900/50 rounded-xl p-4 space-y-4">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-purple-900 dark:text-purple-300">
+                    Target Assembled Product Metadata
+                  </h4>
+
+                  {assemblyTargetMode === 'new' ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                          Assembled Product Name <span className="text-red-500">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={assembledProductName}
+                          onChange={e => setAssembledProductName(e.target.value)}
+                          placeholder="e.g. Fastener Kit Heavy-Duty A1"
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                          Product Code <span className="text-red-500">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={assembledProductCode}
+                          onChange={e => setAssembledProductCode(e.target.value)}
+                          placeholder="e.g. KIT-HD-500"
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                          Client / Party Name
+                        </label>
+                        <input
+                          type="text"
+                          value={assembledPartyName}
+                          onChange={e => setAssembledPartyName(e.target.value)}
+                          placeholder="e.g. Multi-Item Assembly Kit"
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                        Select Target Packing Job Card <span className="text-red-500">*</span>
+                      </label>
+                      <select
+                        value={selectedAssemblyTargetJobNo}
+                        onChange={e => setSelectedAssemblyTargetJobNo(e.target.value)}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100"
+                      >
+                        <option value="">-- Select Target Job Card in Packing --</option>
+                        {jobCards
+                          .filter(j => j.currentDepartment === 'Packing' || !!j.packingDetails)
+                          .map(j => (
+                            <option key={j.jobCardNo} value={j.jobCardNo}>
+                              {j.jobCardNo} - {j.itemName} ({j.itemCode || 'No Code'}) [{j.partyName}]
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                        Assembled Output Qty <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={assembledQty || ''}
+                        onChange={e => setAssembledQty(Math.max(0, parseFloat(e.target.value) || 0))}
+                        placeholder="e.g. 50"
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-bold font-mono text-purple-700 dark:text-purple-300"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">Unit</label>
+                      <select
+                        value={assembledUnit}
+                        onChange={e => setAssembledUnit(e.target.value as any)}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-bold text-slate-800 dark:text-slate-100"
+                      >
+                        <option value="SETS">SETS</option>
+                        <option value="BOXES">BOXES</option>
+                        <option value="KGS">KGS</option>
+                        <option value="PCS">PCS</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">Box Count</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={assembledBoxCount || ''}
+                        onChange={e => setAssembledBoxCount(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-bold text-slate-800 dark:text-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">Pcs per Box</label>
+                      <input
+                        type="number"
+                        min="1"
+                        value={assembledPcsPerBox || ''}
+                        onChange={e => setAssembledPcsPerBox(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-bold text-slate-800 dark:text-slate-100"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Component Selection Grid */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-800 dark:text-slate-200">
+                      Component Job Cards Selection ({assemblyComponents.length} selected)
+                    </h4>
+                    <span className="text-[11px] text-purple-600 dark:text-purple-400 font-semibold">
+                      Min 2 components required
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-72 overflow-y-auto p-1">
+                    {jobCards
+                      .filter(j => j.currentDepartment === 'Packing' || !!j.packingDetails)
+                      .map(job => {
+                        const m = getJobCardProcessMetrics(job, movements);
+                        const totalRec = m.qtyReceivedAtPacking || m.qtyReceivedAtPlating || (job.currentDepartment === 'Packing' ? job.currentQty : 0);
+                        const totalMoved = movements
+                          .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.fromDepartment === 'Packing')
+                          .reduce((sum, mov) => sum + mov.quantity, 0);
+                        const pendingQty = Math.max(0, totalRec - totalMoved - (job.packingDetails?.rejectionQty || 0));
+
+                        const isSelected = assemblyComponents.some(c => c.jobCardNo === job.jobCardNo);
+                        const compState = assemblyComponents.find(c => c.jobCardNo === job.jobCardNo);
+
+                        return (
+                          <div
+                            key={job.jobCardNo}
+                            className={`p-3.5 rounded-xl border transition-all ${
+                              isSelected
+                                ? 'bg-purple-50/90 dark:bg-purple-950/60 border-purple-400 dark:border-purple-600 shadow-sm'
+                                : 'bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 hover:border-purple-300'
+                            }`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={e => {
+                                  if (e.target.checked) {
+                                    setAssemblyComponents(prev => [
+                                      ...prev,
+                                      {
+                                        jobCardNo: job.jobCardNo,
+                                        itemName: job.itemName,
+                                        itemCode: job.itemCode,
+                                        consumedQty: pendingQty || job.currentQty || 10,
+                                        unit: (job.unit as any) || 'KGS'
+                                      }
+                                    ]);
+                                  } else {
+                                    setAssemblyComponents(prev => prev.filter(c => c.jobCardNo !== job.jobCardNo));
+                                  }
+                                }}
+                                className="mt-1 h-4 w-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-1">
+                                  <span className="font-extrabold text-xs text-slate-900 dark:text-white truncate">{job.itemName}</span>
+                                  <span className="text-[10px] font-mono bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded font-bold shrink-0">
+                                    {job.jobCardNo}
+                                  </span>
+                                </div>
+                                <div className="flex items-center justify-between mt-1 text-[11px] text-slate-500">
+                                  <span>Party: {job.partyName}</span>
+                                  <span className="font-mono text-emerald-600 font-bold">Avail: {pendingQty.toLocaleString()} {job.unit || 'KG'}</span>
+                                </div>
+
+                                {isSelected && (
+                                  <div className="mt-2.5 pt-2 border-t border-purple-200 dark:border-purple-800 flex items-center justify-between gap-2">
+                                    <label className="text-[10px] font-bold uppercase text-purple-900 dark:text-purple-200">Deduct Consumed Qty:</label>
+                                    <div className="flex items-center gap-1">
+                                      <input
+                                        type="number"
+                                        min="0.1"
+                                        step="0.1"
+                                        value={compState?.consumedQty || ''}
+                                        onChange={e => {
+                                          const val = parseFloat(e.target.value) || 0;
+                                          setAssemblyComponents(prev =>
+                                            prev.map(c => c.jobCardNo === job.jobCardNo ? { ...c, consumedQty: val } : c)
+                                          );
+                                        }}
+                                        className="w-24 p-1 text-xs font-bold font-mono border border-purple-400 rounded bg-white dark:bg-slate-900 text-purple-900 dark:text-purple-100 text-right"
+                                      />
+                                      <span className="text-[10px] font-bold text-slate-500">{job.unit || 'KG'}</span>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+
+                {/* Assembly Actions */}
+                <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-4">
+                  <div className="text-xs text-slate-500">
+                    {assemblyComponents.length < 2 ? (
+                      <span className="text-amber-600 dark:text-amber-400 font-semibold">⚠️ Select at least 2 component items to enable assembly execution.</span>
+                    ) : (
+                      <span className="text-emerald-600 dark:text-emerald-400 font-semibold">✅ Ready to assemble {assemblyComponents.length} components into '{assemblyTargetMode === 'new' ? (assembledProductName || 'New Assembled Product') : selectedAssemblyTargetJobNo}'.</span>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleExecuteAssembly}
+                    disabled={assemblyComponents.length < 2 || assembledQty <= 0}
+                    className={`px-6 py-2.5 rounded-xl font-bold text-xs text-white transition flex items-center gap-2 cursor-pointer shadow-md ${
+                      assemblyComponents.length >= 2 && assembledQty > 0
+                        ? 'bg-purple-600 hover:bg-purple-500 shadow-purple-900/30'
+                        : 'bg-slate-400 cursor-not-allowed opacity-60'
+                    }`}
+                  >
+                    <Layers className="h-4 w-4" />
+                    <span>Merge Components & Generate Assembled Product</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Assembled Products Registry Table */}
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
+                <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+                  <h3 className="font-sans font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+                    <span>📦 Assembled Products Registry in Packing</span>
+                  </h3>
+                  <span className="text-xs font-mono font-bold text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950 px-2.5 py-1 rounded-full border border-purple-200 dark:border-purple-800">
+                    {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length} Total Assembled Products
+                  </span>
+                </div>
+
+                {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length === 0 ? (
+                  <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
+                    <span className="text-3xl">🧩</span>
+                    <p className="text-slate-500 text-xs font-medium">No multi-item assembled products generated yet.</p>
+                    <p className="text-slate-400 text-[11px]">Use the builder above to merge component job cards into an assembled kit.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {jobCards
+                      .filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct)
+                      .map(job => {
+                        const comps = job.assemblyComponents || job.packingDetails?.assemblyComponents || [];
+
+                        return (
+                          <div
+                            key={job.jobCardNo}
+                            className="bg-slate-50 dark:bg-slate-950 border border-purple-200 dark:border-purple-900/50 rounded-xl p-4 space-y-3"
+                          >
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-200/60 dark:border-slate-800 pb-3">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-extrabold text-sm text-slate-900 dark:text-white">{job.itemName}</span>
+                                  <span className="font-mono text-xs font-extrabold text-purple-700 dark:text-purple-300 bg-purple-100 dark:bg-purple-900/60 px-2 py-0.5 rounded">
+                                    {job.jobCardNo}
+                                  </span>
+                                  {job.itemCode && (
+                                    <span className="font-mono text-xs text-slate-500">
+                                      Code: {job.itemCode}
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="text-xs text-slate-500 block mt-0.5">
+                                  Client: <strong>{job.partyName}</strong> | Created by {job.createdBy} on {new Date(job.createdAt).toLocaleDateString()}
+                                </span>
+                              </div>
+
+                              <div className="flex items-center gap-3">
+                                <div className="text-right">
+                                  <span className="text-[10px] font-bold uppercase text-slate-400 block">Packed Assembled Qty</span>
+                                  <span className="font-mono font-extrabold text-emerald-600 text-sm">
+                                    {(job.packingDetails?.packedQty || job.currentQty).toLocaleString()} {job.unit}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Components Breakdown Badge Bar */}
+                            <div className="space-y-1.5">
+                              <span className="text-[10px] font-bold uppercase tracking-wider text-purple-800 dark:text-purple-300 flex items-center gap-1">
+                                <span>🧩 Consumed Component Items ({comps.length}):</span>
+                              </span>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                                {comps.map((c, idx) => (
+                                  <div
+                                    key={idx}
+                                    className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-lg p-2 flex items-center justify-between text-xs"
+                                  >
+                                    <div>
+                                      <span className="font-bold text-slate-800 dark:text-slate-200 block truncate">{c.itemName}</span>
+                                      <span className="font-mono text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold">{c.jobCardNo}</span>
+                                    </div>
+                                    <div className="font-mono font-extrabold text-rose-600 dark:text-rose-400 text-xs">
+                                      -{c.consumedQty} {c.unit || 'KG'}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            {job.packingDetails?.remarks && (
+                              <p className="text-xs italic text-slate-500 bg-white dark:bg-slate-900/60 p-2 rounded-lg border border-slate-100 dark:border-slate-800">
+                                💬 Packaging Note: {job.packingDetails.remarks}
+                              </p>
+                            )}
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* C. OUTBOUND TRANSFERS LOGGED FOR ARCHIVING */}
           {activeSubView === 'completed' && (
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
@@ -5135,6 +7005,567 @@ Please adjust the quantity or request additional raw material issue.`);
         movements={movements}
         initialJobCardNo={selectedJobCardForRMRequest || undefined}
       />
+
+      {/* Multi-Item Assembly Modal for Packing Department */}
+      {showAssemblyModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm overflow-y-auto font-sans">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-4xl w-full p-6 space-y-6 shadow-2xl my-8">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-purple-100 dark:bg-purple-950/80 text-purple-600 dark:text-purple-300 rounded-xl">
+                  <Layers className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                    <span>🧩 Packing Department: Multi-Item Assembly & Bundling</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Combine 2 or more component items / Job Cards in Packing into a single assembled product or kit.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAssemblyModal(false)}
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Assembly Mode Selector */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-100 dark:bg-slate-950 p-1.5 rounded-xl border border-slate-200 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setAssemblyTargetMode('new')}
+                className={`py-2.5 px-4 rounded-lg font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer ${
+                  assemblyTargetMode === 'new'
+                    ? 'bg-purple-600 text-white shadow-md'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                <span>✨ Create New Assembled Product</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setAssemblyTargetMode('existing')}
+                className={`py-2.5 px-4 rounded-lg font-bold text-xs transition flex items-center justify-center gap-2 cursor-pointer ${
+                  assemblyTargetMode === 'existing'
+                    ? 'bg-purple-600 text-white shadow-md'
+                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                }`}
+              >
+                <span>📦 Assemble into Existing Packing Job Card</span>
+              </button>
+            </div>
+
+            {/* Target Details Form */}
+            <div className="bg-purple-50/50 dark:bg-purple-950/20 border border-purple-200 dark:border-purple-900/50 rounded-xl p-4 space-y-4">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-purple-900 dark:text-purple-300 flex items-center gap-2">
+                <span>Target Assembled Product Details</span>
+              </h4>
+
+              {assemblyTargetMode === 'new' ? (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                      Assembled Product Name <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={assembledProductName}
+                      onChange={e => setAssembledProductName(e.target.value)}
+                      placeholder="e.g. Fastener Kit Heavy-Duty A1"
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                      Product Code <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={assembledProductCode}
+                      onChange={e => setAssembledProductCode(e.target.value)}
+                      placeholder="e.g. KIT-HD-500"
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100 font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                      Client / Party Name
+                    </label>
+                    <input
+                      type="text"
+                      value={assembledPartyName}
+                      onChange={e => setAssembledPartyName(e.target.value)}
+                      placeholder="e.g. Internal Assembly Stock"
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                    Select Target Packing Job Card <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    value={selectedAssemblyTargetJobNo}
+                    onChange={e => setSelectedAssemblyTargetJobNo(e.target.value)}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold text-slate-800 dark:text-slate-100"
+                  >
+                    <option value="">-- Select Target Job Card in Packing --</option>
+                    {jobCards
+                      .filter(j => j.currentDepartment === 'Packing' || !!j.packingDetails)
+                      .map(j => (
+                        <option key={j.jobCardNo} value={j.jobCardNo}>
+                          {j.jobCardNo} - {j.itemName} ({j.itemCode || 'No Code'}) [{j.partyName}]
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Quantity & Packaging Specs */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                    Assembled Qty <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={assembledQty || ''}
+                    onChange={e => setAssembledQty(Math.max(0, parseFloat(e.target.value) || 0))}
+                    placeholder="e.g. 50"
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-bold font-mono text-purple-700 dark:text-purple-300"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                    Unit
+                  </label>
+                  <select
+                    value={assembledUnit}
+                    onChange={e => setAssembledUnit(e.target.value as any)}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-bold text-slate-800 dark:text-slate-100"
+                  >
+                    <option value="SETS">SETS</option>
+                    <option value="BOXES">BOXES</option>
+                    <option value="KGS">KGS</option>
+                    <option value="PCS">PCS</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                    Box Count
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={assembledBoxCount || ''}
+                    onChange={e => {
+                      const count = Math.max(0, parseInt(e.target.value, 10) || 0);
+                      setAssembledBoxCount(count);
+                    }}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-bold text-slate-800 dark:text-slate-100"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                    Pcs per Box
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={assembledPcsPerBox || ''}
+                    onChange={e => {
+                      const pcs = Math.max(0, parseInt(e.target.value, 10) || 0);
+                      setAssembledPcsPerBox(pcs);
+                    }}
+                    className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-bold text-slate-800 dark:text-slate-100"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Select Component Items Section */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-300 flex items-center gap-2">
+                  <span>Select Component Items to Consume for Assembly ({assemblyComponents.length} selected)</span>
+                </h4>
+                <span className="text-[11px] text-slate-500 font-medium">
+                  Min 2 components required
+                </span>
+              </div>
+
+              {/* Available Job Cards in Packing */}
+              <div className="max-h-56 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl divide-y divide-slate-100 dark:divide-slate-800/60 bg-slate-50/50 dark:bg-slate-950/50 p-2 space-y-2">
+                {jobCards
+                  .filter(j => j.currentDepartment === 'Packing' || !!j.packingDetails)
+                  .map(job => {
+                    const m = getJobCardProcessMetrics(job, movements);
+                    const totalRec = m.qtyReceivedAtPacking || m.qtyReceivedAtPlating || (job.currentDepartment === 'Packing' ? job.currentQty : 0);
+                    const totalMoved = movements
+                      .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.fromDepartment === 'Packing')
+                      .reduce((sum, mov) => sum + mov.quantity, 0);
+                    const pendingQty = Math.max(0, totalRec - totalMoved - (job.packingDetails?.rejectionQty || 0));
+
+                    const isSelected = assemblyComponents.some(c => c.jobCardNo === job.jobCardNo);
+                    const compState = assemblyComponents.find(c => c.jobCardNo === job.jobCardNo);
+
+                    return (
+                      <div
+                        key={job.jobCardNo}
+                        className={`p-3 rounded-lg border transition ${
+                          isSelected
+                            ? 'bg-purple-50/90 dark:bg-purple-950/50 border-purple-300 dark:border-purple-700'
+                            : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 hover:border-purple-300'
+                        }`}
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex items-start gap-3">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={e => {
+                                if (e.target.checked) {
+                                  setAssemblyComponents(prev => [
+                                    ...prev,
+                                    {
+                                      jobCardNo: job.jobCardNo,
+                                      itemName: job.itemName,
+                                      itemCode: job.itemCode,
+                                      consumedQty: pendingQty || job.currentQty || 10,
+                                      unit: (job.unit as any) || 'KGS'
+                                    }
+                                  ]);
+                                } else {
+                                  setAssemblyComponents(prev => prev.filter(c => c.jobCardNo !== job.jobCardNo));
+                                }
+                              }}
+                              className="mt-1 h-4 w-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 cursor-pointer"
+                            />
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-extrabold text-xs text-slate-800 dark:text-slate-100">{job.itemName}</span>
+                                <span className="text-[10px] font-mono bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded font-bold">
+                                  {job.jobCardNo}
+                                </span>
+                                {job.itemCode && (
+                                  <span className="text-[10px] font-mono text-slate-500">
+                                    Code: {job.itemCode}
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-[11px] text-slate-500 block mt-0.5">
+                                Party: {job.partyName} | Available Packing Qty: <strong className="text-emerald-600 font-mono">{pendingQty.toLocaleString()} {job.unit || 'KG'}</strong>
+                              </span>
+                            </div>
+                          </div>
+
+                          {isSelected && (
+                            <div className="flex items-center gap-2 shrink-0 bg-white dark:bg-slate-900 p-1.5 rounded-md border border-purple-200 dark:border-purple-800">
+                              <label className="text-[10px] font-bold uppercase text-purple-700 dark:text-purple-300">Consumed Qty:</label>
+                              <input
+                                type="number"
+                                min="0.1"
+                                step="0.1"
+                                value={compState?.consumedQty || ''}
+                                onChange={e => {
+                                  const val = parseFloat(e.target.value) || 0;
+                                  setAssemblyComponents(prev =>
+                                    prev.map(c => c.jobCardNo === job.jobCardNo ? { ...c, consumedQty: val } : c)
+                                  );
+                                }}
+                                className="w-24 p-1 text-xs font-bold font-mono border border-purple-300 dark:border-purple-700 rounded bg-purple-50/50 dark:bg-purple-950/80 text-purple-900 dark:text-purple-100"
+                              />
+                              <span className="text-[10px] font-bold text-slate-500">{job.unit || 'KG'}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+
+            {/* Assembly Remarks */}
+            <div>
+              <label className="block text-[10px] font-bold uppercase text-slate-500 mb-1">
+                Assembly Notes / Special Packaging Instructions
+              </label>
+              <textarea
+                rows={2}
+                value={assemblyRemarks}
+                onChange={e => setAssemblyRemarks(e.target.value)}
+                placeholder="e.g. Include 1 Instruction Manual per box. Seal with heavy duty strapping."
+                className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-medium text-slate-800 dark:text-slate-100"
+              />
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-3 border-t border-slate-200 dark:border-slate-800 pt-4">
+              <button
+                type="button"
+                onClick={() => setShowAssemblyModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteAssembly}
+                disabled={assemblyComponents.length < 2 || assembledQty <= 0}
+                className={`px-5 py-2.5 rounded-xl font-bold text-xs text-white transition flex items-center gap-2 cursor-pointer shadow-md ${
+                  assemblyComponents.length >= 2 && assembledQty > 0
+                    ? 'bg-purple-600 hover:bg-purple-500 shadow-purple-900/30'
+                    : 'bg-slate-400 cursor-not-allowed opacity-60'
+                }`}
+              >
+                <Layers className="h-4 w-4" />
+                <span>Assemble & Generate Multi-Item Product ({assemblyComponents.length} Items)</span>
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* CUSTOMER ITEM MASTER MODAL */}
+      {/* ======================================================== */}
+      {showCustomerItemMasterModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/70 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-4xl w-full p-6 shadow-2xl space-y-6 max-h-[90vh] overflow-y-auto">
+            
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-indigo-50 dark:bg-indigo-950/70 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200 dark:border-indigo-800">
+                  <Sliders className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-slate-850 dark:text-white flex items-center gap-2">
+                    <span>Customer Item Master Database</span>
+                    <span className="text-xs bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded-full font-mono font-bold">
+                      {savedItems.length} Total Items
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Create and link products with optional item codes under specific customer / supplier accounts
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCustomerItemMasterModal(false)}
+                className="p-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer transition"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Create New Item Form */}
+            <div className="bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/40 rounded-xl p-4 space-y-3">
+              <span className="text-xs font-bold text-indigo-700 dark:text-indigo-300 uppercase tracking-wider block">
+                ➕ Create New Item under Customer / Party
+              </span>
+
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  if (!newMasterCustomer.trim()) {
+                    alert("Please specify Customer / Party Name.");
+                    return;
+                  }
+                  if (!newMasterItemName.trim()) {
+                    alert("Please specify Item Name.");
+                    return;
+                  }
+                  setIsSavingMasterItem(true);
+                  try {
+                    const cleanCode = newMasterItemCode.trim() ? newMasterItemCode.trim().toUpperCase() : '-';
+                    const saved = await DBService.saveItem(newMasterItemName.trim(), cleanCode, newMasterCustomer.trim());
+                    setSavedItems(prev => prev.some(x => x.id === saved.id) ? prev : [saved, ...prev]);
+                    setNewMasterItemName('');
+                    setNewMasterItemCode('');
+                    alert(`✅ Item "${newMasterItemName.trim()}" registered for customer "${newMasterCustomer.trim()}"!`);
+                  } catch (err) {
+                    console.error("Master item create error:", err);
+                    alert("Failed to save item. Please try again.");
+                  } finally {
+                    setIsSavingMasterItem(false);
+                  }
+                }}
+                className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end text-xs"
+              >
+                <div>
+                  <label className="block text-slate-500 font-semibold mb-1">Customer / Party Name *</label>
+                  <input
+                    type="text"
+                    required
+                    list="master-known-customers"
+                    placeholder="e.g. Apex Engineering Solutions"
+                    value={newMasterCustomer}
+                    onChange={e => setNewMasterCustomer(e.target.value)}
+                    className="w-full bg-white dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
+                  />
+                  <datalist id="master-known-customers">
+                    {knownCustomers.map(c => <option key={c} value={c} />)}
+                  </datalist>
+                </div>
+
+                <div>
+                  <label className="block text-slate-500 font-semibold mb-1">Item Name *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. M12 High-Tensile Bolt"
+                    value={newMasterItemName}
+                    onChange={e => setNewMasterItemName(e.target.value)}
+                    className="w-full bg-white dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-500 font-semibold mb-1">Item Code <span className="text-slate-400 font-normal">(Optional)</span></label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="e.g. BOLT-M12-G8"
+                      value={newMasterItemCode}
+                      onChange={e => setNewMasterItemCode(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-indigo-500 font-mono"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isSavingMasterItem}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg shadow-sm transition shrink-0 cursor-pointer flex items-center gap-1"
+                    >
+                      <Plus className="h-4 w-4" />
+                      <span>Create</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+
+            {/* Filter & Search Bar */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-50 dark:bg-slate-800/40 p-3 rounded-xl border border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <Filter className="h-4 w-4 text-slate-400" />
+                <span className="text-xs font-bold text-slate-600 dark:text-slate-300">Filter by Customer:</span>
+                <select
+                  value={masterCustomerFilter}
+                  onChange={e => setMasterCustomerFilter(e.target.value)}
+                  className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-800 dark:text-slate-200 focus:outline-none"
+                >
+                  <option value="All">All Customers ({knownCustomers.length})</option>
+                  {knownCustomers.map(cust => (
+                    <option key={cust} value={cust}>{cust}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="relative w-full sm:w-64">
+                <Search className="h-4 w-4 text-slate-400 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Search item name or code..."
+                  value={masterSearchQuery}
+                  onChange={e => setMasterSearchQuery(e.target.value)}
+                  className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-800 dark:text-slate-100 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Items List */}
+            <div className="space-y-2 max-h-96 overflow-y-auto">
+              {(() => {
+                const list = savedItems.filter(item => {
+                  const cust = (item.partyName || item.customerName || '').trim();
+                  const matchesCust = masterCustomerFilter === 'All' || cust.toLowerCase() === masterCustomerFilter.toLowerCase();
+                  const q = masterSearchQuery.trim().toLowerCase();
+                  const matchesQ = !q || item.itemName.toLowerCase().includes(q) || (item.itemCode && item.itemCode.toLowerCase().includes(q)) || cust.toLowerCase().includes(q);
+                  return matchesCust && matchesQ;
+                });
+
+                if (list.length === 0) {
+                  return (
+                    <div className="text-center py-8 text-slate-400 text-xs bg-slate-50 dark:bg-slate-800/20 rounded-xl border border-dashed border-slate-200 dark:border-slate-800">
+                      No items found matching the selected customer or search criteria.
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {list.map(item => {
+                      const custName = item.partyName || item.customerName || 'General / Unmapped';
+                      return (
+                        <div
+                          key={item.id}
+                          className="p-3.5 bg-white dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-xl flex items-center justify-between gap-3 shadow-sm hover:border-indigo-300 transition"
+                        >
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-xs text-slate-850 dark:text-slate-100 truncate">{item.itemName}</span>
+                              {item.itemCode && item.itemCode !== '-' && (
+                                <span className="font-mono text-[10px] bg-indigo-50 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded border border-indigo-200 dark:border-indigo-800 shrink-0">
+                                  {item.itemCode}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                              <Building className="h-3 w-3 text-indigo-500" />
+                              <span className="font-medium truncate">{custName}</span>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (confirm(`Are you sure you want to delete item "${item.itemName}" from customer "${custName}"?`)) {
+                                try {
+                                  await DBService.deleteSavedItem(item.id);
+                                  setSavedItems(prev => prev.filter(x => x.id !== item.id));
+                                } catch (err) {
+                                  console.error("Delete error:", err);
+                                  alert("Failed to delete item.");
+                                }
+                              }
+                            }}
+                            className="p-2 text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition shrink-0 cursor-pointer"
+                            title="Delete Item"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+
+            {/* Footer */}
+            <div className="flex justify-end border-t border-slate-100 dark:border-slate-800 pt-3">
+              <button
+                type="button"
+                onClick={() => setShowCustomerItemMasterModal(false)}
+                className="px-5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-bold text-xs rounded-xl cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
 
     </div>
   );

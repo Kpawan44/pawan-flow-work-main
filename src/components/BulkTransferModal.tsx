@@ -19,8 +19,15 @@ interface BulkTransferModalProps {
 }
 
 // Helper to determine the next logical department step
-const getNextLogicalDepartment = (from: Department, htRequired: boolean): Department | 'Completed' => {
-  if (from === 'Purchase') return 'Store';
+const getNextLogicalDepartment = (from: Department, htRequired: boolean, jCard?: JobCard | null): Department | 'Completed' => {
+  if (from === 'Purchase') {
+    const matType = jCard?.materialType || jCard?.outsourceDetails?.outsourceMaterialType;
+    if (matType === 'Finished Goods') {
+      return 'Packing';
+    } else {
+      return htRequired ? 'Heat Treatment' : 'Production';
+    }
+  }
   if (from === 'Production') return htRequired ? 'Heat Treatment' : 'Plating';
   if (from === 'Heat Treatment') return 'Plating';
   if (from === 'Plating') return 'Packing';
@@ -87,7 +94,7 @@ export default function BulkTransferModal({
       ? 'Production' 
       : (firstCard.currentDepartment as Department);
     
-    const nextTarget = getNextLogicalDepartment(initialFromDept, firstCard.heatTreatmentRequired);
+    const nextTarget = getNextLogicalDepartment(initialFromDept, firstCard.heatTreatmentRequired, firstCard);
     setToDept(nextTarget);
 
     // Initialize quantities with the available weight for each job card

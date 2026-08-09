@@ -38,6 +38,7 @@ type ReportType =
   | 'heattreat'
   | 'plating'
   | 'packing'
+  | 'incoming_store'
   | 'store'
   | 'raw_material_store'
   | 'raw_material_summary'
@@ -141,6 +142,7 @@ export default function ReportView({ jobCards, movements, onCreateMovement, curr
     { id: 'heattreat', label: 'Heat Treatment Report', desc: "Hardness levels and temperature recipes" },
     { id: 'plating', label: 'Surfacing & Plating Report', desc: "Thickness measurements and coating quality" },
     { id: 'packing', label: 'Packaging Weights Report', desc: "Box specifications and total count packed" },
+    { id: 'incoming_store', label: 'Incoming Store Report', desc: "Goods received into purchase and incoming store buffer before release to production floors" },
     { id: 'store', label: 'Store / Warehousing Report', desc: "Verified inventory placement and bin location storage" },
     { id: 'raw_material_store', label: 'Raw Material Store Ledger', desc: "Production raw material requests, issued weights, and rejected requests log" },
     { id: 'raw_material_summary', label: 'Raw Material Stock & Demand', desc: "Comprehensive audit of raw material stock levels, consumption trends, and pending requests (PDF friendly)" },
@@ -276,6 +278,40 @@ export default function ReportView({ jobCards, movements, onCreateMovement, curr
           };
         });
         break;
+      case 'incoming_store': {
+        const incomingCards = jobCards.filter(c => 
+          c.currentDepartment === 'Purchase' || 
+          c.processType === 'Purchase' || 
+          c.status === 'Stored' || 
+          !!c.purchaseDetails ||
+          movements.some(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && (m.toDepartment === 'Purchase' || (m.toDepartment === 'Store' && m.fromDepartment === 'Purchase')))
+        );
+
+        baseData = incomingCards.map(c => {
+          const storeMovs = movements.filter(mov => 
+            mov.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && 
+            (mov.toDepartment === 'Purchase' || mov.fromDepartment === 'Purchase' || mov.toDepartment === 'Store')
+          );
+          const latestMov = storeMovs[storeMovs.length - 1];
+
+          return {
+            jobCardNo: c.jobCardNo,
+            orderNo: c.orderNo || c.purchaseDetails?.billNo || 'N/A',
+            supplierOrParty: c.partyName || c.purchaseDetails?.supplierName || 'N/A',
+            itemName: c.itemName,
+            itemCode: c.itemCode || 'N/A',
+            materialType: c.materialType || c.processType || 'Purchase Inward',
+            receivedQty: c.currentQty || c.orderQty || 0,
+            unit: c.unit || 'KG',
+            billNo: c.purchaseDetails?.billNo || 'N/A',
+            locationBin: latestMov?.allottedLocation || c.storeDetails?.locationBin || 'Purchase Buffer',
+            currentDepartment: c.currentDepartment,
+            status: c.status || 'Stored',
+            date: c.createdAt
+          };
+        });
+        break;
+      }
       case 'store':
         baseData = jobCards.map(c => {
           const m = getJobCardProcessMetrics(c, movements);
