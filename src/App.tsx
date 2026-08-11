@@ -633,7 +633,7 @@ export default function App() {
     // that actually changed into existing state instead.
     const applyMovementChanges = (changes: { type: 'added' | 'modified' | 'removed'; data: MaterialMovement }[]) => {
       setMovements(prev => {
-        const byId = new Map(prev.map(m => [m.movementId, m]));
+        const byId = new Map<string, MaterialMovement>(prev.map(m => [m.movementId, m]));
         for (const change of changes) {
           if (change.type === 'removed') {
             byId.delete(change.data.movementId);
@@ -649,7 +649,7 @@ export default function App() {
 
     const applyAuditLogChanges = (changes: { type: 'added' | 'modified' | 'removed'; data: AuditLog }[]) => {
       setAuditLogs(prev => {
-        const byId = new Map(prev.map(a => [a.id, a]));
+        const byId = new Map<string, AuditLog>(prev.map(a => [a.id, a]));
         for (const change of changes) {
           if (change.type === 'removed') {
             byId.delete(change.data.id);
