@@ -1,4 +1,4 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
+﻿import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import { 
   getFirestore, 
@@ -1130,7 +1130,7 @@ export class DBService {
         if (!alreadyNotified) {
           await this.createNotification({
             department: 'Production',
-            title: '⚠️ High Rejection Rate Alert',
+            title: 'ΓÜá∩╕Å High Rejection Rate Alert',
             message: `Job Card ${jobCardNo} (${updatedCard.itemName}) has exceeded 10% rejection threshold. Total Rejections: ${totalRejections} KG / Order Qty: ${orderQty} KG (${((totalRejections / orderQty) * 100).toFixed(1)}%).`,
             userId: 'all_production'
           });
@@ -1612,7 +1612,7 @@ export class DBService {
     // Create alarm notification for sender
     await this.createNotification({
       department: mov.fromDepartment,
-      title: '⚠️ Material Rejected',
+      title: 'ΓÜá∩╕Å Material Rejected',
       message: `${rejectedByName} rejected Job Card ${mov.jobCardNo} movement. Remarks: "${remarks}"`,
       userId: `all_${mov.fromDepartment.toLowerCase().replace(' ', '_')}`
     });
@@ -2226,7 +2226,7 @@ export class DBService {
     await this.createNotification({
       userId: newOrder.assignedToUserId,
       department: 'Purchase',
-      title: '📦 New Outsource Order Assigned',
+      title: '≡ƒôª New Outsource Order Assigned',
       message: `${userName} (Dispatch) assigned process outsource order ${orderId} (${newOrder.itemName}, ${newOrder.orderQty} ${newOrder.unit}) to you.`
     });
 
@@ -2425,6 +2425,55 @@ export class DBService {
   }
 
   // Realtime subscription emulation & Live Firestore triggers
+  // Incremental subscriptions for high-volume, ever-growing collections
+  // (movements, audit logs). Unlike subscribeToUpdates() above - which just
+  // signals "something changed" and leaves the caller to re-fetch the whole
+  // collection - these deliver only the documents that actually
+  // added/changed/were removed on each update, via Firestore's own
+  // docChanges(). That keeps the read cost proportional to what changed,
+  // not to how large the collection has grown. The very first callback
+  // still delivers the full existing set (as 'added' events), same as a
+  // one-time full read - only subsequent updates are incremental.
+  static subscribeMovementsIncremental(
+    onChange: (changes: { type: 'added' | 'modified' | 'removed'; data: MaterialMovement }[]) => void
+  ): () => void {
+    if (!useRealFirebase || !db) return () => {};
+    try {
+      return onSnapshot(collection(db, 'mfr_movements'), (snapshot) => {
+        const changes = snapshot.docChanges().map((change) => ({
+          type: change.type,
+          data: change.doc.data() as MaterialMovement,
+        }));
+        if (changes.length > 0) onChange(changes);
+      }, (err) => {
+        console.error('Firestore incremental watch failed for mfr_movements:', err);
+      });
+    } catch (err) {
+      console.error('Failed to register incremental listener for mfr_movements:', err);
+      return () => {};
+    }
+  }
+
+  static subscribeAuditLogsIncremental(
+    onChange: (changes: { type: 'added' | 'modified' | 'removed'; data: AuditLog }[]) => void
+  ): () => void {
+    if (!useRealFirebase || !db) return () => {};
+    try {
+      return onSnapshot(collection(db, 'mfr_audit_logs'), (snapshot) => {
+        const changes = snapshot.docChanges().map((change) => ({
+          type: change.type,
+          data: change.doc.data() as AuditLog,
+        }));
+        if (changes.length > 0) onChange(changes);
+      }, (err) => {
+        console.error('Firestore incremental watch failed for mfr_audit_logs:', err);
+      });
+    } catch (err) {
+      console.error('Failed to register incremental listener for mfr_audit_logs:', err);
+      return () => {};
+    }
+  }
+
   static subscribeToUpdates(collectionName: string, callback: () => void): () => void {
     if (useRealFirebase && db) {
       try {
