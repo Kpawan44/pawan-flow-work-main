@@ -1,4 +1,4 @@
-export type Department = 'Purchase' | 'Raw Material Store' | 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
+﻿export type Department = 'Purchase' | 'Raw Material Store' | 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
 export type UserRole = 'super_admin' | 'admin' | 'staff';
 
 export interface UserProfile {
@@ -95,9 +95,7 @@ export interface OutsourceOrder {
   poPlacedByUserName?: string;
   
   // Goods Receipt Details (filled when Material Received by Purchase / Assignee)
-  receivedQty?: number; // amount received in the MOST RECENT receipt event
-  totalReceivedQty?: number; // running total across ALL receipt events - used to reconcile against orderQty and block over-receipt
-  receiptHistory?: { quantity: number; receivedAt: string; receivedByUserId: string; receivedByUserName: string; challanNo?: string }[];
+  receivedQty?: number;
   rejectionQty?: number;
   rejectionReason?: string;
   billNo?: string;
@@ -140,6 +138,7 @@ export interface JobCard {
   
   isAssemblyProduct?: boolean;
   assemblyComponents?: AssemblyComponent[];
+  parentJobCardNo?: string; // set when this job card was split off from a partial release (e.g. Incoming Store) - links back to the original card that still holds the remaining quantity
 
   // Custom processing fields recorded from departments
   operatorName?: string;

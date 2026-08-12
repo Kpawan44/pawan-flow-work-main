@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+﻿import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { getJobCardProcessMetrics, getRawMaterialIssuedQty, getWireScrapQty } from '../lib/metrics';
 import { 
@@ -323,7 +323,7 @@ export default function DepartmentOperations({
 
   // Heat Treatment Inputs
   const [htHardness, setHtHardness] = useState('HRC 32-38');
-  const [htTemp, setHtTemp] = useState('850°C');
+  const [htTemp, setHtTemp] = useState('850┬░C');
   const [htDuration, setHtDuration] = useState('4 hours');
   const [htRejectionQty, setHtRejectionQty] = useState<number>(0);
   const [htQtyReceived, setHtQtyReceived] = useState<number>(0);
@@ -332,7 +332,7 @@ export default function DepartmentOperations({
 
   // Plating Inputs
   const [platingType, setPlatingType] = useState('Acid Zinc Plating (Yellow)');
-  const [platingThick, setPlatingThick] = useState('8-12μm');
+  const [platingThick, setPlatingThick] = useState('8-12╬╝m');
   const [platingDur, setPlatingDur] = useState('45 min');
   const [platingRejectionQty, setPlatingRejectionQty] = useState<number>(0);
   const [platingQtyReceived, setPlatingQtyReceived] = useState<number>(0);
@@ -457,14 +457,14 @@ export default function DepartmentOperations({
           requestedBy: currentUser?.name || 'Raw Material Store Keeper',
           urgency: 'High'
         },
-        remarks: `🚫 Wire Quantity Rejected: ${wireRejectQty} KG (${wireRejectReason}). Deducted automatically from raw material store inventory. Notes: ${wireRejectRemarks || 'Direct Store Rejection'}`
+        remarks: `≡ƒÜ½ Wire Quantity Rejected: ${wireRejectQty} KG (${wireRejectReason}). Deducted automatically from raw material store inventory. Notes: ${wireRejectRemarks || 'Direct Store Rejection'}`
       });
 
       setShowWireRejectionModal(false);
       setWireRejectQty(0);
       setWireRejectRemarks('');
       setWireRejectJobCardNo('');
-      alert(`✅ Wire rejection of ${wireRejectQty} KG recorded for ${selectedRejectMaterialCode}. Store inventory reduced automatically.`);
+      alert(`Γ£à Wire rejection of ${wireRejectQty} KG recorded for ${selectedRejectMaterialCode}. Store inventory reduced automatically.`);
     } catch (err) {
       console.error("Error submitting wire rejection:", err);
       alert("Failed to submit wire rejection. Please try again.");
@@ -533,7 +533,7 @@ export default function DepartmentOperations({
         if (prev.some(x => x.id === saved.id)) return prev;
         return [saved, ...prev];
       });
-      alert(`✅ Item "${iName.trim()}" successfully created & saved under customer "${custName.trim()}"!`);
+      alert(`Γ£à Item "${iName.trim()}" successfully created & saved under customer "${custName.trim()}"!`);
     } catch (err) {
       console.error("Failed to save item:", err);
       alert("Failed to save item. Please try again.");
@@ -1021,7 +1021,7 @@ export default function DepartmentOperations({
       );
 
       if (hasUnacceptedIssuedMaterial) {
-        alert(`⚠️ Cannot Start Production:
+        alert(`ΓÜá∩╕Å Cannot Start Production:
 Raw material has been issued by the Raw Material Store, but has NOT been accepted by the Production department yet.
 
 To resolve:
@@ -1029,7 +1029,7 @@ To resolve:
 2. Click "Accept Custody" on the issued raw material batch.
 3. Return here to start production.`);
       } else {
-        alert(`⚠️ Cannot Start Production:
+        alert(`ΓÜá∩╕Å Cannot Start Production:
 Raw material has not been issued yet for Job Card ${jCard.jobCardNo}. 
 
 To resolve:
@@ -1061,7 +1061,7 @@ To resolve:
       );
 
       if (hasUnacceptedIssuedMaterial) {
-        alert(`⚠️ Cannot Log Production:
+        alert(`ΓÜá∩╕Å Cannot Log Production:
 Raw material has been issued by the Raw Material Store, but has NOT been accepted by the Production department yet.
 
 To resolve:
@@ -1069,13 +1069,13 @@ To resolve:
 2. Click "Accept Custody" on the issued raw material batch.
 3. Return here to log production.`);
       } else {
-        alert(`⚠️ Exceeded Raw Material Limit:
+        alert(`ΓÜá∩╕Å Exceeded Raw Material Limit:
 Total logged production (${totalProducedIncludingCurrent} KG) cannot exceed the issued raw material quantity (${issuedQty} KG).
 
-• Issued Raw Material: ${issuedQty} KG
-• Production logged so far: ${totalMovedFromProdBefore} KG
-• Trying to log now: ${prodQty} KG
-• Maximum allowed production now: ${Math.max(0, issuedQty - totalMovedFromProdBefore)} KG
+ΓÇó Issued Raw Material: ${issuedQty} KG
+ΓÇó Production logged so far: ${totalMovedFromProdBefore} KG
+ΓÇó Trying to log now: ${prodQty} KG
+ΓÇó Maximum allowed production now: ${Math.max(0, issuedQty - totalMovedFromProdBefore)} KG
 
 Please adjust the quantity or request additional raw material issue.`);
       }
@@ -1428,7 +1428,7 @@ Please adjust the quantity or request additional raw material issue.`);
       }
     });
 
-    alert(`✅ Multi-Item Assembly Successful!\nTarget Assembled Product '${targetName}' (${targetJobNo}) generated from ${assemblyComponents.length} component items.`);
+    alert(`Γ£à Multi-Item Assembly Successful!\nTarget Assembled Product '${targetName}' (${targetJobNo}) generated from ${assemblyComponents.length} component items.`);
 
     setShowAssemblyModal(false);
     setAssembledProductName('');
@@ -1992,7 +1992,7 @@ Please adjust the quantity or request additional raw material issue.`);
             <div className="flex items-center gap-2">
               <span className="flex h-2 w-2 rounded-full bg-indigo-500 animate-pulse" />
               <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-300 font-mono">
-                🏢 Multi-Department Operating Authority
+                ≡ƒÅó Multi-Department Operating Authority
               </span>
             </div>
             <span className="text-[10px] text-slate-400 font-mono">
@@ -2051,7 +2051,7 @@ Please adjust the quantity or request additional raw material issue.`);
                   }}
                   className="w-full sm:w-auto px-3.5 py-2 bg-indigo-600 hover:bg-indigo-550 text-white rounded-lg font-bold text-[11px] sm:text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-sm border border-indigo-500/30 cursor-pointer min-h-[40px]"
                 >
-                  <span>🪵 Request Raw Materials</span>
+                  <span>≡ƒ¬╡ Request Raw Materials</span>
                 </button>
                 <div className={`w-full sm:w-auto px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 border min-h-[38px] ${
                   isRawMaterialCompulsory
@@ -2059,7 +2059,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
                 }`}>
                   <span className="text-xs">
-                    {isRawMaterialCompulsory ? '🔒' : '🔓'}
+                    {isRawMaterialCompulsory ? '≡ƒöÆ' : '≡ƒöô'}
                   </span>
                   <span>
                     RM Check: {isRawMaterialCompulsory ? 'Compulsory' : 'Optional'}
@@ -2076,7 +2076,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 className="w-full sm:w-auto px-3.5 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-bold text-[11px] sm:text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-sm border border-purple-400/30 cursor-pointer min-h-[40px]"
               >
                 <Layers className="h-4 w-4" />
-                <span>🧩 Assemble Multi-Item Product</span>
+                <span>≡ƒº⌐ Assemble Multi-Item Product</span>
               </button>
             )}
             <div className="flex flex-col sm:flex-row bg-slate-950 p-1.5 sm:p-1 rounded-xl border border-slate-800 text-xs text-slate-400 w-full md:w-auto gap-1">
@@ -2100,7 +2100,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     activeSubView === 'incoming_store' ? 'bg-purple-900 text-purple-100 border border-purple-500/40 shadow-sm' : 'hover:text-white text-slate-400'
                   }`}
                 >
-                  <span>🏬 Incoming Store</span>
+                  <span>≡ƒÅ¼ Incoming Store</span>
                   {jobCards.filter(j => !j.completed && (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails)).length > 0 && (
                     <span className="bg-purple-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
                       {jobCards.filter(j => !j.completed && (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails)).length}
@@ -2124,7 +2124,7 @@ Please adjust the quantity or request additional raw material issue.`);
                   }`}
                 >
                   <Layers className="h-3.5 w-3.5 text-purple-300" />
-                  <span>🧩 Assembly Management</span>
+                  <span>≡ƒº⌐ Assembly Management</span>
                   {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length > 0 && (
                     <span className="bg-purple-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
                       {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length}
@@ -2258,7 +2258,7 @@ Please adjust the quantity or request additional raw material issue.`);
               className="bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[150px] truncate"
               title="Filter by Customer / Party Name"
             >
-              <option value="All">🏢 Customer: All</option>
+              <option value="All">≡ƒÅó Customer: All</option>
               {uniqueParties.map(p => (
                 <option key={p} value={p}>{p}</option>
               ))}
@@ -2271,7 +2271,7 @@ Please adjust the quantity or request additional raw material issue.`);
               className="bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[150px] truncate"
               title="Filter by Person's Name (Operator / Created By / Assignee)"
             >
-              <option value="All">👤 Person: All</option>
+              <option value="All">≡ƒæñ Person: All</option>
               {uniquePersons.map(p => (
                 <option key={p} value={p}>{p}</option>
               ))}
@@ -2284,7 +2284,7 @@ Please adjust the quantity or request additional raw material issue.`);
               className="bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[150px] truncate"
               title="Filter by Place Order / Order No"
             >
-              <option value="All">📑 Order: All</option>
+              <option value="All">≡ƒôæ Order: All</option>
               {uniqueOrderNos.map(o => (
                 <option key={o} value={o}>{o}</option>
               ))}
@@ -2297,9 +2297,9 @@ Please adjust the quantity or request additional raw material issue.`);
               className="bg-indigo-50/80 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 font-bold border border-indigo-200/80 dark:border-indigo-800/80 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[190px] truncate cursor-pointer"
               title="Sort Job Cards"
             >
-              <option value="oldest">⏳ Date: Oldest First (FIFO)</option>
-              <option value="newest">✨ Date: Newest First</option>
-              <option value="job_no">🔢 Job Card No</option>
+              <option value="oldest">ΓÅ│ Date: Oldest First (FIFO)</option>
+              <option value="newest">Γ£¿ Date: Newest First</option>
+              <option value="job_no">≡ƒöó Job Card No</option>
             </select>
 
             {(deptSearchQuery || deptPersonFilter !== 'All' || deptPartyFilter !== 'All' || deptOrderNoFilter !== 'All') && (
@@ -2381,7 +2381,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     </div>
                   ) : (
                     <span className="text-[10.5px] text-amber-600 dark:text-amber-400 font-medium bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-md border border-amber-200 dark:border-amber-800/40 block">
-                      ⚠️ Select or type a Customer Name first to auto-filter items mapped to that customer
+                      ΓÜá∩╕Å Select or type a Customer Name first to auto-filter items mapped to that customer
                     </span>
                   )}
                 </div>
@@ -2410,7 +2410,7 @@ Please adjust the quantity or request additional raw material issue.`);
                       <div className="absolute z-50 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xl p-1.5">
                         {!partyName.trim() ? (
                           <div className="p-2.5 text-center text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-lg font-medium">
-                            ⚠️ Select Customer Name first to see mapped items.
+                            ΓÜá∩╕Å Select Customer Name first to see mapped items.
                           </div>
                         ) : filteredItems.length > 0 ? (
                           <>
@@ -2599,7 +2599,7 @@ Please adjust the quantity or request additional raw material issue.`);
 
               {filteredActiveDepartmentJobs.length === 0 ? (
                 <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                  <span className="text-2xl">📦</span>
+                  <span className="text-2xl">≡ƒôª</span>
                   <p className="text-slate-400 text-xs font-mono font-medium">No matching dispatch shipping queues</p>
                 </div>
               ) : (
@@ -2641,7 +2641,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     ? 'bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-700 dark:text-amber-400'
                                     : 'bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-400'
                                 }`}>
-                                  {job.materialType === 'Raw Material' ? '🪵 Raw Mat' : job.materialType === 'Semi Finished Goods' ? '⚙️ Semi Fin' : '📦 Fin Goods'}
+                                  {job.materialType === 'Raw Material' ? '≡ƒ¬╡ Raw Mat' : job.materialType === 'Semi Finished Goods' ? 'ΓÜÖ∩╕Å Semi Fin' : '≡ƒôª Fin Goods'}
                                 </span>
                               )}
                             </div>
@@ -2676,7 +2676,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               </button>
                             ) : pendingIssueReq ? (
                               <div className="w-full sm:w-auto justify-center flex items-center gap-1.5 bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-900 px-3 py-2 sm:py-1.5 rounded-md font-mono text-[10px] font-bold">
-                                <span className="animate-pulse">⏳</span>
+                                <span className="animate-pulse">ΓÅ│</span>
                                 Pending Store Issue ({pendingIssueReq.requestedQty} {pendingIssueReq.requestedUnit})
                               </div>
                             ) : canRequest ? (
@@ -2689,7 +2689,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                 }}
                                 className="w-full sm:w-auto justify-center bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold py-2 sm:py-1.5 px-3 rounded-md transition-all flex items-center gap-1 cursor-pointer min-h-[38px] sm:min-h-0"
                               >
-                                📩 Request Issue
+                                ≡ƒô⌐ Request Issue
                               </button>
                             ) : (
                               <span className="text-[10px] bg-slate-100 text-slate-500 dark:bg-slate-850 px-2.5 py-1.5 rounded-full font-mono inline-flex items-center justify-center gap-1.5 w-full sm:w-auto">
@@ -2705,7 +2705,7 @@ Please adjust the quantity or request additional raw material issue.`);
                           <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800 text-xs space-y-3 font-sans">
                             <div className="flex items-center justify-between font-semibold mb-1 text-slate-800 dark:text-slate-100">
                               <span className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide text-indigo-600">
-                                📩 Request Material Issue from Storekeeper
+                                ≡ƒô⌐ Request Material Issue from Storekeeper
                               </span>
                               <button onClick={() => setActiveRequestJob(null)} className="p-1 rounded text-slate-400 hover:text-slate-600">
                                 <X className="h-4 w-4" />
@@ -2730,7 +2730,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                         : 'bg-white hover:bg-slate-50 dark:bg-slate-850 dark:hover:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-750'
                                     }`}
                                   >
-                                    ⚖️ In KGS
+                                    ΓÜû∩╕Å In KGS
                                   </button>
                                   <button
                                     type="button"
@@ -2744,7 +2744,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                         : 'bg-white hover:bg-slate-50 dark:bg-slate-850 dark:hover:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-750'
                                     }`}
                                   >
-                                    🔢 In PCS (Pieces)
+                                    ≡ƒöó In PCS (Pieces)
                                   </button>
                                 </div>
                               </div>
@@ -3019,7 +3019,7 @@ Please adjust the quantity or request additional raw material issue.`);
                   <option value="">-- Direct Purchase (No Outsource Link) --</option>
                   {outsourceOrders.filter(o => o.status !== 'Completed').map(ord => (
                     <option key={ord.orderId} value={ord.orderId}>
-                      {ord.orderId} • {ord.supplierName || ord.partyName} - {ord.itemName} ({ord.orderQty} {ord.unit}) [{ord.status}]
+                      {ord.orderId} ΓÇó {ord.supplierName || ord.partyName} - {ord.itemName} ({ord.orderQty} {ord.unit}) [{ord.status}]
                     </option>
                   ))}
                 </select>
@@ -3120,7 +3120,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     </div>
                   ) : (
                     <span className="text-[10.5px] text-amber-600 dark:text-amber-400 font-medium bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-md border border-amber-200 dark:border-amber-800/40 block">
-                      ⚠️ Select or type a Supplier Name first to auto-filter items mapped to that supplier
+                      ΓÜá∩╕Å Select or type a Supplier Name first to auto-filter items mapped to that supplier
                     </span>
                   )}
                 </div>
@@ -3149,7 +3149,7 @@ Please adjust the quantity or request additional raw material issue.`);
                       <div className="absolute z-50 left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl shadow-xl p-1.5">
                         {!purchaseSupplier.trim() ? (
                           <div className="p-2.5 text-center text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-lg font-medium">
-                            ⚠️ Select Supplier / Customer Name first to see mapped items.
+                            ΓÜá∩╕Å Select Supplier / Customer Name first to see mapped items.
                           </div>
                         ) : filteredPurchaseItems.length > 0 ? (
                           <>
@@ -3266,7 +3266,7 @@ Please adjust the quantity or request additional raw material issue.`);
                           : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
                       }`}
                     >
-                      🪵 Raw
+                      ≡ƒ¬╡ Raw
                     </button>
                     <button
                       type="button"
@@ -3280,7 +3280,7 @@ Please adjust the quantity or request additional raw material issue.`);
                           : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
                       }`}
                     >
-                      ⚙️ Semi
+                      ΓÜÖ∩╕Å Semi
                     </button>
                     <button
                       type="button"
@@ -3294,7 +3294,7 @@ Please adjust the quantity or request additional raw material issue.`);
                           : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
                       }`}
                     >
-                      📦 Finished
+                      ≡ƒôª Finished
                     </button>
                   </div>
                 </div>
@@ -3312,7 +3312,7 @@ Please adjust the quantity or request additional raw material issue.`);
                             : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
                         }`}
                       >
-                        ⚖️ Kilograms (KGS)
+                        ΓÜû∩╕Å Kilograms (KGS)
                       </button>
                       <button
                         type="button"
@@ -3323,7 +3323,7 @@ Please adjust the quantity or request additional raw material issue.`);
                             : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
                         }`}
                       >
-                        🔢 Pieces (PCS)
+                        ≡ƒöó Pieces (PCS)
                       </button>
                     </div>
                   </div>
@@ -3343,7 +3343,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
                           }`}
                         >
-                          🏢 Raw Material Store
+                          ≡ƒÅó Raw Material Store
                         </button>
                         <button
                           type="button"
@@ -3354,7 +3354,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
                           }`}
                         >
-                          🛒 Purchase Incoming Store
+                          ≡ƒ¢Æ Purchase Incoming Store
                         </button>
                       </div>
                     )}
@@ -3369,7 +3369,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
                           }`}
                         >
-                          📦 Packing
+                          ≡ƒôª Packing
                         </button>
                         <button
                           type="button"
@@ -3380,7 +3380,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-800'
                           }`}
                         >
-                          🏢 FG Store
+                          ≡ƒÅó FG Store
                         </button>
                         <button
                           type="button"
@@ -3391,7 +3391,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
                           }`}
                         >
-                          🛒 Purchase Store
+                          ≡ƒ¢Æ Purchase Store
                         </button>
                       </div>
                     )}
@@ -3406,7 +3406,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                           }`}
                         >
-                          ⚙️ Production
+                          ΓÜÖ∩╕Å Production
                         </button>
                         <button
                           type="button"
@@ -3417,7 +3417,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                           }`}
                         >
-                          🔥 Heat Treat
+                          ≡ƒöÑ Heat Treat
                         </button>
                         <button
                           type="button"
@@ -3428,7 +3428,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                           }`}
                         >
-                          ⚡ Plating
+                          ΓÜí Plating
                         </button>
                         <button
                           type="button"
@@ -3439,7 +3439,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
                           }`}
                         >
-                          🛒 Purchase Store
+                          ≡ƒ¢Æ Purchase Store
                         </button>
                       </div>
                     )}
@@ -3542,11 +3542,11 @@ Please adjust the quantity or request additional raw material issue.`);
             {activeSubView === 'incoming' && (
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4 flex items-center gap-2">
-                  📥 Pending Custody Receipts {incomingTransfers.length > 0 && `(${incomingTransfers.length})`}
+                  ≡ƒôÑ Pending Custody Receipts {incomingTransfers.length > 0 && `(${incomingTransfers.length})`}
                 </h3>
                 {incomingTransfers.length === 0 ? (
                   <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                    <span className="text-2xl">📦</span>
+                    <span className="text-2xl">≡ƒôª</span>
                     <p className="text-slate-400 text-xs font-mono font-medium">Floor queue clean. No pending inbound shipments found for Purchase Department.</p>
                   </div>
                 ) : (
@@ -3585,7 +3585,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   transition={{ delay: 0.15, duration: 0.35 }}
                                   className="text-emerald-700 dark:text-emerald-300 font-extrabold text-xs uppercase tracking-wider font-sans"
                                 >
-                                  Inward Custody Accepted! 🎉
+                                  Inward Custody Accepted! ≡ƒÄë
                                 </motion.p>
                                 <motion.p
                                   initial={{ opacity: 0 }}
@@ -3702,7 +3702,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800/80 pb-4">
                   <div>
                     <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
-                      <span>🏬 Incoming Store / Temporary Inventory Buffer</span>
+                      <span>≡ƒÅ¼ Incoming Store / Temporary Inventory Buffer</span>
                     </h3>
                     <p className="text-[11.5px] text-slate-500 dark:text-slate-400 mt-0.5 font-sans">
                       Goods received into department custody and held in temporary inventory state before release to further processing.
@@ -3742,7 +3742,7 @@ Please adjust the quantity or request additional raw material issue.`);
                   if (storedItems.length === 0) {
                     return (
                       <div className="text-center py-12 space-y-3 border border-dashed border-slate-200 dark:border-slate-800 rounded-2xl bg-slate-50/50 dark:bg-slate-950/40">
-                        <span className="text-3xl block">🏬</span>
+                        <span className="text-3xl block">≡ƒÅ¼</span>
                         <p className="text-slate-700 dark:text-slate-200 text-xs font-bold font-sans">No Job Cards Currently Stored in Buffer</p>
                         <p className="text-slate-400 text-[11px] max-w-md mx-auto font-sans">
                           All incoming goods have been routed to active floor production queues or dispatched to destination departments.
@@ -3792,7 +3792,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                       </span>
                                     )}
                                     <span className="px-2 py-0.5 rounded font-extrabold uppercase text-[9px] bg-purple-100 text-purple-700 dark:bg-purple-950/90 dark:text-purple-300 border border-purple-300 dark:border-purple-800 flex items-center gap-1">
-                                      🛒 Stored in {activeDept} Store
+                                      ≡ƒ¢Æ Stored in {activeDept} Store
                                     </span>
                                     {job.materialType && (
                                       <span className="px-1.5 py-0.5 rounded font-bold uppercase text-[9px] bg-amber-50 dark:bg-amber-950/40 border border-amber-200 text-amber-700 dark:text-amber-400">
@@ -3812,7 +3812,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     )}
                                     {job.partyName && (
                                       <span className="text-xs text-slate-500 font-medium">
-                                        • Supplier: {job.partyName}
+                                        ΓÇó Supplier: {job.partyName}
                                       </span>
                                     )}
                                   </div>
@@ -3866,7 +3866,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               {isReleasing && (
                                 <div className="mt-3 pt-3 border-t border-purple-200 dark:border-purple-900/60 space-y-3 bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800">
                                   <h4 className="font-extrabold text-slate-900 dark:text-slate-100 text-xs uppercase tracking-wider flex items-center gap-2 font-sans">
-                                    <span>🚀 Move Material From Incoming Store to Next Department</span>
+                                    <span>≡ƒÜÇ Move Material From Incoming Store to Next Department</span>
                                   </h4>
 
                                   <div>
@@ -3875,12 +3875,12 @@ Please adjust the quantity or request additional raw material issue.`);
                                     </label>
                                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
                                       {[
-                                        { id: 'Production', label: 'Production', icon: '🪵' },
-                                        { id: 'Heat Treatment', label: 'Heat Treatment', icon: '🔥' },
-                                        { id: 'Plating', label: 'Plating', icon: '⚡' },
-                                        { id: 'Packing', label: 'Packing', icon: '📦' },
-                                        { id: 'Store', label: 'Store (Stock)', icon: '🏬' },
-                                        { id: 'Raw Material Store', label: 'RM Store', icon: '🏭' },
+                                        { id: 'Production', label: 'Production', icon: '≡ƒ¬╡' },
+                                        { id: 'Heat Treatment', label: 'Heat Treatment', icon: '≡ƒöÑ' },
+                                        { id: 'Plating', label: 'Plating', icon: 'ΓÜí' },
+                                        { id: 'Packing', label: 'Packing', icon: '≡ƒôª' },
+                                        { id: 'Store', label: 'Store (Stock)', icon: '≡ƒÅ¼' },
+                                        { id: 'Raw Material Store', label: 'RM Store', icon: '≡ƒÅ¡' },
                                       ].map(dept => (
                                         <button
                                           key={dept.id}
@@ -3936,21 +3936,66 @@ Please adjust the quantity or request additional raw material issue.`);
                                     </button>
                                     <button
                                       type="button"
-                                      onClick={() => {
+                                      onClick={async () => {
                                         const qtyNum = typeof storeReleaseQty === 'number' ? storeReleaseQty : (parseFloat(String(storeReleaseQty)) || job.currentQty || job.orderQty);
-                                        onUpdateJobCard(job.jobCardNo, {
-                                          currentDepartment: storeReleaseDept,
-                                          status: 'Pending Acceptance',
-                                          currentQty: qtyNum,
-                                          heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment'
-                                        });
-                                        onCreateMovement({
-                                          jobCardNo: job.jobCardNo,
-                                          fromDepartment: activeDept,
-                                          toDepartment: storeReleaseDept,
-                                          quantity: qtyNum,
-                                          remarks: storeReleaseRemarks || `Material released from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`
-                                        });
+                                        const currentHeld = job.currentQty ?? job.orderQty;
+                                        const remainingQty = currentHeld - qtyNum;
+
+                                        if (remainingQty > 0) {
+                                          // PARTIAL release: split into two tracked pieces instead of
+                                          // silently losing the remainder. The original card stays put
+                                          // with the reduced quantity; a new card is created for the
+                                          // released portion and moves to the target department.
+                                          try {
+                                            await DBService.createJobCard(
+                                              {
+                                                partyName: job.partyName,
+                                                itemName: job.itemName,
+                                                itemCode: job.itemCode,
+                                                orderQty: qtyNum,
+                                                unit: job.unit,
+                                                currentQty: qtyNum,
+                                                currentDepartment: storeReleaseDept,
+                                                status: 'Pending Acceptance',
+                                                heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment',
+                                                processType: job.processType,
+                                                materialType: job.materialType,
+                                                parentJobCardNo: job.jobCardNo,
+                                              },
+                                              currentUser.userId,
+                                              currentUser.name,
+                                              {
+                                                fromDepartment: activeDept,
+                                                toDepartment: storeReleaseDept,
+                                                quantity: qtyNum,
+                                                remarks: (storeReleaseRemarks || `Material released from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`) + ` (split from ${job.jobCardNo}, ${remainingQty} ${job.unit || ''} remains in ${activeDept}.)`
+                                              }
+                                            );
+
+                                            onUpdateJobCard(job.jobCardNo, {
+                                              currentQty: remainingQty,
+                                              orderQty: (job.orderQty ?? currentHeld) - qtyNum,
+                                              balanceQty: Math.max(0, (job.balanceQty ?? job.orderQty ?? currentHeld) - qtyNum),
+                                            });
+                                          } catch (splitErr) {
+                                            console.error('Failed to split job card for partial release:', splitErr);
+                                          }
+                                        } else {
+                                          // FULL release: whole card moves, no split needed.
+                                          onUpdateJobCard(job.jobCardNo, {
+                                            currentDepartment: storeReleaseDept,
+                                            status: 'Pending Acceptance',
+                                            currentQty: qtyNum,
+                                            heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment'
+                                          });
+                                          onCreateMovement({
+                                            jobCardNo: job.jobCardNo,
+                                            fromDepartment: activeDept,
+                                            toDepartment: storeReleaseDept,
+                                            quantity: qtyNum,
+                                            remarks: storeReleaseRemarks || `Material released from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`
+                                          });
+                                        }
                                         setReleasingStoreJobNo(null);
                                         setStoreReleaseRemarks('');
                                       }}
@@ -3980,7 +4025,7 @@ Please adjust the quantity or request additional raw material issue.`);
                   </h3>
                   {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length > 0 && (
                     <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800">
-                      🛒 {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length} Goods Stored
+                      ≡ƒ¢Æ {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length} Goods Stored
                     </span>
                   )}
                 </div>
@@ -3988,7 +4033,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length > 0 && (
                   <div className="bg-purple-50/80 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/80 p-3 rounded-xl flex items-center justify-between text-xs mb-4">
                     <div className="flex items-center gap-2.5">
-                      <span className="p-1.5 bg-purple-100 dark:bg-purple-900/60 rounded-lg text-purple-700 dark:text-purple-300 text-lg">🛒</span>
+                      <span className="p-1.5 bg-purple-100 dark:bg-purple-900/60 rounded-lg text-purple-700 dark:text-purple-300 text-lg">≡ƒ¢Æ</span>
                       <div>
                         <p className="font-bold text-purple-950 dark:text-purple-200">
                           {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase' && (job.status === 'In Process' || job.purchaseDetails)).length} Item(s) Stored in Purchase Incoming Store
@@ -4003,7 +4048,7 @@ Please adjust the quantity or request additional raw material issue.`);
 
                 {activeDepartmentJobs.filter(job => job.currentDepartment === 'Purchase').length === 0 ? (
                   <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                    <span className="text-2xl">🌱</span>
+                    <span className="text-2xl">≡ƒî▒</span>
                     <p className="text-slate-400 text-xs font-mono font-medium">No purchase items currently in physical inwarding or store buffer</p>
                   </div>
                 ) : (
@@ -4035,12 +4080,12 @@ Please adjust the quantity or request additional raw material issue.`);
                                       ? 'bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-700 dark:text-amber-400'
                                       : 'bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-400'
                                   }`}>
-                                    {job.materialType === 'Raw Material' ? '🪵 Raw Mat' : job.materialType === 'Semi Finished Goods' ? '⚙️ Semi Fin' : '📦 Fin Goods'}
+                                    {job.materialType === 'Raw Material' ? '≡ƒ¬╡ Raw Mat' : job.materialType === 'Semi Finished Goods' ? 'ΓÜÖ∩╕Å Semi Fin' : '≡ƒôª Fin Goods'}
                                   </span>
                                 )}
                                 {isHeldInStore && (
                                   <span className="px-1.5 py-0.2 rounded font-bold uppercase text-[8.5px] bg-purple-100 text-purple-700 dark:bg-purple-950/80 dark:text-purple-300 border border-purple-300 dark:border-purple-800">
-                                    🛒 Stored in Purchase Store
+                                    ≡ƒ¢Æ Stored in Purchase Store
                                   </span>
                                 )}
                               </div>
@@ -4179,7 +4224,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                         : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
                                     }`}
                                   >
-                                    🪵 Raw Material
+                                    ≡ƒ¬╡ Raw Material
                                   </button>
                                   <button
                                     type="button"
@@ -4193,7 +4238,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                         : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
                                     }`}
                                   >
-                                    ⚙️ Semi Finished
+                                    ΓÜÖ∩╕Å Semi Finished
                                   </button>
                                   <button
                                     type="button"
@@ -4207,7 +4252,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                         : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700'
                                     }`}
                                   >
-                                    📦 Finished Goods
+                                    ≡ƒôª Finished Goods
                                   </button>
                                 </div>
                               </div>
@@ -4226,7 +4271,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
                                         }`}
                                       >
-                                        🏢 Raw Material Store
+                                        ≡ƒÅó Raw Material Store
                                       </button>
                                       <button
                                         type="button"
@@ -4237,7 +4282,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
                                         }`}
                                       >
-                                        🛒 Purchase Store
+                                        ≡ƒ¢Æ Purchase Store
                                       </button>
                                     </div>
                                   )}
@@ -4252,7 +4297,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
                                         }`}
                                       >
-                                        📦 Packing
+                                        ≡ƒôª Packing
                                       </button>
                                       <button
                                         type="button"
@@ -4263,7 +4308,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-800'
                                         }`}
                                       >
-                                        🏢 FG Store
+                                        ≡ƒÅó FG Store
                                       </button>
                                       <button
                                         type="button"
@@ -4274,7 +4319,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
                                         }`}
                                       >
-                                        🛒 Purchase Store
+                                        ≡ƒ¢Æ Purchase Store
                                       </button>
                                     </div>
                                   )}
@@ -4289,7 +4334,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                                         }`}
                                       >
-                                        ⚙️ Production
+                                        ΓÜÖ∩╕Å Production
                                       </button>
                                       <button
                                         type="button"
@@ -4300,7 +4345,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                                         }`}
                                       >
-                                        🔥 Heat Treat
+                                        ≡ƒöÑ Heat Treat
                                       </button>
                                       <button
                                         type="button"
@@ -4311,7 +4356,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
                                         }`}
                                       >
-                                        ⚡ Plating
+                                        ΓÜí Plating
                                       </button>
                                       <button
                                         type="button"
@@ -4322,7 +4367,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
                                         }`}
                                       >
-                                        🛒 Purchase Store
+                                        ≡ƒ¢Æ Purchase Store
                                       </button>
                                     </div>
                                   )}
@@ -4367,11 +4412,11 @@ Please adjust the quantity or request additional raw material issue.`);
             {activeSubView === 'completed' && (
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4">
-                  📋 Completed Outbound Ledgers
+                  ≡ƒôï Completed Outbound Ledgers
                 </h3>
                 {completedDepartmentLogs.length === 0 ? (
                   <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                    <span className="text-2xl">⏳</span>
+                    <span className="text-2xl">ΓÅ│</span>
                     <p className="text-slate-400 text-xs font-mono font-medium">No archived outbound handoffs recorded in active session</p>
                   </div>
                 ) : (
@@ -4419,12 +4464,12 @@ Please adjust the quantity or request additional raw material issue.`);
             <div className="space-y-4">
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
               <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4 flex items-center gap-2">
-                📥 Pending Custody Receipts 
+                ≡ƒôÑ Pending Custody Receipts 
               </h3>
 
               {incomingTransfers.length === 0 ? (
                 <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                  <span className="text-2xl">📦</span>
+                  <span className="text-2xl">≡ƒôª</span>
                   <p className="text-slate-400 text-xs font-mono font-medium">Floor queue clean. No pending inbound shipments found.</p>
                 </div>
               ) : (
@@ -4463,7 +4508,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                 transition={{ delay: 0.15, duration: 0.35 }}
                                 className="text-emerald-700 dark:text-emerald-300 font-extrabold text-xs uppercase tracking-wider font-sans"
                               >
-                                Custody Accepted! 🎉
+                                Custody Accepted! ≡ƒÄë
                               </motion.p>
                               <motion.p
                                 initial={{ opacity: 0 }}
@@ -4514,7 +4559,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   {mov.fromDepartment === 'Purchase' && (
                                     <div className="bg-slate-100/70 dark:bg-slate-900/40 p-2.5 rounded-lg border border-slate-200/60 dark:border-slate-800">
                                       <label className="block text-[10px] text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wider mb-2">
-                                        📥 Routing Disposition (Where should this purchased material go next?)
+                                        ≡ƒôÑ Routing Disposition (Where should this purchased material go next?)
                                       </label>
                                       <div className="flex gap-2">
                                         <button
@@ -4526,7 +4571,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                               : 'bg-white hover:bg-slate-50 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700 font-sans'
                                           }`}
                                         >
-                                          🏢 Place into Store
+                                          ≡ƒÅó Place into Store
                                         </button>
                                         <button
                                           type="button"
@@ -4537,7 +4582,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                               : 'bg-white hover:bg-slate-50 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-500 border-slate-200 dark:border-slate-700 font-sans'
                                           }`}
                                         >
-                                          📦 Send to Packing
+                                          ≡ƒôª Send to Packing
                                         </button>
                                       </div>
                                     </div>
@@ -4572,7 +4617,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     </div>
                                   ) : (
                                     <div className="bg-indigo-50/50 dark:bg-indigo-950/20 p-2.5 rounded-lg border border-dashed border-indigo-200 dark:border-indigo-900 flex items-center gap-2">
-                                      <span className="text-sm">⚡</span>
+                                      <span className="text-sm">ΓÜí</span>
                                       <p className="text-[11px] text-indigo-600 dark:text-indigo-400 font-medium font-sans">
                                         This purchased material will be immediately transferred downstream to the **Packing** queue.
                                       </p>
@@ -4649,11 +4694,11 @@ Please adjust the quantity or request additional raw material issue.`);
             {activeDept === 'Store' && (
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4 flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
-                  🚚 Dispatch Material Issue Requests
+                  ≡ƒÜÜ Dispatch Material Issue Requests
                 </h3>
                 {pendingIssueRequests.length === 0 ? (
                   <div className="text-center py-8 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                    <span className="text-xl">📋</span>
+                    <span className="text-xl">≡ƒôï</span>
                     <p className="text-slate-400 text-xs font-mono font-medium">No pending Dispatch issue requests found</p>
                   </div>
                 ) : (
@@ -4695,7 +4740,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   transition={{ delay: 0.15, duration: 0.35 }}
                                   className="text-emerald-700 dark:text-emerald-300 font-extrabold text-xs uppercase tracking-wider font-sans"
                                 >
-                                  Issue Confirmed! 🚚
+                                  Issue Confirmed! ≡ƒÜÜ
                                 </motion.p>
                                 <motion.p
                                   initial={{ opacity: 0 }}
@@ -4734,7 +4779,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                 </p>
                                 {req.remarks && (
                                   <p className="text-[11px] bg-indigo-50/50 dark:bg-indigo-950/20 p-2 rounded border border-indigo-100/60 dark:border-indigo-950 text-indigo-700 dark:text-indigo-400 mt-2 font-sans italic">
-                                    💬 Dispatch Remarks: "{req.remarks}"
+                                    ≡ƒÆ¼ Dispatch Remarks: "{req.remarks}"
                                   </p>
                                 )}
                               </div>
@@ -4921,7 +4966,7 @@ Please adjust the quantity or request additional raw material issue.`);
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
                 <h3 className="font-sans font-extrabold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
-                  <span>🏬 Raw Material Store Operations</span>
+                  <span>≡ƒÅ¼ Raw Material Store Operations</span>
                 </h3>
                 <p className="text-[11px] text-slate-400 font-sans mt-0.5">
                   Manage wire stock, issue requests, and process wire quantity rejections with automatic inventory deductions.
@@ -4933,14 +4978,14 @@ Please adjust the quantity or request additional raw material issue.`);
                   onClick={() => setShowWireRejectionModal(true)}
                   className="px-3 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
                 >
-                  <span>🚫 Reject / Scrap Wire Quantity</span>
+                  <span>≡ƒÜ½ Reject / Scrap Wire Quantity</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setShowRawMaterialRequestModal(true)}
                   className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
                 >
-                  <span>📋 Request Raw Material</span>
+                  <span>≡ƒôï Request Raw Material</span>
                 </button>
               </div>
             </div>
@@ -4950,14 +4995,14 @@ Please adjust the quantity or request additional raw material issue.`);
               <div className="bg-rose-50/40 dark:bg-rose-950/20 border-2 border-rose-300 dark:border-rose-900/60 rounded-2xl p-5 space-y-4 shadow-lg text-left font-sans">
                 <div className="flex items-center justify-between border-b border-rose-200 dark:border-rose-900/40 pb-2">
                   <h4 className="font-extrabold text-rose-800 dark:text-rose-300 text-xs uppercase tracking-wider flex items-center gap-1.5">
-                    <span>🚫 Raw Material Wire Coil Rejection & Stock Deduction</span>
+                    <span>≡ƒÜ½ Raw Material Wire Coil Rejection & Stock Deduction</span>
                   </h4>
                   <button
                     type="button"
                     onClick={() => setShowWireRejectionModal(false)}
                     className="text-slate-400 hover:text-slate-600 text-xs font-bold px-2 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800 cursor-pointer"
                   >
-                    ✕ Close
+                    Γ£ò Close
                   </button>
                 </div>
 
@@ -5043,7 +5088,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 </div>
 
                 <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 rounded-lg text-[11px] text-amber-800 dark:text-amber-300 flex items-center justify-between font-mono">
-                  <span>ℹ️ Submitting this wire rejection will automatically deduct <strong>{wireRejectQty} KG</strong> from the store inventory balance for <strong>{selectedRejectMaterialCode}</strong>.</span>
+                  <span>Γä╣∩╕Å Submitting this wire rejection will automatically deduct <strong>{wireRejectQty} KG</strong> from the store inventory balance for <strong>{selectedRejectMaterialCode}</strong>.</span>
                 </div>
 
                 <div className="flex justify-end gap-2">
@@ -5069,11 +5114,11 @@ Please adjust the quantity or request additional raw material issue.`);
             {/* Pending Requests Container */}
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
               <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4 flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
-                🔧 Production Raw Material Requests
+                ≡ƒöº Production Raw Material Requests
               </h3>
               {pendingRawMaterialRequests.length === 0 ? (
                 <div className="text-center py-8 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                  <span className="text-xl">📋</span>
+                  <span className="text-xl">≡ƒôï</span>
                   <p className="text-slate-400 text-xs font-mono font-medium">No pending Production raw material requests found</p>
                 </div>
               ) : (
@@ -5103,7 +5148,7 @@ Please adjust the quantity or request additional raw material issue.`);
                               animate={{ opacity: 1 }}
                               className="absolute inset-0 z-10 bg-emerald-50/95 dark:bg-emerald-950/95 flex flex-col items-center justify-center gap-1.5 p-4 text-center"
                             >
-                              <span className="text-2xl animate-bounce">✅</span>
+                              <span className="text-2xl animate-bounce">Γ£à</span>
                               <span className="font-extrabold text-xs text-emerald-800 dark:text-emerald-400 uppercase tracking-wide">Request Issued Successfully</span>
                               <span className="text-[10px] text-emerald-600 dark:text-emerald-500 font-mono">Updating central ledger...</span>
                             </motion.div>
@@ -5312,7 +5357,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             requestedBy: currentUser?.name || 'Raw Material Store Keeper',
                                             urgency: 'High'
                                           },
-                                          remarks: `🚫 Request Rejected & Stock Deducted: ${reqQty} KG of ${matCode}. Notes: ${rawIssueRejectionNotes}`
+                                          remarks: `≡ƒÜ½ Request Rejected & Stock Deducted: ${reqQty} KG of ${matCode}. Notes: ${rawIssueRejectionNotes}`
                                         });
                                       } catch (e) {
                                         console.error("Non-fatal request rejection log error:", e);
@@ -5341,7 +5386,7 @@ Please adjust the quantity or request additional raw material issue.`);
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm text-left">
               <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4 flex items-center justify-between">
                 <span className="flex items-center gap-2 text-rose-600 dark:text-rose-400">
-                  🚫 Wire Rejections & Auto-Deductions Ledger
+                  ≡ƒÜ½ Wire Rejections & Auto-Deductions Ledger
                 </span>
                 <span className="text-xs text-slate-400 font-mono">
                   (Total Auto-Deducted: {movements
@@ -5409,7 +5454,7 @@ Please adjust the quantity or request additional raw material issue.`);
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 border-b border-slate-100 dark:border-slate-800 pb-3">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
-                  <span>⚙️ In-Process Shop Floor Queue</span>
+                  <span>ΓÜÖ∩╕Å In-Process Shop Floor Queue</span>
                   <span className="text-xs text-slate-400 font-mono font-normal">({filteredActiveDepartmentJobs.length} active)</span>
                 </h3>
                 <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 dark:bg-indigo-950/50 border border-indigo-200/80 dark:border-indigo-800/50 rounded-xl font-mono text-xs font-extrabold text-indigo-700 dark:text-indigo-300 self-start sm:self-auto">
@@ -5420,7 +5465,7 @@ Please adjust the quantity or request additional raw material issue.`);
 
               {filteredActiveDepartmentJobs.length === 0 ? (
                 <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                  <span className="text-2xl">⚡</span>
+                  <span className="text-2xl">ΓÜí</span>
                   <p className="text-slate-400 text-xs font-mono font-medium">Floor queue clear or no matching job cards for active filter.</p>
                 </div>
               ) : (
@@ -5493,7 +5538,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     ? 'bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-700 dark:text-amber-400'
                                     : 'bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-700 dark:text-emerald-400'
                                 }`}>
-                                  {job.materialType === 'Raw Material' ? '🪵 Raw Mat' : job.materialType === 'Semi Finished Goods' ? '⚙️ Semi Fin' : '📦 Fin Goods'}
+                                  {job.materialType === 'Raw Material' ? '≡ƒ¬╡ Raw Mat' : job.materialType === 'Semi Finished Goods' ? 'ΓÜÖ∩╕Å Semi Fin' : '≡ƒôª Fin Goods'}
                                 </span>
                               )}
                             </div>
@@ -5518,7 +5563,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     <span className="text-xs font-bold font-mono text-emerald-600 dark:text-emerald-400">{totalMovedFromProd.toLocaleString()} {job.unit || 'KG'}</span>
                                   </div>
                                   <div>
-                                    <span className="block text-[10px] text-amber-600 dark:text-amber-400 uppercase font-bold">✂️ Wire Scrap</span>
+                                    <span className="block text-[10px] text-amber-600 dark:text-amber-400 uppercase font-bold">Γ£é∩╕Å Wire Scrap</span>
                                     <span className="text-xs font-bold font-mono text-amber-700 dark:text-amber-300">{getWireScrapQty(job, movements).toLocaleString()} KG</span>
                                   </div>
                                   <div>
@@ -5539,7 +5584,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     isRawMaterialCompulsory ? (
                                       <div onClick={(e) => e.stopPropagation()} className="mt-2.5 p-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 rounded-xl flex items-center justify-between gap-2 text-amber-800 dark:text-amber-300 font-medium text-[11px]">
                                         <div className="flex items-center gap-2">
-                                          <span className="text-sm">⚠️</span>
+                                          <span className="text-sm">ΓÜá∩╕Å</span>
                                           <span>Raw Material / Wire has not been issued yet from Store. Production cannot be started.</span>
                                         </div>
                                         <button
@@ -5551,13 +5596,13 @@ Please adjust the quantity or request additional raw material issue.`);
                                           }}
                                           className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-550 text-white rounded-lg font-extrabold text-[10px] uppercase tracking-wider transition shrink-0 cursor-pointer shadow-xs border border-indigo-500/30 flex items-center gap-1"
                                         >
-                                          <span>🪵 Request Wire / RM</span>
+                                          <span>≡ƒ¬╡ Request Wire / RM</span>
                                         </button>
                                       </div>
                                     ) : (
                                       <div onClick={(e) => e.stopPropagation()} className="mt-2.5 p-2.5 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900 rounded-xl flex items-center justify-between gap-2 text-emerald-800 dark:text-emerald-300 font-medium text-[11px]">
                                         <div className="flex items-center gap-2">
-                                          <span className="text-sm">ℹ️</span>
+                                          <span className="text-sm">Γä╣∩╕Å</span>
                                           <span>Raw Material requirement is currently disabled by Super Admin. Direct production allowed.</span>
                                         </div>
                                         <button
@@ -5576,7 +5621,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   ) : (
                                     <div onClick={(e) => e.stopPropagation()} className="mt-2.5 p-2.5 bg-indigo-50/80 dark:bg-indigo-950/30 border border-indigo-200/80 dark:border-indigo-900/40 rounded-xl flex items-center justify-between gap-2 text-indigo-900 dark:text-indigo-200 font-medium text-[11px]">
                                       <div className="flex items-center gap-2">
-                                        <span className="text-sm">🪵</span>
+                                        <span className="text-sm">≡ƒ¬╡</span>
                                         <span>Issued RM so far: <strong className="text-indigo-700 dark:text-indigo-300 font-mono font-bold">{getRawMaterialIssuedQty(job, movements).toLocaleString()} {job.unit || 'KG'}</strong>. Need more material?</span>
                                       </div>
                                       <button
@@ -5595,7 +5640,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                 )}
                                 {isRoutedDownstream && (
                                   <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
-                                    <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                    <span>Γå¬∩╕Å Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
                                   </div>
                                 )}
                               </div>
@@ -5627,7 +5672,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                 </div>
                                 {isHTRoutedDownstream && (
                                   <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
-                                    <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                    <span>Γå¬∩╕Å Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
                                   </div>
                                 )}
                               </div>
@@ -5659,7 +5704,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                 </div>
                                 {isPlatingRoutedDownstream && (
                                   <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
-                                    <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                    <span>Γå¬∩╕Å Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
                                   </div>
                                 )}
                               </div>
@@ -5699,14 +5744,14 @@ Please adjust the quantity or request additional raw material issue.`);
                                 </div>
                                 {isPackingRoutedDownstream && (
                                   <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
-                                    <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                    <span>Γå¬∩╕Å Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
                                   </div>
                                 )}
                                 {(job.isAssemblyProduct || job.packingDetails?.isAssemblyProduct) && (
                                   <div className="mt-2 p-2.5 bg-purple-50/80 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800/80 rounded-xl space-y-1">
                                     <div className="flex items-center justify-between">
                                       <span className="text-[11px] font-bold text-purple-900 dark:text-purple-200 flex items-center gap-1.5">
-                                        <span>🧩 Assembled Multi-Item Product</span>
+                                        <span>≡ƒº⌐ Assembled Multi-Item Product</span>
                                       </span>
                                       <span className="text-[10px] font-mono text-purple-700 dark:text-purple-300 font-extrabold bg-purple-100 dark:bg-purple-900/60 px-2 py-0.5 rounded">
                                         {(job.assemblyComponents || job.packingDetails?.assemblyComponents || []).length} Components
@@ -5762,7 +5807,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   Item Code: {job.itemCode || '-'}
                                 </span>
                                 <span className="text-[11px] text-slate-400 font-normal">
-                                  • Order Qty: {job.orderQty} KG | <strong>Custody Weight: {job.currentQty} KG</strong>
+                                  ΓÇó Order Qty: {job.orderQty} KG | <strong>Custody Weight: {job.currentQty} KG</strong>
                                 </span>
                               </div>
                             )}
@@ -5888,7 +5933,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   </div>
                                   <div>
                                     <label className="block text-amber-600 dark:text-amber-400 font-bold uppercase text-[9.5px] tracking-wider mb-1 flex items-center gap-1">
-                                      ✂️ Wire Scrap (KG)
+                                      Γ£é∩╕Å Wire Scrap (KG)
                                     </label>
                                     <input
                                       type="text"
@@ -5921,14 +5966,14 @@ Please adjust the quantity or request additional raw material issue.`);
                                 </div>
                                 {getWireScrapQty(job, movements) > 0 && (
                                   <div className="p-2.5 bg-amber-50/70 dark:bg-amber-950/30 rounded-lg text-[10.5px] text-amber-800 dark:text-amber-300 border border-amber-200/60 dark:border-amber-800/60 flex items-center justify-between">
-                                    <span>✂️ <strong>Previous Wire Scrap Recorded:</strong> {getWireScrapQty(job, movements)} KG</span>
+                                    <span>Γ£é∩╕Å <strong>Previous Wire Scrap Recorded:</strong> {getWireScrapQty(job, movements)} KG</span>
                                     <span className="font-mono text-[9.5px] text-amber-600 dark:text-amber-400">Total Scrap Cumulative</span>
                                   </div>
                                 )}
                                 <div className="p-3 bg-indigo-50/40 dark:bg-slate-950/20 rounded-lg text-[10.5px] text-slate-600 dark:text-slate-400 border border-indigo-100/35 leading-relaxed">
                                   <strong>Business Routing Rule:</strong> {job.heatTreatmentRequired 
-                                    ? '⚠️ Heat Treatment is Required. Completing this step immediately transfers this job to the Furnace line queue.' 
-                                    : '✔️ Heat Treatment Skipped. Completing this step transfers cargo directly to Electroplating.'}
+                                    ? 'ΓÜá∩╕Å Heat Treatment is Required. Completing this step immediately transfers this job to the Furnace line queue.' 
+                                    : 'Γ£ö∩╕Å Heat Treatment Skipped. Completing this step transfers cargo directly to Electroplating.'}
                                 </div>
                                 <div className="flex gap-2 justify-end">
                                   <button
@@ -5963,7 +6008,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     />
                                   </div>
                                   <div>
-                                    <label className="block text-slate-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Temperature (°C)</label>
+                                    <label className="block text-slate-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Temperature (┬░C)</label>
                                     <input
                                       type="text"
                                       value={htTemp}
@@ -6337,7 +6382,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-white hover:bg-slate-50 dark:bg-slate-800 text-slate-500 border-slate-200'
                                         }`}
                                       >
-                                        📦 Send to Packing Line
+                                        ≡ƒôª Send to Packing Line
                                       </button>
                                       <button
                                         type="button"
@@ -6348,7 +6393,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             : 'bg-white hover:bg-slate-50 dark:bg-slate-800 text-slate-500 border-slate-200'
                                         }`}
                                       >
-                                        🚚 Send to Direct Dispatch
+                                        ≡ƒÜÜ Send to Direct Dispatch
                                       </button>
                                     </div>
                                   </div>
@@ -6509,7 +6554,7 @@ Please adjust the quantity or request additional raw material issue.`);
                       <span>PACKING DEPARTMENT WORKBENCH</span>
                     </div>
                     <h2 className="text-xl font-black text-white flex items-center gap-2">
-                      <span>🧩 Multi-Item Assembly & Bundling Hub</span>
+                      <span>≡ƒº⌐ Multi-Item Assembly & Bundling Hub</span>
                     </h2>
                     <p className="text-xs text-purple-200/80 mt-1 max-w-xl leading-relaxed">
                       Merge 2 or more component items or Job Cards into a single assembled kit or product. Track quantity-based deductions, component consumption breakdown, and stock ready for Store transfer or Dispatch.
@@ -6523,7 +6568,7 @@ Please adjust the quantity or request additional raw material issue.`);
                       className="px-4 py-2.5 bg-purple-500 hover:bg-purple-400 text-white rounded-xl font-bold text-xs uppercase tracking-wider transition-all shadow-lg shadow-purple-950/50 flex items-center gap-2 cursor-pointer border border-purple-300/30"
                     >
                       <Layers className="h-4 w-4" />
-                      <span>✨ Quick Assembly Builder</span>
+                      <span>Γ£¿ Quick Assembly Builder</span>
                     </button>
                   </div>
                 </div>
@@ -6567,7 +6612,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
                   <div>
                     <h3 className="font-sans font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                      <span>🔨 Multi-Item Assembly Execution Workbench</span>
+                      <span>≡ƒö¿ Multi-Item Assembly Execution Workbench</span>
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
                       Select 2+ existing Job Cards in Packing, enter component consumption quantities, and generate the target Assembled Product.
@@ -6583,7 +6628,7 @@ Please adjust the quantity or request additional raw material issue.`);
                           : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                       }`}
                     >
-                      ✨ New Product
+                      Γ£¿ New Product
                     </button>
                     <button
                       type="button"
@@ -6594,7 +6639,7 @@ Please adjust the quantity or request additional raw material issue.`);
                           : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                       }`}
                     >
-                      📦 Merge to Existing Job Card
+                      ≡ƒôª Merge to Existing Job Card
                     </button>
                   </div>
                 </div>
@@ -6817,9 +6862,9 @@ Please adjust the quantity or request additional raw material issue.`);
                 <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-800 pt-4">
                   <div className="text-xs text-slate-500">
                     {assemblyComponents.length < 2 ? (
-                      <span className="text-amber-600 dark:text-amber-400 font-semibold">⚠️ Select at least 2 component items to enable assembly execution.</span>
+                      <span className="text-amber-600 dark:text-amber-400 font-semibold">ΓÜá∩╕Å Select at least 2 component items to enable assembly execution.</span>
                     ) : (
-                      <span className="text-emerald-600 dark:text-emerald-400 font-semibold">✅ Ready to assemble {assemblyComponents.length} components into '{assemblyTargetMode === 'new' ? (assembledProductName || 'New Assembled Product') : selectedAssemblyTargetJobNo}'.</span>
+                      <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Γ£à Ready to assemble {assemblyComponents.length} components into '{assemblyTargetMode === 'new' ? (assembledProductName || 'New Assembled Product') : selectedAssemblyTargetJobNo}'.</span>
                     )}
                   </div>
 
@@ -6843,7 +6888,7 @@ Please adjust the quantity or request additional raw material issue.`);
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 shadow-sm space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
                   <h3 className="font-sans font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                    <span>📦 Assembled Products Registry in Packing</span>
+                    <span>≡ƒôª Assembled Products Registry in Packing</span>
                   </h3>
                   <span className="text-xs font-mono font-bold text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-950 px-2.5 py-1 rounded-full border border-purple-200 dark:border-purple-800">
                     {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length} Total Assembled Products
@@ -6852,7 +6897,7 @@ Please adjust the quantity or request additional raw material issue.`);
 
                 {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length === 0 ? (
                   <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                    <span className="text-3xl">🧩</span>
+                    <span className="text-3xl">≡ƒº⌐</span>
                     <p className="text-slate-500 text-xs font-medium">No multi-item assembled products generated yet.</p>
                     <p className="text-slate-400 text-[11px]">Use the builder above to merge component job cards into an assembled kit.</p>
                   </div>
@@ -6899,7 +6944,7 @@ Please adjust the quantity or request additional raw material issue.`);
                             {/* Components Breakdown Badge Bar */}
                             <div className="space-y-1.5">
                               <span className="text-[10px] font-bold uppercase tracking-wider text-purple-800 dark:text-purple-300 flex items-center gap-1">
-                                <span>🧩 Consumed Component Items ({comps.length}):</span>
+                                <span>≡ƒº⌐ Consumed Component Items ({comps.length}):</span>
                               </span>
                               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                                 {comps.map((c, idx) => (
@@ -6921,7 +6966,7 @@ Please adjust the quantity or request additional raw material issue.`);
 
                             {job.packingDetails?.remarks && (
                               <p className="text-xs italic text-slate-500 bg-white dark:bg-slate-900/60 p-2 rounded-lg border border-slate-100 dark:border-slate-800">
-                                💬 Packaging Note: {job.packingDetails.remarks}
+                                ≡ƒÆ¼ Packaging Note: {job.packingDetails.remarks}
                               </p>
                             )}
                           </div>
@@ -6937,12 +6982,12 @@ Please adjust the quantity or request additional raw material issue.`);
           {activeSubView === 'completed' && (
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
               <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-4">
-                📋 Completed Outbound Ledgers
+                ≡ƒôï Completed Outbound Ledgers
               </h3>
 
               {completedDepartmentLogs.length === 0 ? (
                 <div className="text-center py-10 space-y-2 border border-dashed border-slate-200 dark:border-slate-800 rounded-xl">
-                  <span className="text-2xl">⏳</span>
+                  <span className="text-2xl">ΓÅ│</span>
                   <p className="text-slate-400 text-xs font-mono font-medium">No archived outbound handoffs recorded in active session</p>
                 </div>
               ) : (
@@ -7019,7 +7064,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 </div>
                 <div>
                   <h3 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
-                    <span>🧩 Packing Department: Multi-Item Assembly & Bundling</span>
+                    <span>≡ƒº⌐ Packing Department: Multi-Item Assembly & Bundling</span>
                   </h3>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
                     Combine 2 or more component items / Job Cards in Packing into a single assembled product or kit.
@@ -7031,7 +7076,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 onClick={() => setShowAssemblyModal(false)}
                 className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm font-bold p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
               >
-                ✕
+                Γ£ò
               </button>
             </div>
 
@@ -7046,7 +7091,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
-                <span>✨ Create New Assembled Product</span>
+                <span>Γ£¿ Create New Assembled Product</span>
               </button>
               <button
                 type="button"
@@ -7057,7 +7102,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                 }`}
               >
-                <span>📦 Assemble into Existing Packing Job Card</span>
+                <span>≡ƒôª Assemble into Existing Packing Job Card</span>
               </button>
             </div>
 
@@ -7372,7 +7417,7 @@ Please adjust the quantity or request additional raw material issue.`);
             {/* Create New Item Form */}
             <div className="bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-100 dark:border-indigo-900/40 rounded-xl p-4 space-y-3">
               <span className="text-xs font-bold text-indigo-700 dark:text-indigo-300 uppercase tracking-wider block">
-                ➕ Create New Item under Customer / Party
+                Γ₧ò Create New Item under Customer / Party
               </span>
 
               <form
@@ -7393,7 +7438,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     setSavedItems(prev => prev.some(x => x.id === saved.id) ? prev : [saved, ...prev]);
                     setNewMasterItemName('');
                     setNewMasterItemCode('');
-                    alert(`✅ Item "${newMasterItemName.trim()}" registered for customer "${newMasterCustomer.trim()}"!`);
+                    alert(`Γ£à Item "${newMasterItemName.trim()}" registered for customer "${newMasterCustomer.trim()}"!`);
                   } catch (err) {
                     console.error("Master item create error:", err);
                     alert("Failed to save item. Please try again.");

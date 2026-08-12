@@ -963,7 +963,12 @@ export class DBService {
     return getLocalStorageItem<JobCard[]>('mfr_job_cards', defaultJobCards);
   }
 
-  static async createJobCard(job: Omit<JobCard, 'jobCardNo' | 'orderNo' | 'createdAt' | 'completed' | 'balanceQty'>, creatorId: string, creatorName: string): Promise<JobCard> {
+  static async createJobCard(
+    job: Omit<JobCard, 'jobCardNo' | 'orderNo' | 'createdAt' | 'completed' | 'balanceQty'>,
+    creatorId: string,
+    creatorName: string,
+    initialMovementOverride?: { fromDepartment: Department; toDepartment: Department | 'Completed'; quantity?: number; remarks?: string }
+  ): Promise<JobCard> {
     const cards = await this.getJobCards();
     
     const isPurchase = job.processType === 'Purchase';
@@ -1009,7 +1014,17 @@ export class DBService {
     const newMovementId = `M-${2000 + movements.length + 1}`;
     
     const unitLabel = job.unit || 'KG';
-    const initialMovement: MaterialMovement = isPurchase ? {
+    const initialMovement: MaterialMovement = initialMovementOverride ? {
+      movementId: newMovementId,
+      jobCardNo,
+      fromDepartment: initialMovementOverride.fromDepartment,
+      toDepartment: initialMovementOverride.toDepartment,
+      quantity: initialMovementOverride.quantity ?? job.currentQty,
+      transferBy: creatorName,
+      transferDate: new Date().toISOString(),
+      accepted: false,
+      remarks: initialMovementOverride.remarks || `Job card ${jobCardNo} created.`
+    } : isPurchase ? {
       movementId: newMovementId,
       jobCardNo,
       fromDepartment: 'Purchase',
