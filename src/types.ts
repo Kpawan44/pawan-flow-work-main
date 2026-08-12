@@ -95,7 +95,9 @@ export interface OutsourceOrder {
   poPlacedByUserName?: string;
   
   // Goods Receipt Details (filled when Material Received by Purchase / Assignee)
-  receivedQty?: number;
+  receivedQty?: number; // amount received in the MOST RECENT receipt event
+  totalReceivedQty?: number; // running total across ALL receipt events - used to reconcile against orderQty and block over-receipt
+  receiptHistory?: { quantity: number; receivedAt: string; receivedByUserId: string; receivedByUserName: string; challanNo?: string }[];
   rejectionQty?: number;
   rejectionReason?: string;
   billNo?: string;

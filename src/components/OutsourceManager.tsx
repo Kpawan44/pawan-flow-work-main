@@ -584,11 +584,46 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       return;
     }
 
+    // Duplicate-receipt guard: once an order is fully Completed, block any
+    // further receipt against it - prevents double-counting the same
+    // delivery (e.g. accidental resubmit, two devices, network retry).
+    if (receiptModalOrder.status === 'Completed') {
+      showToast(`This order (${receiptModalOrder.orderId}) has already been fully received and marked Completed. Duplicate receipt blocked.`, 'error');
+      return;
+    }
+
+    // PO reconciliation: never let the running total exceed what was
+    // actually ordered. Reject the excess outright rather than silently
+    // over-counting material into the next department.
+    const alreadyReceived = receiptModalOrder.totalReceivedQty || 0;
+    const newTotalReceived = alreadyReceived + receivedQty;
+    if (newTotalReceived > receiptModalOrder.orderQty) {
+      const remainingAllowed = Math.max(0, receiptModalOrder.orderQty - alreadyReceived);
+      showToast(
+        `Receipt rejected: this order's total is ${receiptModalOrder.orderQty} ${receiptModalOrder.unit}. ` +
+        `${alreadyReceived} ${receiptModalOrder.unit} already received, so at most ${remainingAllowed} ${receiptModalOrder.unit} can be received now ` +
+        `(you entered ${receivedQty}).`,
+        'error'
+      );
+      return;
+    }
+
+    const isFullyReceived = newTotalReceived >= receiptModalOrder.orderQty;
+    const receiptEntry = {
+      quantity: receivedQty,
+      receivedAt: new Date().toISOString(),
+      receivedByUserId: currentUser?.userId || 'u-purchase',
+      receivedByUserName: currentUser?.name || 'Purchase Received',
+      challanNo: receivedChallanNo,
+    };
+
     try {
       await DBService.updateOutsourceOrder(
         receiptModalOrder.orderId,
         {
           receivedQty,
+          totalReceivedQty: newTotalReceived,
+          receiptHistory: [...(receiptModalOrder.receiptHistory || []), receiptEntry],
           receivedAt: new Date().toISOString(),
           receivedChallanNo,
           receivedMaterialType,
@@ -596,7 +631,11 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
           receiptRemarks,
           receivedByUserId: currentUser?.userId,
           receivedByUserName: currentUser?.name,
-          status: 'Completed'
+          // Only move to Completed once the FULL ordered quantity has
+          // actually been received - a partial receipt now correctly
+          // stays at 'Material Received' so more can be recorded later,
+          // instead of prematurely closing the order.
+          status: isFullyReceived ? 'Completed' : 'Material Received'
         },
         currentUser?.userId || 'u-purchase',
         currentUser?.name || 'Purchase Received'
@@ -619,7 +658,7 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
             jcNo,
             {
               currentDepartment: targetDepartmentAfterReceipt,
-              outsourceStatus: 'Completed',
+              outsourceStatus: isFullyReceived ? 'Completed' : 'Material Received',
               materialType: receivedMaterialType
             },
             currentUser?.userId || 'u-purchase',
@@ -648,8 +687,8 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       await DBService.createNotification({
         userId: 'all_dispatch',
         department: 'Dispatch',
-        title: '📦 Outsource Goods Accepted at Purchase',
-        message: `Order ${receiptModalOrder.orderId} material (${receivedQty} ${receiptModalOrder.unit} as ${receivedMaterialType}) accepted from vendor '${receiptModalOrder.supplierName || 'Vendor'}' & sent to ${targetDepartmentAfterReceipt}.`
+        title: isFullyReceived ? '📦 Outsource Goods Accepted at Purchase (Fully Received)' : '📦 Partial Outsource Goods Received at Purchase',
+        message: `Order ${receiptModalOrder.orderId} material (${receivedQty} ${receiptModalOrder.unit} as ${receivedMaterialType}) accepted from vendor '${receiptModalOrder.supplierName || 'Vendor'}' & sent to ${targetDepartmentAfterReceipt}. Total received so far: ${newTotalReceived}/${receiptModalOrder.orderQty} ${receiptModalOrder.unit}${isFullyReceived ? ' - order fully received.' : ' - awaiting remaining quantity.'}`
       });
 
       // Notify Destination Department (Store, Heat Treatment, Plating, etc.)
@@ -1587,7 +1626,8 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
                       )}
 
                       {/* Step 2: Receive Material against Supplier PO */}
-                      {(order.status === 'Supplier PO Placed' || order.status === 'In Transit') && (
+                      {((order.status === 'Supplier PO Placed' || order.status === 'In Transit') ||
+                        (order.status === 'Material Received' && (order.totalReceivedQty || 0) < order.orderQty)) && (
                         isPurchaserUser(currentUser, order) ? (
                           <div className="grid grid-cols-2 gap-2">
                             <button
@@ -1603,7 +1643,7 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
                               className="py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition shadow-xs cursor-pointer"
                             >
                               <PackageCheck className="h-3.5 w-3.5" />
-                              Receive Material
+                              {order.status === 'Material Received' ? `Receive Remaining (${Math.max(0, order.orderQty - (order.totalReceivedQty || 0))} ${order.unit})` : 'Receive Material'}
                             </button>
                           </div>
                         ) : (
