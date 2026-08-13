@@ -1,4 +1,4 @@
-﻿export type Department = 'Purchase' | 'Raw Material Store' | 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
+export type Department = 'Purchase' | 'Raw Material Store' | 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
 export type UserRole = 'super_admin' | 'admin' | 'staff';
 
 export interface UserProfile {
@@ -95,7 +95,9 @@ export interface OutsourceOrder {
   poPlacedByUserName?: string;
   
   // Goods Receipt Details (filled when Material Received by Purchase / Assignee)
-  receivedQty?: number;
+  receivedQty?: number; // amount received in the MOST RECENT receipt event
+  totalReceivedQty?: number; // running total across ALL receipt events - used to reconcile against orderQty and block over-receipt
+  receiptHistory?: { quantity: number; receivedAt: string; receivedByUserId: string; receivedByUserName: string; challanNo?: string }[];
   rejectionQty?: number;
   rejectionReason?: string;
   billNo?: string;
@@ -132,6 +134,12 @@ export interface JobCard {
   outsourceStatus?: OutsourceStatus;
   outsourceDetails?: Partial<OutsourceOrder>;
   materialType?: 'Raw Material' | 'Semi Finished Goods' | 'Finished Goods';
+  // Explicit marker for whether this job card's stock is currently sitting
+  // in the Purchase department's "Incoming Store" buffer, as opposed to
+  // being at Purchase for some other reason. Lets Incoming Store reporting
+  // identify buffer stock with certainty instead of guessing from
+  // department + status alone.
+  heldInIncomingStore?: boolean;
   customRoutedToPlating?: number;
   customRoutedToPacking?: number;
   customRoutedToStore?: number;

@@ -3958,6 +3958,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                                 currentDepartment: storeReleaseDept,
                                                 status: 'Pending Acceptance',
                                                 heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment',
+                                                createdBy: currentUser.name,
                                                 processType: job.processType,
                                                 materialType: job.materialType,
                                                 parentJobCardNo: job.jobCardNo,
