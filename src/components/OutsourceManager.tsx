@@ -28,6 +28,7 @@ import {
   CalendarDays,
   ShieldAlert,
   Edit3,
+  FileCheck,
   ArrowUpRight,
   ListFilter,
   Check,
@@ -179,10 +180,12 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
   // Material Receipt Modal State
   const [receiptModalOrder, setReceiptModalOrder] = useState<OutsourceOrder | null>(null);
   const [receivedQty, setReceivedQty] = useState<number>(0);
+  const [receiptRejectionQty, setReceiptRejectionQty] = useState<number>(0);
   const [receivedChallanNo, setReceivedChallanNo] = useState('');
   const [receivedMaterialType, setReceivedMaterialType] = useState<'Semi Finished Goods' | 'Finished Goods'>('Semi Finished Goods');
   const [targetDepartmentAfterReceipt, setTargetDepartmentAfterReceipt] = useState<Department>('Store');
   const [receiptRemarks, setReceiptRemarks] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
   // Update Delivery Date Modal State
   const [editDeliveryOrder, setEditDeliveryOrder] = useState<OutsourceOrder | null>(null);
@@ -532,8 +535,11 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       showToast('Access Denied: Only Purchase department or authorized purchaser can receive and accept outsource material.', 'error');
       return;
     }
+    const alreadyReceived = order.receivedQty || 0;
+    const remainingQty = Math.max(0, order.orderQty - alreadyReceived);
     setReceiptModalOrder(order);
-    setReceivedQty(order.orderQty);
+    setReceivedQty(remainingQty > 0 ? remainingQty : order.orderQty);
+    setReceiptRejectionQty(0);
     setReceivedChallanNo(`CH-${Date.now().toString().slice(-5)}`);
     setReceivedMaterialType(order.outsourceMaterialType);
     setReceiptRemarks('');
@@ -572,7 +578,7 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
   // Submit Material Receipt
   const handleSubmitReceipt = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!receiptModalOrder) return;
+    if (!receiptModalOrder || isSubmitting) return;
 
     if (!isPurchaserUser(currentUser, receiptModalOrder)) {
       showToast('Access Denied: Only Purchase department or authorized purchaser can record material receipt.', 'error');
@@ -584,46 +590,45 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       return;
     }
 
-    // Duplicate-receipt guard: once an order is fully Completed, block any
-    // further receipt against it - prevents double-counting the same
-    // delivery (e.g. accidental resubmit, two devices, network retry).
-    if (receiptModalOrder.status === 'Completed') {
-      showToast(`This order (${receiptModalOrder.orderId}) has already been fully received and marked Completed. Duplicate receipt blocked.`, 'error');
+    // Once an order is already fully reconciled, block any further receipt
+    // against it - the cumulative-tracking above correctly handles multiple
+    // partial receipts in progress, but a receipt AFTER the order is already
+    // closed out (e.g. accidental resubmit in a later session, two people
+    // both processing the same delivery) would double-count material that's
+    // already been recorded.
+    if (receiptModalOrder.status === 'Completed' || receiptModalOrder.reconciliationStatus === 'Fully Reconciled') {
+      showToast(`Order ${receiptModalOrder.orderId} is already fully reconciled and Completed. Duplicate receipt blocked.`, 'error');
       return;
     }
 
-    // PO reconciliation: never let the running total exceed what was
-    // actually ordered. Reject the excess outright rather than silently
-    // over-counting material into the next department.
-    const alreadyReceived = receiptModalOrder.totalReceivedQty || 0;
-    const newTotalReceived = alreadyReceived + receivedQty;
-    if (newTotalReceived > receiptModalOrder.orderQty) {
-      const remainingAllowed = Math.max(0, receiptModalOrder.orderQty - alreadyReceived);
-      showToast(
-        `Receipt rejected: this order's total is ${receiptModalOrder.orderQty} ${receiptModalOrder.unit}. ` +
-        `${alreadyReceived} ${receiptModalOrder.unit} already received, so at most ${remainingAllowed} ${receiptModalOrder.unit} can be received now ` +
-        `(you entered ${receivedQty}).`,
-        'error'
-      );
-      return;
-    }
-
-    const isFullyReceived = newTotalReceived >= receiptModalOrder.orderQty;
-    const receiptEntry = {
-      quantity: receivedQty,
-      receivedAt: new Date().toISOString(),
-      receivedByUserId: currentUser?.userId || 'u-purchase',
-      receivedByUserName: currentUser?.name || 'Purchase Received',
-      challanNo: receivedChallanNo,
-    };
-
+    setIsSubmitting(true);
     try {
+      const prevRec = receiptModalOrder.receivedQty || 0;
+      const prevRej = receiptModalOrder.rejectionQty || 0;
+      const cumulativeRec = prevRec + receivedQty;
+      const cumulativeRej = prevRej + receiptRejectionQty;
+      const cumulativeNetAccepted = Math.max(0, cumulativeRec - cumulativeRej);
+      const remainingPoBal = Math.max(0, receiptModalOrder.orderQty - cumulativeRec);
+      
+      let recStatus: 'Fully Reconciled' | 'Partially Reconciled' | 'Over-Delivered' | 'Pending Receipt' = 'Pending Receipt';
+      if (cumulativeRec <= 0) {
+        recStatus = 'Pending Receipt';
+      } else if (cumulativeRec > receiptModalOrder.orderQty) {
+        recStatus = 'Over-Delivered';
+      } else if (cumulativeRec >= receiptModalOrder.orderQty) {
+        recStatus = 'Fully Reconciled';
+      } else {
+        recStatus = 'Partially Reconciled';
+      }
+
       await DBService.updateOutsourceOrder(
         receiptModalOrder.orderId,
         {
-          receivedQty,
-          totalReceivedQty: newTotalReceived,
-          receiptHistory: [...(receiptModalOrder.receiptHistory || []), receiptEntry],
+          receivedQty: cumulativeRec,
+          rejectionQty: cumulativeRej,
+          netAcceptedQty: cumulativeNetAccepted,
+          remainingPoBalance: remainingPoBal,
+          reconciliationStatus: recStatus,
           receivedAt: new Date().toISOString(),
           receivedChallanNo,
           receivedMaterialType,
@@ -631,11 +636,7 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
           receiptRemarks,
           receivedByUserId: currentUser?.userId,
           receivedByUserName: currentUser?.name,
-          // Only move to Completed once the FULL ordered quantity has
-          // actually been received - a partial receipt now correctly
-          // stays at 'Material Received' so more can be recorded later,
-          // instead of prematurely closing the order.
-          status: isFullyReceived ? 'Completed' : 'Material Received'
+          status: cumulativeRec >= receiptModalOrder.orderQty ? 'Completed' : 'Material Received'
         },
         currentUser?.userId || 'u-purchase',
         currentUser?.name || 'Purchase Received'
@@ -658,7 +659,7 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
             jcNo,
             {
               currentDepartment: targetDepartmentAfterReceipt,
-              outsourceStatus: isFullyReceived ? 'Completed' : 'Material Received',
+              outsourceStatus: 'Completed',
               materialType: receivedMaterialType
             },
             currentUser?.userId || 'u-purchase',
@@ -687,8 +688,8 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       await DBService.createNotification({
         userId: 'all_dispatch',
         department: 'Dispatch',
-        title: isFullyReceived ? '📦 Outsource Goods Accepted at Purchase (Fully Received)' : '📦 Partial Outsource Goods Received at Purchase',
-        message: `Order ${receiptModalOrder.orderId} material (${receivedQty} ${receiptModalOrder.unit} as ${receivedMaterialType}) accepted from vendor '${receiptModalOrder.supplierName || 'Vendor'}' & sent to ${targetDepartmentAfterReceipt}. Total received so far: ${newTotalReceived}/${receiptModalOrder.orderQty} ${receiptModalOrder.unit}${isFullyReceived ? ' - order fully received.' : ' - awaiting remaining quantity.'}`
+        title: '📦 Outsource Goods Accepted at Purchase',
+        message: `Order ${receiptModalOrder.orderId} material (${receivedQty} ${receiptModalOrder.unit} as ${receivedMaterialType}) accepted from vendor '${receiptModalOrder.supplierName || 'Vendor'}' & sent to ${targetDepartmentAfterReceipt}.`
       });
 
       // Notify Destination Department (Store, Heat Treatment, Plating, etc.)
@@ -713,6 +714,8 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       if (onRefreshData) onRefreshData();
     } catch (err: any) {
       showToast(`Failed to record material receipt: ${err.message || err}`, 'error');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -1626,8 +1629,7 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
                       )}
 
                       {/* Step 2: Receive Material against Supplier PO */}
-                      {((order.status === 'Supplier PO Placed' || order.status === 'In Transit') ||
-                        (order.status === 'Material Received' && (order.totalReceivedQty || 0) < order.orderQty)) && (
+                      {(order.status === 'Supplier PO Placed' || order.status === 'In Transit') && (
                         isPurchaserUser(currentUser, order) ? (
                           <div className="grid grid-cols-2 gap-2">
                             <button
@@ -1643,7 +1645,7 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
                               className="py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 transition shadow-xs cursor-pointer"
                             >
                               <PackageCheck className="h-3.5 w-3.5" />
-                              {order.status === 'Material Received' ? `Receive Remaining (${Math.max(0, order.orderQty - (order.totalReceivedQty || 0))} ${order.unit})` : 'Receive Material'}
+                              Receive Material
                             </button>
                           </div>
                         ) : (
@@ -2170,10 +2172,62 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
             </div>
 
             <form onSubmit={handleSubmitReceipt} className="space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-2">
+              {/* PO Reconciliation Summary Card */}
+              {(() => {
+                const poQty = receiptModalOrder.orderQty;
+                const prevRec = receiptModalOrder.receivedQty || 0;
+                const prevRej = receiptModalOrder.rejectionQty || 0;
+                const cumRec = prevRec + (receivedQty || 0);
+                const cumRej = prevRej + (receiptRejectionQty || 0);
+                const netAcc = Math.max(0, cumRec - cumRej);
+                const remainingBal = Math.max(0, poQty - cumRec);
+                const isOver = cumRec > poQty;
+                const isFull = cumRec >= poQty;
+
+                return (
+                  <div className="bg-slate-50 dark:bg-slate-950 p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-2">
+                    <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-800 pb-1.5">
+                      <span className="font-bold text-slate-800 dark:text-slate-200 text-xs flex items-center gap-1">
+                        <FileCheck className="h-3.5 w-3.5 text-blue-600" />
+                        PO Reconciliation Live Summary
+                      </span>
+                      <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full border ${
+                        isOver
+                          ? 'bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-950 dark:text-purple-300'
+                          : isFull
+                          ? 'bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300'
+                          : 'bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-950 dark:text-amber-300'
+                      }`}>
+                        {isOver ? 'Over-Delivered' : isFull ? 'Fully Reconciled' : 'Partially Reconciled'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-1 text-[10px] text-center">
+                      <div className="bg-white dark:bg-slate-900 p-1.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                        <span className="block text-slate-400 font-medium">Ordered</span>
+                        <span className="font-bold text-slate-800 dark:text-slate-200">{poQty} {receiptModalOrder.unit}</span>
+                      </div>
+                      <div className="bg-white dark:bg-slate-900 p-1.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                        <span className="block text-slate-400 font-medium">Prev Rec.</span>
+                        <span className="font-bold text-slate-800 dark:text-slate-200">{prevRec} {receiptModalOrder.unit}</span>
+                      </div>
+                      <div className="bg-white dark:bg-slate-900 p-1.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                        <span className="block text-slate-400 font-medium">Net Accepted</span>
+                        <span className="font-bold text-emerald-600 dark:text-emerald-400">{netAcc} {receiptModalOrder.unit}</span>
+                      </div>
+                      <div className="bg-white dark:bg-slate-900 p-1.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                        <span className="block text-slate-400 font-medium">PO Balance</span>
+                        <span className="font-bold text-blue-600 dark:text-blue-400">{remainingBal} {receiptModalOrder.unit}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="grid grid-cols-3 gap-2">
                 <div>
                   <label className="block text-slate-500 font-medium mb-1">
-                    Received Quantity ({receiptModalOrder.unit}) *
+                    Rec. Qty ({receiptModalOrder.unit}) *
                   </label>
                   <input
                     type="number"
@@ -2181,17 +2235,29 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
                     min={1}
                     value={receivedQty}
                     onChange={e => setReceivedQty(Number(e.target.value))}
-                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 font-bold text-blue-600 dark:text-blue-400 focus:outline-none"
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-2.5 py-1.5 font-bold text-blue-600 dark:text-blue-400 focus:outline-none"
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-500 font-medium mb-1">Challan / Invoice No. *</label>
+                  <label className="block text-slate-500 font-medium mb-1">
+                    Rej. Qty ({receiptModalOrder.unit})
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={receiptRejectionQty}
+                    onChange={e => setReceiptRejectionQty(Number(e.target.value))}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-2.5 py-1.5 font-bold text-rose-600 dark:text-rose-400 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-500 font-medium mb-1">Challan / Inv No. *</label>
                   <input
                     type="text"
                     required
                     value={receivedChallanNo}
                     onChange={e => setReceivedChallanNo(e.target.value)}
-                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 font-mono text-slate-800 dark:text-slate-200 focus:outline-none"
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-2.5 py-1.5 font-mono text-slate-800 dark:text-slate-200 focus:outline-none"
                   />
                 </div>
               </div>

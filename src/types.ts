@@ -1,17 +1,34 @@
 export type Department = 'Purchase' | 'Raw Material Store' | 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
-export type UserRole = 'super_admin' | 'admin' | 'staff';
+export type UserRole = 
+  | 'super_admin' 
+  | 'admin' 
+  | 'staff' 
+  | 'management' 
+  | 'viewer' 
+  | 'production' 
+  | 'heat_treatment' 
+  | 'plating' 
+  | 'packing' 
+  | 'store' 
+  | 'rm_store' 
+  | 'dispatch' 
+  | 'purchase';
 
 export interface UserProfile {
   userId: string;
+  empId?: string; // Employee ID e.g. EMP-101
   name: string;
   email: string;
   pin: string;
-  department: Department | 'Admin';
-  allowedDepartments?: (Department | 'Admin')[]; // Additional departments user is authorized to access (assigned by Super Admin)
-  accessList?: (Department | 'Admin')[]; // Access list of departments authorized by Super Admin
+  phone?: string;
+  department: Department | 'Admin' | 'Management';
+  allowedDepartments?: (Department | 'Admin' | 'Management')[]; // Additional departments user is authorized to access
+  accessList?: (Department | 'Admin' | 'Management')[]; // Access list of departments authorized by Super Admin
   role: UserRole;
   active: boolean;
+  status?: 'active' | 'inactive';
   createdAt: string;
+  lastLogin?: string;
   canOutsource?: boolean; // Authorized Outsourcing Assignee
 }
 
@@ -38,7 +55,19 @@ export interface AssemblyRecord {
   remarks?: string;
 }
 
-export type JobCardStatus = 'Pending' | 'In Process' | 'Completed' | 'Rejected' | 'Pending Acceptance' | 'Stored';
+export type JobCardStatus = 
+  | 'Pending' 
+  | 'In Process' 
+  | 'In Production' 
+  | 'Heat Treatment' 
+  | 'Plating' 
+  | 'Packing' 
+  | 'Completed' 
+  | 'Hold' 
+  | 'Cancelled' 
+  | 'Rejected' 
+  | 'Pending Acceptance' 
+  | 'Stored';
 export type OutsourceStatus = 'Assigned' | 'Supplier PO Placed' | 'In Transit' | 'Material Received' | 'Completed' | 'Cancelled';
 export type OutsourceMaterialType = 'Semi Finished Goods' | 'Finished Goods';
 
@@ -95,10 +124,19 @@ export interface OutsourceOrder {
   poPlacedByUserName?: string;
   
   // Goods Receipt Details (filled when Material Received by Purchase / Assignee)
-  receivedQty?: number; // amount received in the MOST RECENT receipt event
-  totalReceivedQty?: number; // running total across ALL receipt events - used to reconcile against orderQty and block over-receipt
-  receiptHistory?: { quantity: number; receivedAt: string; receivedByUserId: string; receivedByUserName: string; challanNo?: string }[];
+  receivedQty?: number;
   rejectionQty?: number;
+  netAcceptedQty?: number;
+  remainingPoBalance?: number;
+  reconciliationStatus?: 'Fully Reconciled' | 'Partially Reconciled' | 'Over-Delivered' | 'Pending Receipt';
+  poReceiptHistory?: {
+    receivedQty: number;
+    rejectionQty: number;
+    netAcceptedQty: number;
+    challanNo?: string;
+    date: string;
+    remarks?: string;
+  }[];
   rejectionReason?: string;
   billNo?: string;
   receivedChallanNo?: string;
@@ -113,6 +151,7 @@ export interface OutsourceOrder {
 export interface JobCard {
   jobCardNo: string;
   orderNo: string;
+  poNumber?: string;
   partyName: string;
   itemName: string;
   itemCode: string;
@@ -126,6 +165,12 @@ export interface JobCard {
   createdBy: string; // user name/id
   createdAt: string;
   completed: boolean;
+  priority?: 'Low' | 'Medium' | 'High' | 'Urgent';
+  isHold?: boolean;
+  isCancelled?: boolean;
+  isDeleted?: boolean;
+  deliveryDate?: string;
+  targetDate?: string;
   processType?: 'Manufacturing' | 'Purchase';
   isOutsource?: boolean;
   outsourceOrderId?: string;
@@ -134,12 +179,6 @@ export interface JobCard {
   outsourceStatus?: OutsourceStatus;
   outsourceDetails?: Partial<OutsourceOrder>;
   materialType?: 'Raw Material' | 'Semi Finished Goods' | 'Finished Goods';
-  // Explicit marker for whether this job card's stock is currently sitting
-  // in the Purchase department's "Incoming Store" buffer, as opposed to
-  // being at Purchase for some other reason. Lets Incoming Store reporting
-  // identify buffer stock with certainty instead of guessing from
-  // department + status alone.
-  heldInIncomingStore?: boolean;
   customRoutedToPlating?: number;
   customRoutedToPacking?: number;
   customRoutedToStore?: number;
@@ -237,13 +276,25 @@ export interface JobCard {
 export interface MaterialMovement {
   movementId: string;
   jobCardNo: string;
+  poNumber?: string;
+  orderNo?: string;
+  itemName?: string;
+  itemCode?: string;
+  partyName?: string;
   fromDepartment: Department;
   toDepartment: Department | 'Completed';
   quantity: number;
+  availableQtyBefore?: number;
+  remainingQtyAfter?: number;
+  transactionType?: 'TRANSFER' | 'REVERSAL' | 'ISSUE_REQUEST' | 'ADJUSTMENT';
+  reversalOfMovementId?: string;
   transferBy: string; // user name
+  empId?: string;
   transferDate: string;
+  time?: string;
   accepted: boolean;
   acceptedBy?: string; // user name
+  acceptedByUserId?: string;
   acceptedDate?: string;
   remarks?: string;
   allottedLocation?: string;
@@ -266,6 +317,7 @@ export interface MaterialMovement {
   modifiedByUserName?: string;
   modifiedDate?: string;
   modifiedAction?: string;
+  isDeleted?: boolean;
   deletedByUserId?: string;
   deletedByUserName?: string;
   deletedDate?: string;
@@ -284,9 +336,21 @@ export interface AppNotification {
 export interface AuditLog {
   id: string;
   timestamp: string;
+  date?: string;
+  time?: string;
   userId: string;
   userName: string;
+  empId?: string;
+  department?: string;
   action: string;
+  jobCardNo?: string;
+  poNumber?: string;
+  itemName?: string;
+  oldQuantity?: number;
+  movementQuantity?: number;
+  newQuantity?: number;
+  fromDepartment?: string;
+  toDepartment?: string;
   details: string;
   ipAddress?: string;
 }

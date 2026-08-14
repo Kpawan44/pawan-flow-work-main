@@ -1,4 +1,4 @@
-﻿import { initializeApp, getApps, getApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import { 
   getFirestore, 
@@ -856,16 +856,19 @@ export class DBService {
     }
 
     const idx = list.findIndex(u => u.userId === user.userId);
+    
+    // Check for duplicate PIN to prevent user PIN collision
+    if (user.pin) {
+      const existingPinUser = list.find(u => u.userId !== user.userId && u.pin && u.pin.trim() === user.pin.trim());
+      if (existingPinUser) {
+        throw new Error(`PIN '${user.pin}' is already assigned to active user '${existingPinUser.name}' (${existingPinUser.department}). Please choose a unique PIN.`);
+      }
+    }
+
     if (idx >= 0) {
       list[idx] = { ...list[idx], ...user };
     } else {
-      // Check for PIN or Email uniqueness to avoid duplication
-      const duplicateIdx = list.findIndex(u => u.pin === user.pin || (u.email && u.email === user.email));
-      if (duplicateIdx >= 0) {
-        list[duplicateIdx] = { ...list[duplicateIdx], ...user };
-      } else {
-        list.push(user);
-      }
+      list.push(user);
     }
     setLocalStorageItem('mfr_users', list);
 
@@ -989,9 +992,12 @@ export class DBService {
       const num = parts.length > 0 ? parseInt(parts[parts.length - 1]) : 1000;
       return !isNaN(num) && num > acc ? num : acc;
     }, 1000);
-    const newNo = currentMaxNo + 1;
-    
-    const jobCardNo = `${prefix}-${newNo}`;
+    let newNo = currentMaxNo + 1;
+    let jobCardNo = `${prefix}-${newNo}`;
+    while (cards.some(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase())) {
+      newNo++;
+      jobCardNo = `${prefix}-${newNo}`;
+    }
     const orderNo = isPurchase ? `ORD-PUR-${5000 + (newNo - 1000)}` : `ORD-${5000 + (newNo - 1000)}`;
 
     const newJob: JobCard = {
@@ -1145,7 +1151,7 @@ export class DBService {
         if (!alreadyNotified) {
           await this.createNotification({
             department: 'Production',
-            title: 'ΓÜá∩╕Å High Rejection Rate Alert',
+            title: '⚠️ High Rejection Rate Alert',
             message: `Job Card ${jobCardNo} (${updatedCard.itemName}) has exceeded 10% rejection threshold. Total Rejections: ${totalRejections} KG / Order Qty: ${orderQty} KG (${((totalRejections / orderQty) * 100).toFixed(1)}%).`,
             userId: 'all_production'
           });
@@ -1383,6 +1389,21 @@ export class DBService {
 
   static async createMovement(movement: Omit<MaterialMovement, 'movementId' | 'transferDate' | 'accepted'>, userId: string, userName: string): Promise<MaterialMovement> {
     const movements = await this.getMovements();
+
+    // Check for duplicate pending transfer request for same job card between same departments
+    if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
+      const pendingDup = movements.find(m => 
+        !m.accepted && 
+        !m.deletedDate &&
+        m.jobCardNo.toLowerCase() === movement.jobCardNo.toLowerCase() &&
+        m.fromDepartment === movement.fromDepartment &&
+        m.toDepartment === movement.toDepartment
+      );
+      if (pendingDup) {
+        throw new Error(`A transfer request for Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment} is already pending acceptance.`);
+      }
+    }
+
     const newId = `M-${2000 + movements.length + 1}`;
     
     const newMov: MaterialMovement = {
@@ -1627,7 +1648,7 @@ export class DBService {
     // Create alarm notification for sender
     await this.createNotification({
       department: mov.fromDepartment,
-      title: 'ΓÜá∩╕Å Material Rejected',
+      title: '⚠️ Material Rejected',
       message: `${rejectedByName} rejected Job Card ${mov.jobCardNo} movement. Remarks: "${remarks}"`,
       userId: `all_${mov.fromDepartment.toLowerCase().replace(' ', '_')}`
     });
@@ -2222,7 +2243,12 @@ export class DBService {
     userName: string
   ): Promise<OutsourceOrder> {
     const list = await this.getOutsourceOrders();
-    const orderId = `OUT-${new Date().getFullYear()}-${String(list.length + 1).padStart(3, '0')}`;
+    let orderSeq = list.length + 1;
+    let orderId = `OUT-${new Date().getFullYear()}-${String(orderSeq).padStart(3, '0')}`;
+    while (list.some(o => o.orderId.toUpperCase() === orderId.toUpperCase())) {
+      orderSeq++;
+      orderId = `OUT-${new Date().getFullYear()}-${String(orderSeq).padStart(3, '0')}`;
+    }
     
     const newOrderRaw: OutsourceOrder = {
       ...orderData,
@@ -2230,7 +2256,10 @@ export class DBService {
       orderedByUserId: userId,
       orderedByUserName: userName,
       orderedAt: new Date().toISOString(),
-      status: 'Assigned'
+      status: 'Assigned',
+      reconciliationStatus: 'Pending Receipt',
+      remainingPoBalance: orderData.orderQty,
+      netAcceptedQty: 0
     };
     const newOrder = sanitizeForFirestore(newOrderRaw);
 
@@ -2241,7 +2270,7 @@ export class DBService {
     await this.createNotification({
       userId: newOrder.assignedToUserId,
       department: 'Purchase',
-      title: '≡ƒôª New Outsource Order Assigned',
+      title: '📦 New Outsource Order Assigned',
       message: `${userName} (Dispatch) assigned process outsource order ${orderId} (${newOrder.itemName}, ${newOrder.orderQty} ${newOrder.unit}) to you.`
     });
 
@@ -2276,7 +2305,48 @@ export class DBService {
     const idx = list.findIndex(o => o.orderId === orderId);
     if (idx === -1) throw new Error(`Outsource order ${orderId} not found`);
 
-    const updated = sanitizeForFirestore({ ...list[idx], ...updates });
+    const existing = list[idx];
+
+    // Compute cumulative PO reconciliation metrics
+    let totalReceived = updates.receivedQty !== undefined ? updates.receivedQty : (existing.receivedQty || 0);
+    let totalRejected = updates.rejectionQty !== undefined ? updates.rejectionQty : (existing.rejectionQty || 0);
+    let netAccepted = Math.max(0, totalReceived - totalRejected);
+    let remainingPoBalance = Math.max(0, existing.orderQty - totalReceived);
+
+    let recStatus: 'Fully Reconciled' | 'Partially Reconciled' | 'Over-Delivered' | 'Pending Receipt' = 'Pending Receipt';
+    if (totalReceived <= 0) {
+      recStatus = 'Pending Receipt';
+    } else if (totalReceived > existing.orderQty) {
+      recStatus = 'Over-Delivered';
+    } else if (totalReceived >= existing.orderQty) {
+      recStatus = 'Fully Reconciled';
+    } else {
+      recStatus = 'Partially Reconciled';
+    }
+
+    let history = existing.poReceiptHistory ? [...existing.poReceiptHistory] : [];
+    if (updates.receivedQty !== undefined && updates.receivedQty > (existing.receivedQty || 0)) {
+      const addedQty = updates.receivedQty - (existing.receivedQty || 0);
+      const addedRej = updates.rejectionQty !== undefined ? (updates.rejectionQty - (existing.rejectionQty || 0)) : 0;
+      history.push({
+        receivedQty: addedQty,
+        rejectionQty: Math.max(0, addedRej),
+        netAcceptedQty: Math.max(0, addedQty - Math.max(0, addedRej)),
+        challanNo: updates.receivedChallanNo || existing.receivedChallanNo,
+        date: new Date().toISOString(),
+        remarks: updates.receiptRemarks
+      });
+    }
+
+    const calculatedUpdates: Partial<OutsourceOrder> = {
+      ...updates,
+      netAcceptedQty: netAccepted,
+      remainingPoBalance,
+      reconciliationStatus: recStatus,
+      poReceiptHistory: history
+    };
+
+    const updated = sanitizeForFirestore({ ...existing, ...calculatedUpdates });
     list[idx] = updated;
     setLocalStorageItem('mfr_outsource_orders', list);
 
@@ -2441,7 +2511,7 @@ export class DBService {
 
   // Realtime subscription emulation & Live Firestore triggers
   // Incremental subscriptions for high-volume, ever-growing collections
-  // (movements, audit logs). Unlike subscribeToUpdates() above - which just
+  // (movements, audit logs). Unlike subscribeToUpdates() below - which just
   // signals "something changed" and leaves the caller to re-fetch the whole
   // collection - these deliver only the documents that actually
   // added/changed/were removed on each update, via Firestore's own

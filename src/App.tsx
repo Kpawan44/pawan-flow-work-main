@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Factory, 
@@ -823,7 +823,7 @@ export default function App() {
           // Native desktop notification trigger
           if ('Notification' in window && Notification.permission === 'granted') {
             try {
-              new Notification('≡ƒÜ¿ URGENT RAW MATERIAL REQUEST', {
+              new Notification('🚨 URGENT RAW MATERIAL REQUEST', {
                 body: notif.message,
                 icon: '/favicon.ico',
                 tag: notif.notificationId,
@@ -836,7 +836,7 @@ export default function App() {
 
           // Trigger internal high-importance alert UI card
           setActiveUrgentRequest(notif);
-          showToast(`≡ƒÜ¿ Urgent: ${notif.message}`, "error");
+          showToast(`🚨 Urgent: ${notif.message}`, "error");
         }
       }
     });
@@ -1115,7 +1115,7 @@ export default function App() {
             window.open(res.url, '_blank');
           }
           showToast(
-            `≡ƒô▓ WhatsApp alert ready for Job Card ${mov.jobCardNo}!`,
+            `📲 WhatsApp alert ready for Job Card ${mov.jobCardNo}!`,
             "info",
             {
               label: 'Send WhatsApp',
@@ -2020,7 +2020,7 @@ export default function App() {
                       onClick={() => setLoginPin(prev => prev.slice(0, -1))}
                       className="h-9 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-extrabold transition-all active:scale-95 cursor-pointer flex items-center justify-center"
                     >
-                      Γî½
+                      ⌫
                     </button>
                   </div>
                 </div>
@@ -2189,7 +2189,7 @@ export default function App() {
             >
               <Search className="h-4 w-4 text-amber-600 dark:text-amber-400" />
               <span className="hidden sm:inline">Offline Search</span>
-              <kbd className="hidden md:inline-block ml-0.5 px-1.5 py-0.5 text-[9px] bg-amber-200/60 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200 rounded font-mono">ΓîÿK</kbd>
+              <kbd className="hidden md:inline-block ml-0.5 px-1.5 py-0.5 text-[9px] bg-amber-200/60 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200 rounded font-mono">⌘K</kbd>
             </button>
 
             {/* QR Code Scanner Button */}
@@ -2486,7 +2486,7 @@ export default function App() {
                         className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none max-w-[150px] truncate"
                         title="Filter by Customer / Party Name"
                       >
-                        <option value="All">≡ƒÅó Customer: All</option>
+                        <option value="All">🏢 Customer: All</option>
                         {uniqueParties.map(p => (
                           <option key={p} value={p}>{p}</option>
                         ))}
@@ -2498,7 +2498,7 @@ export default function App() {
                         className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none max-w-[150px] truncate"
                         title="Filter by Person's Name (Operator / Creator / Assignee)"
                       >
-                        <option value="All">≡ƒæñ Person: All</option>
+                        <option value="All">👤 Person: All</option>
                         {uniquePersons.map(p => (
                           <option key={p} value={p}>{p}</option>
                         ))}
@@ -2510,7 +2510,7 @@ export default function App() {
                         className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none max-w-[150px] truncate"
                         title="Filter by Order No / Order Ref"
                       >
-                        <option value="All">≡ƒôæ Order: All</option>
+                        <option value="All">📑 Order: All</option>
                         {uniqueOrderNos.map(o => (
                           <option key={o} value={o}>{o}</option>
                         ))}
@@ -2583,13 +2583,13 @@ export default function App() {
                     <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl p-2.5 px-3.5 flex items-center justify-between text-amber-800 dark:text-amber-300 text-[11px]">
                       <div className="flex items-center gap-2 font-semibold">
                         <WifiOff className="h-3.5 w-3.5 text-amber-500 shrink-0" />
-                        <span>ΓÜí Offline Local Search Engine active: Querying local cache across {jobCards.length} Job Cards & {movements.length} Material Movements</span>
+                        <span>⚡ Offline Local Search Engine active: Querying local cache across {jobCards.length} Job Cards & {movements.length} Material Movements</span>
                       </div>
                       <button
                         onClick={() => setShowGlobalSearchModal(true)}
                         className="font-bold underline text-amber-700 dark:text-amber-300 hover:text-amber-900 cursor-pointer shrink-0"
                       >
-                        Open Search Window (ΓîÿK)
+                        Open Search Window (⌘K)
                       </button>
                     </div>
                   )}
@@ -2655,7 +2655,7 @@ export default function App() {
                 >
                   {filteredAllOrders.length === 0 ? (
                     <div className="text-center p-12 space-y-1.5">
-                      <span className="text-2xl">≡ƒöì</span>
+                      <span className="text-2xl">🔍</span>
                       <p className="text-sm font-semibold text-slate-450 font-mono">No active Job Cards match database filter parameters</p>
                     </div>
                   ) : (
@@ -2965,7 +2965,7 @@ export default function App() {
                                           </div>
                                           <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400 font-mono text-[11px]">
                                             <span>Created: <strong>{new Date(j.createdAt).toLocaleDateString()}</strong></span>
-                                            <span>ΓÇó</span>
+                                            <span>•</span>
                                             <span>Department: <strong className="text-indigo-600 dark:text-indigo-400">{j.currentDepartment}</strong></span>
                                           </div>
                                         </div>
@@ -2992,7 +2992,7 @@ export default function App() {
                                           <div className="bg-slate-50 dark:bg-slate-850 p-2.5 rounded-lg border border-slate-100 dark:border-slate-800">
                                             <span className="block text-[10px] font-bold uppercase text-slate-400">Heat Treatment & Packing</span>
                                             <span className="font-bold text-slate-800 dark:text-slate-200 text-xs block mt-0.5">
-                                              HT: {j.heatTreatmentRequired ? '≡ƒöÑ Required' : 'Not Required'}
+                                              HT: {j.heatTreatmentRequired ? '🔥 Required' : 'Not Required'}
                                             </span>
                                             {j.packingDetails?.pcsPerBagOrBox ? (
                                               <span className="text-[10px] text-pink-600 dark:text-pink-400 block font-mono">
@@ -3158,7 +3158,7 @@ export default function App() {
 
                   {getSortedMobileOrders().length === 0 ? (
                     <div className="text-center p-8 space-y-1.5">
-                      <span className="text-xl">≡ƒöì</span>
+                      <span className="text-xl">🔍</span>
                       <p className="text-xs font-semibold text-slate-400 font-mono">No matching Job Cards found</p>
                     </div>
                   ) : (
@@ -3333,7 +3333,7 @@ export default function App() {
 
                                   <div className="bg-white/80 dark:bg-slate-900/80 p-2 rounded-xl border border-slate-100 dark:border-slate-800">
                                     <span className="text-[9px] text-slate-400 font-bold uppercase block">Heat Treatment</span>
-                                    <span className="font-semibold text-slate-800 dark:text-slate-200">{j.heatTreatmentRequired ? '≡ƒöÑ Required' : 'Not Required'}</span>
+                                    <span className="font-semibold text-slate-800 dark:text-slate-200">{j.heatTreatmentRequired ? '🔥 Required' : 'Not Required'}</span>
                                   </div>
 
                                   <div className="bg-white/80 dark:bg-slate-900/80 p-2 rounded-xl border border-slate-100 dark:border-slate-800">
@@ -3553,7 +3553,7 @@ export default function App() {
                         </div>
 
                         <p className="font-semibold text-slate-800 dark:text-slate-200">
-                          {mov.fromDepartment} ΓåÆ {mov.toDepartment}
+                          {mov.fromDepartment} → {mov.toDepartment}
                         </p>
 
                         <div className="flex justify-between items-center font-mono text-[10px] text-slate-500 mt-1">
@@ -3563,11 +3563,11 @@ export default function App() {
 
                         {mov.accepted ? (
                           <div className="text-[9px] bg-emerald-500/10 text-emerald-600 font-bold p-1 rounded flex items-center gap-1 mt-1">
-                            Γ£ö∩╕Å Custody accepted by {mov.acceptedBy} on {new Date(mov.acceptedDate!).toLocaleDateString([], {hour:'2-digit', minute:'2-digit'})}
+                            ✔️ Custody accepted by {mov.acceptedBy} on {new Date(mov.acceptedDate!).toLocaleDateString([], {hour:'2-digit', minute:'2-digit'})}
                           </div>
                         ) : (
                           <div className="text-[9px] bg-purple-500/10 text-purple-600 font-bold p-1 rounded flex items-center gap-1 mt-1">
-                            Γî¢ Transit verification pending at downstream
+                            ⌛ Transit verification pending at downstream
                           </div>
                         )}
                       </div>
@@ -3697,7 +3697,7 @@ export default function App() {
               </button>
             ) : (
               <span className="text-slate-500 flex items-center gap-1 text-[11px] font-medium font-sans">
-                Γ£ô Sync Queue Empty
+                ✓ Sync Queue Empty
               </span>
             )}
 
@@ -3922,7 +3922,7 @@ export default function App() {
                     : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-350'
                 }`}
               >
-                Γÿü∩╕Å Google Sheets (Cloud Sync)
+                ☁️ Google Sheets (Cloud Sync)
               </button>
               <button
                 onClick={() => setSheetsModalTab('offline')}
@@ -3932,7 +3932,7 @@ export default function App() {
                     : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-350'
                 }`}
               >
-                ≡ƒôè Excel Ledger Export (Offline)
+                📊 Excel Ledger Export (Offline)
               </button>
             </div>
 
@@ -4021,7 +4021,7 @@ export default function App() {
                     className="flex flex-col items-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-left transition cursor-pointer"
                   >
                     <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1 text-[11.5px]">
-                      ≡ƒôæ Job Cards Ledger
+                      📑 Job Cards Ledger
                     </span>
                     <span className="text-[10px] text-slate-400">Download customer orders and line statuses.</span>
                   </button>
@@ -4031,7 +4031,7 @@ export default function App() {
                     className="flex flex-col items-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-left transition cursor-pointer"
                   >
                     <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1 text-[11.5px]">
-                      ΓÜí Process & Rejections
+                      ⚡ Process & Rejections
                     </span>
                     <span className="text-[10px] text-slate-400">Download logs of hardness, temperature, plating and packing.</span>
                   </button>
@@ -4041,7 +4041,7 @@ export default function App() {
                     className="flex flex-col items-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-left transition cursor-pointer"
                   >
                     <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1 text-[11.5px]">
-                      ≡ƒöä Custody & Movements
+                      🔄 Custody & Movements
                     </span>
                     <span className="text-[10px] text-slate-400">Download the complete material transfer trail logs.</span>
                   </button>
@@ -4051,7 +4051,7 @@ export default function App() {
                     className="flex flex-col items-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-left transition cursor-pointer"
                   >
                     <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1 text-[11.5px]">
-                      ≡ƒ¢í∩╕Å Actions & Audits
+                      🛡️ Actions & Audits
                     </span>
                     <span className="text-[10px] text-slate-400">Download staff logins and database update log trails.</span>
                   </button>
@@ -4082,7 +4082,7 @@ export default function App() {
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
             <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-              ΓÜá∩╕Å {confirmDialog.title}
+              ⚠️ {confirmDialog.title}
             </h3>
             <p className="text-sm text-slate-605 dark:text-slate-300 mt-3 whitespace-pre-wrap leading-relaxed">
               {confirmDialog.message}
@@ -4163,7 +4163,7 @@ export default function App() {
             <div className="flex-1 overflow-y-auto py-4 space-y-3 min-h-0">
               {syncQueue.length === 0 ? (
                 <div className="text-center py-12">
-                  <span className="text-4xl">Γ£ô</span>
+                  <span className="text-4xl">✓</span>
                   <h4 className="text-slate-700 dark:text-slate-300 font-bold mt-2 text-sm">All Transactions Synced</h4>
                   <p className="text-xs text-slate-400 dark:text-slate-500 mt-1 max-w-sm mx-auto">
                     There are no pending offline mutations. All your data is safely backed up to the live Cloud Firestore database.
@@ -4331,7 +4331,7 @@ export default function App() {
             `}>
               <div className="flex items-center gap-2.5 min-w-0">
                 <div className="shrink-0 text-base">
-                  {toast.type === 'success' ? 'Γ£à' : toast.type === 'error' ? 'Γ¥î' : 'Γä╣∩╕Å'}
+                  {toast.type === 'success' ? '✅' : toast.type === 'error' ? '❌' : 'ℹ️'}
                 </div>
                 <div className="grow text-xs leading-snug font-sans font-medium">
                   {toast.message}
@@ -4356,7 +4356,7 @@ export default function App() {
                   onClick={() => setToast(null)}
                   className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition cursor-pointer shrink-0"
                 >
-                  Γ£ò
+                  ✕
                 </button>
               </div>
             </div>
