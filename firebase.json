@@ -4,5 +4,19 @@
       "database": "ai-studio-remixmanufacturi-26686e2f-bae2-4ef1-b72c-d130608b7e90",
       "rules": "firestore.rules"
     }
-  ]
+  ],
+  "hosting": {
+    "public": "dist",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  }
 }
