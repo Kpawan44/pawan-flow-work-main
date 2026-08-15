@@ -2,10 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#3b82f6" />
     <link rel="manifest" href="/manifest.json" />
-    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/pwa_icon.jpg" />
     <title>Precision Metal Works Manufacturing Tracker</title>
     <script>
       // Handle Google OAuth implicit flow callback in popup
@@ -22,27 +22,24 @@
         }
       }
 
-      // In local development / the AI Studio preview, always clear any old service
-      // worker and caches so edits are never masked by stale cached files.
-      // In production builds (npm run build) this block is skipped entirely and
-      // the real auto-updating service worker (registered by vite-plugin-pwa,
-      // see src/main.tsx) takes over instead.
-      const isLocalPreview =
-        location.hostname === 'localhost' ||
-        location.hostname === '127.0.0.1' ||
-        location.hostname.endsWith('.aistudio.google.com');
-
-      if (isLocalPreview && 'serviceWorker' in navigator) {
+      // Clear service workers and caches to prevent stale white screens in preview environment
+      if ('serviceWorker' in navigator) {
         navigator.serviceWorker.getRegistrations().then((registrations) => {
           for (const registration of registrations) {
-            registration.unregister();
+            registration.unregister().then(() => {
+              console.log('[PWA] Service Worker unregistered to prevent stale cache bugs.');
+            });
           }
         });
-        if ('caches' in window) {
-          caches.keys().then((keys) => {
-            keys.forEach((key) => caches.delete(key));
+      }
+      if ('caches' in window) {
+        caches.keys().then((keys) => {
+          keys.forEach((key) => {
+            caches.delete(key).then(() => {
+              console.log('[PWA] Cache storage cleared:', key);
+            });
           });
-        }
+        });
       }
     </script>
   </head>

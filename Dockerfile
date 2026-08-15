@@ -6,9 +6,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install development and production dependencies for building
-# (npm install, not "npm ci" - this repo has no package-lock.json since it
-# was originally set up with Bun; npm install will generate one)
-RUN npm install
+RUN npm ci
 
 # Copy full application source
 COPY . .
@@ -27,7 +25,7 @@ ENV PORT=3000
 COPY package*.json ./
 
 # Install only production dependencies
-RUN npm install --omit=dev
+RUN npm ci --only=production
 
 # Copy built production artifacts from builder stage
 COPY --from=builder /app/dist ./dist

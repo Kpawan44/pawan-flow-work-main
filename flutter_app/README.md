@@ -1,9 +1,3 @@
-> **Not in active use.** This folder is a separate native rebuild with its
-> own UI and demo data — it does not match the real web app's interface.
-> The active mobile app now lives at the project root as a **Capacitor**
-> wrapper (see `../BUILD_AND_DEPLOY.md`), which loads the real web app so
-> the interface is always identical. This folder is kept only for reference.
-
 # MFR Manufacturing ERP - Flutter Android App
 
 This is the native **Flutter Android** application for the MFR Manufacturing Job Card & Material Movement ERP System.

@@ -1,14 +1,189 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
+import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
+import bcrypt from "bcryptjs";
+import { initializeApp, getApps, getApp, App } from "firebase-admin/app";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
+
+// Read Firebase applet configuration for Admin SDK
+let firebaseConfig: any = null;
+try {
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    firebaseConfig = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  }
+} catch (e) {
+  console.warn("Could not read firebase-applet-config.json:", e);
+}
+
+const firebaseProjectId = firebaseConfig?.projectId || process.env.GCP_PROJECT || process.env.FIREBASE_PROJECT_ID || "my-project-9ca72";
+const firestoreDbId = firebaseConfig?.firestoreDatabaseId || "(default)";
+
+let adminApp: App | null = null;
+let firestoreAdminDb: any = null;
+
+function getFirestoreAdmin() {
+  if (!firestoreAdminDb) {
+    try {
+      if (getApps().length === 0) {
+        adminApp = initializeApp({
+          projectId: firebaseProjectId,
+        });
+      } else {
+        adminApp = getApp();
+      }
+      firestoreAdminDb = firestoreDbId && firestoreDbId !== "(default)"
+        ? getFirestore(adminApp, firestoreDbId)
+        : getFirestore(adminApp);
+      console.log(`[Firebase Admin] Connected to Firestore database '${firestoreDbId}' on project '${firebaseProjectId}'.`);
+    } catch (err) {
+      console.error("[Firebase Admin] Initialization error:", err);
+    }
+  }
+  return firestoreAdminDb;
+}
 
 async function startServer() {
-  console.log(`Starting server with NODE_ENV=${process.env.NODE_ENV}`);
   const app = express();
   const PORT = 3000;
 
   app.use(express.json());
+
+  // Initialize Firebase Admin on startup
+  getFirestoreAdmin();
+
+  // ----------------------------------------------------
+  // SECURE AUTHENTICATION & PIN MANAGEMENT ENDPOINTS
+  // ----------------------------------------------------
+
+  // POST /api/users/:userId/set-pin — hashes the incoming PIN with bcrypt (saltRounds=10) and saves as pinHash
+  app.post("/api/users/:userId/set-pin", async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { pin } = req.body;
+
+      if (!pin || typeof pin !== "string" || pin.trim().length !== 4) {
+        return res.status(400).json({ success: false, error: "A valid 4-digit PIN is required." });
+      }
+
+      const cleanPin = pin.trim();
+      const saltRounds = 10;
+      const pinHash = await bcrypt.hash(cleanPin, saltRounds);
+
+      // Attempt to save to Firestore via Admin SDK if accessible
+      let firestoreUpdated = false;
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          const userRef = db.collection("mfr_users").doc(userId);
+          const userSnap = await userRef.get();
+          if (userSnap.exists) {
+            await userRef.update({
+              pinHash: pinHash,
+              pin: FieldValue.delete(),
+              updatedAt: new Date().toISOString()
+            });
+            firestoreUpdated = true;
+            console.log(`[AUTH] Firestore Admin updated pinHash directly for user '${userId}'.`);
+          }
+        } catch (dbErr: any) {
+          console.warn(`[AUTH] Firestore Admin write skipped (${dbErr.message || 'Permissions'}). Returning pinHash to client for web update.`);
+        }
+      }
+
+      return res.json({
+        success: true,
+        pinHash: pinHash,
+        firestoreUpdated,
+        message: "PIN successfully updated and hashed with bcrypt."
+      });
+    } catch (err: any) {
+      console.error("Error setting PIN:", err);
+      return res.status(500).json({ success: false, error: "Failed to set PIN", details: err.message });
+    }
+  });
+
+  // POST /api/users/:userId/verify-pin — verifies PIN against bcrypt hash with resilient fallback
+  app.post("/api/users/:userId/verify-pin", async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { pin, pinHash: clientPinHash, fallbackPin } = req.body;
+
+      if (!pin || typeof pin !== "string") {
+        return res.status(400).json({ success: false, error: "PIN is required." });
+      }
+
+      const cleanPin = pin.trim();
+      let targetPinHash = clientPinHash || null;
+      let targetPlainPin = fallbackPin || null;
+
+      // Try fetching the latest user doc from Firestore Admin SDK if available
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          const userRef = db.collection("mfr_users").doc(userId);
+          const userSnap = await userRef.get();
+          if (userSnap.exists) {
+            const userData = userSnap.data() || {};
+            if (userData.pinHash) targetPinHash = userData.pinHash;
+            if (userData.pin) targetPlainPin = userData.pin;
+          }
+        } catch (dbErr: any) {
+          // Graceful fallback to client-provided hash/pin if server lacks direct Firestore IAM
+          console.warn(`[AUTH] Firestore Admin read bypassed (${dbErr.message || 'Permissions'}). Using payload verification.`);
+        }
+      }
+
+      // 1. Verify bcrypt pinHash if available
+      if (targetPinHash) {
+        const isMatch = await bcrypt.compare(cleanPin, targetPinHash);
+        return res.json({
+          success: isMatch,
+          message: isMatch ? "PIN verified successfully" : "Invalid PIN"
+        });
+      }
+
+      // 2. Backward compatibility fallback: verify against legacy plaintext pin and generate upgrade hash
+      if (targetPlainPin) {
+        const isMatch = (targetPlainPin.toString().trim() === cleanPin);
+        let newPinHash = null;
+        if (isMatch) {
+          try {
+            newPinHash = await bcrypt.hash(cleanPin, 10);
+            // If Firestore Admin is available, auto-upgrade doc
+            if (db) {
+              const userRef = db.collection("mfr_users").doc(userId);
+              await userRef.update({
+                pinHash: newPinHash,
+                pin: FieldValue.delete(),
+                updatedAt: new Date().toISOString()
+              }).catch(() => {});
+            }
+          } catch (autoMigrateErr) {
+            console.warn("Auto-migration during login warning:", autoMigrateErr);
+          }
+        }
+        return res.json({
+          success: isMatch,
+          isLegacy: true,
+          newPinHash: newPinHash,
+          message: isMatch ? "PIN verified successfully (legacy upgraded)" : "Invalid PIN"
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        error: "No PIN or PIN hash configured for this user."
+      });
+
+    } catch (err: any) {
+      console.error("Error verifying PIN:", err);
+      return res.status(500).json({ success: false, error: "Failed to verify PIN", details: err.message });
+    }
+  });
 
   // Global log for all triggered emails (in-memory persistent state)
   interface SentEmail {
@@ -422,22 +597,13 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
-    // Dynamically imported so this (and its heavy esbuild/rollup native
-    // binaries) never gets pulled in for production/packaged builds, where
-    // this branch never runs anyway.
-    // Using a variable (not a string literal) here is deliberate: it stops
-    // esbuild from statically resolving/inlining this import at bundle time,
-    // so 'vite' is only ever actually touched at runtime, and only when this
-    // branch (dev only) really executes.
-    const viteModuleName = "vite";
-    const { createServer: createViteServer } = await import(viteModuleName);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = process.env.STATIC_DIR || path.join(process.cwd(), 'dist');
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

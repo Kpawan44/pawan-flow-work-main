@@ -1,6 +1,6 @@
 {
   "name": "Remix raj",
-  "description": "Imported from GitHub: Kpawan44/raj",
+  "description": "Production PMW Tracker & Traceability Ledger for manufacturing operations across Purchase, Production, Heat Treatment, Plating, Packing, and Warehouse lines with multi-user RBAC and audit trail.",
   "requestFramePermissions": [
     "camera"
   ],

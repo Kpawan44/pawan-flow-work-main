@@ -8,13 +8,35 @@
         "userId": { "type": "string" },
         "name": { "type": "string" },
         "email": { "type": "string" },
-        "pin": { "type": "string" },
+        "pinHash": { "type": "string" },
         "department": { "type": "string", "enum": ["Purchase", "Raw Material Store", "Dispatch", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Admin"] },
         "role": { "type": "string", "enum": ["admin", "staff"] },
         "active": { "type": "boolean" },
-        "createdAt": { "type": "string", "format": "date-time" }
+        "canOutsource": { "type": "boolean" }
       },
-      "required": ["userId", "name", "email", "pin", "department", "role", "active", "createdAt"]
+      "required": ["userId", "name", "email", "department", "role", "active", "createdAt"]
+    },
+    "OutsourceOrder": {
+      "title": "OutsourceOrder",
+      "description": "Process outsourcing order placed by Dispatch to an assigned person and supplier.",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string" },
+        "partyName": { "type": "string" },
+        "itemName": { "type": "string" },
+        "itemCode": { "type": "string" },
+        "orderQty": { "type": "number" },
+        "unit": { "type": "string", "enum": ["KGS", "PCS"] },
+        "processType": { "type": "string" },
+        "outsourceMaterialType": { "type": "string", "enum": ["Semi Finished Goods", "Finished Goods"] },
+        "orderedByUserId": { "type": "string" },
+        "orderedByUserName": { "type": "string" },
+        "orderedAt": { "type": "string", "format": "date-time" },
+        "assignedToUserId": { "type": "string" },
+        "assignedToUserName": { "type": "string" },
+        "status": { "type": "string", "enum": ["Assigned", "Supplier PO Placed", "In Transit", "Material Received", "Completed", "Cancelled"] }
+      },
+      "required": ["orderId", "partyName", "itemName", "itemCode", "orderQty", "unit", "processType", "outsourceMaterialType", "orderedByUserId", "orderedByUserName", "orderedAt", "assignedToUserId", "assignedToUserName", "status"]
     },
     "JobCard": {
       "title": "JobCard",
@@ -130,6 +152,10 @@
     "mfr_company_config/{configId}": {
       "schema": "CompanyConfig",
       "description": "Corporate profiles and work specs."
+    },
+    "mfr_outsource_orders/{orderId}": {
+      "schema": "OutsourceOrder",
+      "description": "Collection of process outsourcing orders."
     }
   }
 }

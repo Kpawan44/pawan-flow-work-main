@@ -19,7 +19,8 @@ export interface UserProfile {
   empId?: string; // Employee ID e.g. EMP-101
   name: string;
   email: string;
-  pin: string;
+  pin?: string; // Deprecated plaintext PIN for backward compatibility during migration
+  pinHash?: string; // Bcrypt hashed PIN
   phone?: string;
   department: Department | 'Admin' | 'Management';
   allowedDepartments?: (Department | 'Admin' | 'Management')[]; // Additional departments user is authorized to access
@@ -150,6 +151,7 @@ export interface OutsourceOrder {
 
 export interface JobCard {
   jobCardNo: string;
+  parentJobCardNo?: string;
   orderNo: string;
   poNumber?: string;
   partyName: string;
@@ -185,7 +187,6 @@ export interface JobCard {
   
   isAssemblyProduct?: boolean;
   assemblyComponents?: AssemblyComponent[];
-  parentJobCardNo?: string; // set when this job card was split off from a partial release (e.g. Incoming Store) - links back to the original card that still holds the remaining quantity
 
   // Custom processing fields recorded from departments
   operatorName?: string;

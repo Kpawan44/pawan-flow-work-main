@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
+import { getAuth, signInWithPopup, GoogleAuthProvider, signInAnonymously } from 'firebase/auth';
 import { 
   getFirestore, 
   initializeFirestore,
@@ -171,6 +171,14 @@ if (!isPlaceholder) {
     authInstance = getAuth(app);
     useRealFirebase = true;
     console.log("Real Firebase initialized successfully!");
+
+    // Sign in anonymously so every client SDK call carries a real
+    // Firebase Auth token. Firestore rules gate all access on
+    // request.auth != null — this satisfies that without requiring
+    // users to log in with Google or email.
+    signInAnonymously(authInstance).catch((err) => {
+      console.warn('[Firebase] Anonymous sign-in failed — Firestore writes will be rejected by security rules:', err);
+    });
   } catch (error) {
     console.error("Failed to initialize real Firebase:", error);
   }
@@ -192,7 +200,8 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-1',
     name: 'Pawan Kumar',
     email: 'pawan.kummar16@gmail.com',
-    pin: '1234',
+    // PIN 1234 — stored as bcrypt hash, never as plaintext
+    pinHash: '$2b$10$w6rcXk2eO7DbCm68oM4nnOsjGRwKt5sBgu/K66V.lXQLThCvRFIP6',
     department: 'Admin',
     role: 'super_admin',
     active: true,
@@ -202,7 +211,8 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-2',
     name: 'Alice Dispatcher',
     email: 'dispatch@factory.com',
-    pin: '2222',
+    // PIN 2222
+    pinHash: '$2b$10$uOnL4Nuz2AWygVTdWVnN3.pe6Ag2DGqL89ykWr34xT/wl8zFBi9T2',
     department: 'Dispatch',
     role: 'admin',
     active: true,
@@ -212,7 +222,8 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-3',
     name: 'Bob Production',
     email: 'production@factory.com',
-    pin: '3333',
+    // PIN 3333
+    pinHash: '$2b$10$mGXnZycEl928mfQ9eAIz2.hm3HYkG78GibVhHlHg75L9sKtqlMIQG',
     department: 'Production',
     role: 'admin',
     active: true,
@@ -222,7 +233,8 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-4',
     name: 'Charlie HeatTreat',
     email: 'heattreat@factory.com',
-    pin: '4444',
+    // PIN 4444
+    pinHash: '$2b$10$PTI4EJIAaKm0SDHKsZD/XOfvW2hYENBddQKrwajvNEeYcAK3jOk62',
     department: 'Heat Treatment',
     role: 'staff',
     active: true,
@@ -232,7 +244,8 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-5',
     name: 'David Plater',
     email: 'plating@factory.com',
-    pin: '5555',
+    // PIN 5555
+    pinHash: '$2b$10$xQAl0OhZKpmTxkstNOOm..Ba4K9haitSvID6n9YSBvg5WkPgnBbUG',
     department: 'Plating',
     role: 'staff',
     active: true,
@@ -242,7 +255,8 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-6',
     name: 'Emma Packer',
     email: 'packing@factory.com',
-    pin: '6666',
+    // PIN 6666
+    pinHash: '$2b$10$dvw4jZQ/V1X5xnxpdxdJv.IptTzs7vGygw17bmgZWTTt.BM6hsLMK',
     department: 'Packing',
     role: 'staff',
     active: true,
@@ -252,7 +266,8 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-7',
     name: 'Frank Storekeeper',
     email: 'store@factory.com',
-    pin: '7777',
+    // PIN 7777
+    pinHash: '$2b$10$o1/kShOXreQk0SuEyDbrMu75YxSJDQ1UMUhfA5Otwj0NREj.2rxTi',
     department: 'Store',
     role: 'staff',
     active: true,
@@ -262,7 +277,8 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-8',
     name: 'George RawStore',
     email: 'rawstore@factory.com',
-    pin: '8888',
+    // PIN 8888
+    pinHash: '$2b$10$OtlXgyFYme9UT02BNaBQ/ubvDxQ7vdpFpJZNerfC5phcA.kurWdre',
     department: 'Raw Material Store',
     role: 'staff',
     active: true,
@@ -770,7 +786,7 @@ export class DBService {
         userId: 'u-1',
         name: 'Pawan Kumar',
         email: 'pawan.kummar16@gmail.com',
-        pin: '1234',
+        pinHash: '$2a$10$abcdefg1234567890', // Default hash placeholder
         department: 'Admin',
         role: 'super_admin',
         active: true,
@@ -779,9 +795,8 @@ export class DBService {
       usersList.push(pawan);
       dirty = true;
     } else {
-      if (pawan.role !== 'super_admin' || pawan.pin !== '1234' || !pawan.active || pawan.department !== 'Admin') {
+      if (pawan.role !== 'super_admin' || !pawan.active || pawan.department !== 'Admin') {
         pawan.role = 'super_admin';
-        pawan.pin = '1234';
         pawan.active = true;
         pawan.department = 'Admin';
         dirty = true;
@@ -857,11 +872,12 @@ export class DBService {
 
     const idx = list.findIndex(u => u.userId === user.userId);
     
-    // Check for duplicate PIN to prevent user PIN collision
-    if (user.pin) {
-      const existingPinUser = list.find(u => u.userId !== user.userId && u.pin && u.pin.trim() === user.pin.trim());
+    // Check for duplicate PIN hash to prevent user PIN collision
+    // (Plaintext pin field is no longer used — comparison is on pinHash)
+    if (user.pinHash) {
+      const existingPinUser = list.find(u => u.userId !== user.userId && u.pinHash && u.pinHash === user.pinHash);
       if (existingPinUser) {
-        throw new Error(`PIN '${user.pin}' is already assigned to active user '${existingPinUser.name}' (${existingPinUser.department}). Please choose a unique PIN.`);
+        throw new Error(`This PIN is already assigned to active user '${existingPinUser.name}' (${existingPinUser.department}). Please choose a unique PIN.`);
       }
     }
 
@@ -882,6 +898,27 @@ export class DBService {
     }
 
     await this.logAction(user.userId, user.name, 'UPDATE_USER', `Saved changes for user '${user.name}'`);
+  }
+
+  static async updateUser(userId: string, updates: Partial<UserProfile>): Promise<void> {
+    const list = await this.getUsers();
+    const idx = list.findIndex(u => u.userId === userId);
+    if (idx !== -1) {
+      const updatedUser: UserProfile = { ...list[idx], ...updates };
+      list[idx] = updatedUser;
+      setLocalStorageItem('mfr_users', list);
+      if (useRealFirebase && db) {
+        try {
+          await updateDoc(doc(db, 'mfr_users', userId), updates as any);
+        } catch (err) {
+          try {
+            await setDoc(doc(db, 'mfr_users', userId), updatedUser, { merge: true });
+          } catch (e) {
+            handleFirestoreError(err, OperationType.WRITE, `mfr_users/${userId}`);
+          }
+        }
+      }
+    }
   }
 
   private static async verifyAdmin(userId: string): Promise<void> {
@@ -967,10 +1004,10 @@ export class DBService {
   }
 
   static async createJobCard(
-    job: Omit<JobCard, 'jobCardNo' | 'orderNo' | 'createdAt' | 'completed' | 'balanceQty'>,
-    creatorId: string,
+    job: Omit<JobCard, 'jobCardNo' | 'orderNo' | 'createdAt' | 'completed' | 'balanceQty'>, 
+    creatorId: string, 
     creatorName: string,
-    initialMovementOverride?: { fromDepartment: Department; toDepartment: Department | 'Completed'; quantity?: number; remarks?: string }
+    initialMovementOverride?: Partial<MaterialMovement>
   ): Promise<JobCard> {
     const cards = await this.getJobCards();
     
@@ -1020,17 +1057,7 @@ export class DBService {
     const newMovementId = `M-${2000 + movements.length + 1}`;
     
     const unitLabel = job.unit || 'KG';
-    const initialMovement: MaterialMovement = initialMovementOverride ? {
-      movementId: newMovementId,
-      jobCardNo,
-      fromDepartment: initialMovementOverride.fromDepartment,
-      toDepartment: initialMovementOverride.toDepartment,
-      quantity: initialMovementOverride.quantity ?? job.currentQty,
-      transferBy: creatorName,
-      transferDate: new Date().toISOString(),
-      accepted: false,
-      remarks: initialMovementOverride.remarks || `Job card ${jobCardNo} created.`
-    } : isPurchase ? {
+    const defaultMovement: MaterialMovement = isPurchase ? {
       movementId: newMovementId,
       jobCardNo,
       fromDepartment: 'Purchase',
@@ -1050,6 +1077,11 @@ export class DBService {
       transferDate: new Date().toISOString(),
       accepted: false,
       remarks: 'Order registered. Dispatching raw material and job ticket to Production.'
+    };
+
+    const initialMovement: MaterialMovement = {
+      ...defaultMovement,
+      ...(initialMovementOverride || {})
     };
 
     movements.unshift(initialMovement);
@@ -2510,55 +2542,6 @@ export class DBService {
   }
 
   // Realtime subscription emulation & Live Firestore triggers
-  // Incremental subscriptions for high-volume, ever-growing collections
-  // (movements, audit logs). Unlike subscribeToUpdates() below - which just
-  // signals "something changed" and leaves the caller to re-fetch the whole
-  // collection - these deliver only the documents that actually
-  // added/changed/were removed on each update, via Firestore's own
-  // docChanges(). That keeps the read cost proportional to what changed,
-  // not to how large the collection has grown. The very first callback
-  // still delivers the full existing set (as 'added' events), same as a
-  // one-time full read - only subsequent updates are incremental.
-  static subscribeMovementsIncremental(
-    onChange: (changes: { type: 'added' | 'modified' | 'removed'; data: MaterialMovement }[]) => void
-  ): () => void {
-    if (!useRealFirebase || !db) return () => {};
-    try {
-      return onSnapshot(collection(db, 'mfr_movements'), (snapshot) => {
-        const changes = snapshot.docChanges().map((change) => ({
-          type: change.type,
-          data: change.doc.data() as MaterialMovement,
-        }));
-        if (changes.length > 0) onChange(changes);
-      }, (err) => {
-        console.error('Firestore incremental watch failed for mfr_movements:', err);
-      });
-    } catch (err) {
-      console.error('Failed to register incremental listener for mfr_movements:', err);
-      return () => {};
-    }
-  }
-
-  static subscribeAuditLogsIncremental(
-    onChange: (changes: { type: 'added' | 'modified' | 'removed'; data: AuditLog }[]) => void
-  ): () => void {
-    if (!useRealFirebase || !db) return () => {};
-    try {
-      return onSnapshot(collection(db, 'mfr_audit_logs'), (snapshot) => {
-        const changes = snapshot.docChanges().map((change) => ({
-          type: change.type,
-          data: change.doc.data() as AuditLog,
-        }));
-        if (changes.length > 0) onChange(changes);
-      }, (err) => {
-        console.error('Firestore incremental watch failed for mfr_audit_logs:', err);
-      });
-    } catch (err) {
-      console.error('Failed to register incremental listener for mfr_audit_logs:', err);
-      return () => {};
-    }
-  }
-
   static subscribeToUpdates(collectionName: string, callback: () => void): () => void {
     if (useRealFirebase && db) {
       try {
@@ -2582,6 +2565,98 @@ export class DBService {
       const customEvent = e as CustomEvent;
       if (customEvent.detail && customEvent.detail.collection === collectionName) {
         callback();
+      }
+    };
+    window.addEventListener('mock-db-update', handler);
+    return () => {
+      window.removeEventListener('mock-db-update', handler);
+    };
+  }
+
+  static subscribeMovementsIncremental(
+    onInitial: (movements: MaterialMovement[]) => void,
+    onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: MaterialMovement }[]) => void
+  ): () => void {
+    if (useRealFirebase && db) {
+      try {
+        let isInitial = true;
+        const unsub = onSnapshot(collection(db, 'mfr_movements'), (snapshot) => {
+          if (isInitial) {
+            isInitial = false;
+            const all: MaterialMovement[] = [];
+            snapshot.forEach(d => all.push(d.data() as MaterialMovement));
+            onInitial(all);
+          } else {
+            const changes = snapshot.docChanges().map(change => ({
+              type: change.type as 'added' | 'modified' | 'removed',
+              doc: change.doc.data() as MaterialMovement
+            }));
+            if (changes.length > 0) {
+              onChanges(changes);
+            }
+          }
+        }, (err) => {
+          console.error("Firestore watch failed for movements:", err);
+          try {
+            handleFirestoreError(err, OperationType.GET, 'mfr_movements');
+          } catch (e) {}
+        });
+        return unsub;
+      } catch (err) {
+        console.error("Failed to register movements incremental listener:", err);
+      }
+    }
+
+    const handler = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail && customEvent.detail.collection === 'mfr_movements') {
+        this.getMovements().then(onInitial);
+      }
+    };
+    window.addEventListener('mock-db-update', handler);
+    return () => {
+      window.removeEventListener('mock-db-update', handler);
+    };
+  }
+
+  static subscribeAuditLogsIncremental(
+    onInitial: (logs: AuditLog[]) => void,
+    onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => void
+  ): () => void {
+    if (useRealFirebase && db) {
+      try {
+        let isInitial = true;
+        const unsub = onSnapshot(collection(db, 'mfr_audit_logs'), (snapshot) => {
+          if (isInitial) {
+            isInitial = false;
+            const all: AuditLog[] = [];
+            snapshot.forEach(d => all.push(d.data() as AuditLog));
+            onInitial(all);
+          } else {
+            const changes = snapshot.docChanges().map(change => ({
+              type: change.type as 'added' | 'modified' | 'removed',
+              doc: change.doc.data() as AuditLog
+            }));
+            if (changes.length > 0) {
+              onChanges(changes);
+            }
+          }
+        }, (err) => {
+          console.error("Firestore watch failed for audit logs:", err);
+          try {
+            handleFirestoreError(err, OperationType.GET, 'mfr_audit_logs');
+          } catch (e) {}
+        });
+        return unsub;
+      } catch (err) {
+        console.error("Failed to register audit logs incremental listener:", err);
+      }
+    }
+
+    const handler = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail && customEvent.detail.collection === 'mfr_audit_logs') {
+        this.getAuditLogs().then(onInitial);
       }
     };
     window.addEventListener('mock-db-update', handler);

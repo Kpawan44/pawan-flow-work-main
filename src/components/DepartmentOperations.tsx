@@ -43,7 +43,7 @@ interface DepartmentOperationsProps {
   jobCards: JobCard[];
   movements: MaterialMovement[];
   companyConfig?: CompanyConfig | null;
-  onCreateJobCard: (job: any) => void;
+  onCreateJobCard: (job: any, initialMovementOverride?: any) => void;
   onUpdateJobCard: (jobCardNo: string, updates: Partial<JobCard>) => void;
   onCreateMovement: (mov: {
     jobCardNo: string;
@@ -3960,53 +3960,58 @@ Please adjust the quantity or request additional raw material issue.`);
                                     </button>
                                     <button
                                       type="button"
-                                      onClick={async () => {
-                                        const qtyNum = typeof storeReleaseQty === 'number' ? storeReleaseQty : (parseFloat(String(storeReleaseQty)) || job.currentQty || job.orderQty);
-                                        const currentHeld = job.currentQty ?? job.orderQty;
-                                        const remainingQty = currentHeld - qtyNum;
+                                      onClick={() => {
+                                        const availableQty = job.currentQty || job.orderQty;
+                                        const qtyNum = typeof storeReleaseQty === 'number' 
+                                          ? storeReleaseQty 
+                                          : (parseFloat(String(storeReleaseQty)) || availableQty);
 
-                                        if (remainingQty > 0) {
-                                          // PARTIAL release: split into two tracked pieces instead of
-                                          // silently losing the remainder. The original card stays put
-                                          // with the reduced quantity; a new card is created for the
-                                          // released portion and moves to the target department.
-                                          try {
-                                            await DBService.createJobCard(
-                                              {
-                                                partyName: job.partyName,
-                                                itemName: job.itemName,
-                                                itemCode: job.itemCode,
-                                                orderQty: qtyNum,
-                                                unit: job.unit,
-                                                currentQty: qtyNum,
-                                                currentDepartment: storeReleaseDept,
-                                                status: 'Pending Acceptance',
-                                                heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment',
-                                                createdBy: currentUser.name,
-                                                processType: job.processType,
-                                                materialType: job.materialType,
-                                                parentJobCardNo: job.jobCardNo,
-                                              },
-                                              currentUser.userId,
-                                              currentUser.name,
-                                              {
-                                                fromDepartment: activeDept,
-                                                toDepartment: storeReleaseDept,
-                                                quantity: qtyNum,
-                                                remarks: (storeReleaseRemarks || `Material released from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`) + ` (split from ${job.jobCardNo}, ${remainingQty} ${job.unit || ''} remains in ${activeDept}.)`
-                                              }
-                                            );
+                                        if (qtyNum <= 0) {
+                                          alert('Please enter a valid quantity greater than 0.');
+                                          return;
+                                        }
 
-                                            onUpdateJobCard(job.jobCardNo, {
-                                              currentQty: remainingQty,
-                                              orderQty: (job.orderQty ?? currentHeld) - qtyNum,
-                                              balanceQty: Math.max(0, (job.balanceQty ?? job.orderQty ?? currentHeld) - qtyNum),
-                                            });
-                                          } catch (splitErr) {
-                                            console.error('Failed to split job card for partial release:', splitErr);
-                                          }
+                                        if (qtyNum > availableQty) {
+                                          alert(`Release quantity (${qtyNum} KG) cannot exceed available quantity (${availableQty} KG).`);
+                                          return;
+                                        }
+
+                                        if (qtyNum < availableQty) {
+                                          // Partial release: Split job card
+                                          const remainingQty = availableQty - qtyNum;
+                                          
+                                          // 1. Update original card to keep remaining quantity in Incoming Store
+                                          onUpdateJobCard(job.jobCardNo, {
+                                            currentQty: remainingQty,
+                                            balanceQty: remainingQty
+                                          });
+
+                                          // 2. Create a new split-off job card for the released portion
+                                          const splitJobPayload: any = {
+                                            partyName: job.partyName,
+                                            itemName: job.itemName,
+                                            itemCode: job.itemCode,
+                                            orderQty: qtyNum,
+                                            currentQty: qtyNum,
+                                            unit: job.unit || 'KG',
+                                            currentDepartment: storeReleaseDept,
+                                            status: 'Pending Acceptance',
+                                            heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment',
+                                            materialType: job.materialType,
+                                            parentJobCardNo: job.jobCardNo,
+                                            processType: job.processType,
+                                            purchaseDetails: job.purchaseDetails,
+                                            rawMaterialStoreDetails: job.rawMaterialStoreDetails
+                                          };
+
+                                          onCreateJobCard(splitJobPayload, {
+                                            fromDepartment: activeDept,
+                                            toDepartment: storeReleaseDept,
+                                            quantity: qtyNum,
+                                            remarks: storeReleaseRemarks || `Material released (partial split from ${job.jobCardNo}) from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`
+                                          });
                                         } else {
-                                          // FULL release: whole card moves, no split needed.
+                                          // Full release: Move the entire card to target department
                                           onUpdateJobCard(job.jobCardNo, {
                                             currentDepartment: storeReleaseDept,
                                             status: 'Pending Acceptance',
@@ -4021,6 +4026,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                             remarks: storeReleaseRemarks || `Material released from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`
                                           });
                                         }
+
                                         setReleasingStoreJobNo(null);
                                         setStoreReleaseRemarks('');
                                       }}

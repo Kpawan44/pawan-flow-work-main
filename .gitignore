@@ -1,22 +1,17 @@
 node_modules/
 build/
 dist/
-dist-electron/
-release/
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
 
-# Android (Capacitor) build outputs - keep the android/ project itself,
-# just ignore its generated build artifacts
-android/app/build/
-android/build/
-android/.gradle/
-android/local.properties
-android/.idea/
+*-adminsdk-*.json
 
-# iOS (Capacitor) build outputs
-ios/App/Pods/
-ios/App/build/
+# Debug snapshot files
+check_*.tsx
+check_*.ts
+
+# Firebase service account keys
+*-adminsdk-*.json

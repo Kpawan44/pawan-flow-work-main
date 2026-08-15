@@ -4,26 +4,12 @@
   "description": "Enterprise-grade manufacturing workflow tracker with AI-powered production forecasting to manage job cards, real-time material movements, balance quantities, and notifications across departments.",
   "icons": [
     {
-      "src": "/icon-192.png",
-      "type": "image/png",
-      "sizes": "192x192",
-      "purpose": "any"
-    },
-    {
-      "src": "/icon-512.png",
-      "type": "image/png",
+      "src": "/pwa_icon.jpg",
+      "type": "image/jpeg",
       "sizes": "512x512",
-      "purpose": "any"
-    },
-    {
-      "src": "/icon-512.png",
-      "type": "image/png",
-      "sizes": "512x512",
-      "purpose": "maskable"
+      "purpose": "any maskable"
     }
   ],
-  "id": "/",
-  "scope": "/",
   "start_url": "/",
   "background_color": "#0f172a",
   "theme_color": "#3b82f6",

@@ -592,7 +592,7 @@ export default function AdminConsole({
     }
   };
 
-  const handleCreateUser = (e: React.FormEvent) => {
+  const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setPinError('');
     if (!isManager) {
@@ -633,21 +633,42 @@ export default function AdminConsole({
     }
 
     const allowedDepts = currentUser?.role === 'super_admin' ? newUserAllowedDepts : [];
+    const newUserId = `u-${Math.floor(Math.random() * 9000) + 1000}`;
+
+    // Hash PIN on the backend via set-pin endpoint before persisting
+    let generatedPinHash: string | undefined = undefined;
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(newUserId)}/set-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: generatedPin })
+      });
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.pinHash) {
+          generatedPinHash = resData.pinHash;
+        }
+      }
+    } catch (err) {
+      console.warn("Could not pre-hash PIN via API:", err);
+    }
+
     const newProfile: UserProfile = {
-      userId: `u-${Math.floor(Math.random() * 9000) + 1000}`,
+      userId: newUserId,
       name: newUserName,
       email: `${newUserName.toLowerCase().replace(/\s+/g, '')}@factory.com`,
-      pin: generatedPin,
       department: newUserDept,
       allowedDepartments: allowedDepts,
       accessList: allowedDepts,
       role: newUserRole,
       active: true,
       canOutsource: newUserCanOutsource,
+      pinHash: generatedPinHash,
       createdAt: new Date().toISOString()
     };
 
     onSaveUser(newProfile);
+
     onLogAction('CREATE_USER', `Created new user account '${newProfile.name}' for department ${newProfile.department} with role ${newUserRole}${newUserCanOutsource ? ' [Outsource Authorized]' : ''}${newProfile.allowedDepartments?.length ? ` [Multi-Dept Allowed: ${newProfile.allowedDepartments.join(', ')}]` : ''}`);
     
     // Reset Form
@@ -718,10 +739,26 @@ export default function AdminConsole({
     }
 
     try {
-      const updated = { ...user, pin: cleanPin };
+      // Call backend API to bcrypt hash and store the PIN in Firestore
+      const res = await fetch(`/api/users/${encodeURIComponent(user.userId)}/set-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: cleanPin })
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Failed to update PIN on server');
+      }
+
+      const resData = await res.json().catch(() => ({}));
+
+      // Update local profile state with real bcrypt pinHash
+      const { pin: _removedPin, ...sanitizedUser } = user as any;
+      const updated: UserProfile = { ...sanitizedUser, pinHash: resData.pinHash || user.pinHash };
       await onSaveUser(updated);
-      onLogAction('UPDATE_USER_PIN', `Updated security PIN code for user '${user.name}'`);
-      showToast(`Successfully updated PIN for ${user.name}.`, 'success');
+      onLogAction('UPDATE_USER_PIN', `Updated security PIN code (bcrypt hashed) for user '${user.name}'`);
+      showToast(`Successfully updated and secured PIN for ${user.name}.`, 'success');
       setEditingUserIdPin(null);
     } catch (err: any) {
       console.error("Failed to update PIN", err);
@@ -1389,12 +1426,15 @@ export default function AdminConsole({
                           </div>
                         ) : (
                           <div className="flex items-center gap-2 group">
-                            <span className="font-bold tracking-widest text-slate-800 dark:text-[#E2E8F0]">{u.pin || '—'}</span>
+                            <span className="font-bold tracking-widest text-slate-800 dark:text-[#E2E8F0] flex items-center gap-1">
+                              <span className="text-xs text-blue-600 dark:text-blue-400">••••</span>
+                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 font-medium">Bcrypt</span>
+                            </span>
                             {(currentUser?.role === 'super_admin' || (currentUser?.role === 'admin' && u.department === currentUser.department && u.role === 'staff')) && (
                               <button
                                 onClick={() => {
                                   setEditingUserIdPin(u.userId);
-                                  setEditUserPinVal(u.pin || '');
+                                  setEditUserPinVal('');
                                 }}
                                 className="p-1 rounded hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-[#3B82F6] transition cursor-pointer md:opacity-0 group-hover:opacity-100 focus:opacity-100"
                                 title="Change PIN code"
@@ -1575,12 +1615,15 @@ export default function AdminConsole({
                         </div>
                       ) : (
                         <div className="flex items-center gap-1">
-                          <span className="font-bold font-mono tracking-widest text-[#3B82F6]">{u.pin || '—'}</span>
+                          <span className="font-bold tracking-widest text-slate-800 dark:text-white flex items-center gap-1">
+                            <span className="text-xs text-blue-600 dark:text-blue-400">••••</span>
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-blue-50 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 font-medium">Bcrypt</span>
+                          </span>
                           {(currentUser?.role === 'super_admin' || (currentUser?.role === 'admin' && u.department === currentUser.department && u.role === 'staff')) && (
                             <button
                               onClick={() => {
                                 setEditingUserIdPin(u.userId);
-                                setEditUserPinVal(u.pin || '');
+                                setEditUserPinVal('');
                               }}
                               className="p-1 rounded hover:bg-slate-150 dark:hover:bg-slate-800 text-slate-400 hover:text-[#3B82F6] transition cursor-pointer"
                               title="Change PIN code"

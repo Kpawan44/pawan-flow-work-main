@@ -590,12 +590,6 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       return;
     }
 
-    // Once an order is already fully reconciled, block any further receipt
-    // against it - the cumulative-tracking above correctly handles multiple
-    // partial receipts in progress, but a receipt AFTER the order is already
-    // closed out (e.g. accidental resubmit in a later session, two people
-    // both processing the same delivery) would double-count material that's
-    // already been recorded.
     if (receiptModalOrder.status === 'Completed' || receiptModalOrder.reconciliationStatus === 'Fully Reconciled') {
       showToast(`Order ${receiptModalOrder.orderId} is already fully reconciled and Completed. Duplicate receipt blocked.`, 'error');
       return;
