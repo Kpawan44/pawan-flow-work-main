@@ -1,5 +1,11 @@
-import { contextBridge } from 'electron';
+import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // Define secure APIs bridged from main to renderer here if needed
+  // Get the current app version
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+
+  // Listen for update-available event from main process
+  onUpdateAvailable: (callback: (version: string) => void) => {
+    ipcRenderer.on('update-available', (_event, version) => callback(version));
+  },
 });

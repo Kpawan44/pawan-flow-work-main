@@ -1,15 +1,77 @@
 {
-  "name": "react-example",
+  "name": "pmw-tracker",
+  "productName": "PMW Manufacturing Tracker",
   "private": true,
   "main": "dist-electron/main.js",
-  "version": "1.0.39",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
-    "clean": "rm -rf dist dist-electron",
-    "lint": "tsc --noEmit"
+    "clean": "rm -rf dist dist-electron release",
+    "lint": "tsc --noEmit",
+    "electron:build-main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --outdir=dist-electron --external:electron --external:electron-updater --external:path --external:fs --external:url",
+    "electron:dev": "npm run build && npm run electron:build-main && electron .",
+    "electron:dist": "npm run build && npm run electron:build-main && electron-builder --win --publish never",
+    "electron:release": "npm run build && npm run electron:build-main && electron-builder --win --publish always"
+  },
+  "build": {
+    "appId": "com.pawan.pmwtracker",
+    "productName": "PMW Manufacturing Tracker",
+    "copyright": "Copyright © 2026 Pawan Kumar",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "public/icon.png",
+        "to": "icon.jpg"
+      }
+    ],
+    "publish": {
+      "provider": "github",
+      "owner": "Kpawan44",
+      "repo": "pawan-flow-work-main"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "public/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PMW Tracker",
+      "installerIcon": "public/icon.ico",
+      "uninstallerIcon": "public/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "public/icon.ico",
+      "category": "public.app-category.business"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "public/icon.ico",
+      "category": "Office"
+    }
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -17,6 +79,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.2.3",
+    "electron-updater": "^6.3.9",
     "express": "^4.21.2",
     "firebase": "^12.14.0",
     "firebase-admin": "^14.2.0",
@@ -32,8 +95,6 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.5.0",
-    "@capacitor/core": "^8.5.0",
     "@types/bcryptjs": "^3.0.0",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
