@@ -3,7 +3,7 @@
   "productName": "PMW Manufacturing Tracker",
   "private": true,
   "main": "dist-electron/main.js",
-  "version": "1.0.0",
+  "version": "1.0.42",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
