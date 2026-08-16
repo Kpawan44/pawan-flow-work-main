@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import bcrypt from 'bcryptjs';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Factory, 
@@ -891,52 +892,51 @@ export default function App() {
 
     setIsVerifyingPin(true);
     try {
-      // Call secure backend endpoint to verify PIN against bcrypt hash
-      const response = await fetch(`/api/users/${encodeURIComponent(matchedUser.userId)}/verify-pin`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ 
-          pin: pinToMatch,
-          pinHash: matchedUser.pinHash || null
-        })
-      });
+      let pinVerified = false;
 
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.error || errData.message || 'Authentication failed');
+      if (matchedUser.pinHash) {
+        // Verify PIN directly against bcrypt hash in the browser
+        // This works on web, Android (Capacitor), and Electron — no server needed
+        pinVerified = await bcrypt.compare(pinToMatch, matchedUser.pinHash);
+      } else {
+        // No hash yet — try server-side upgrade (Electron/local dev only)
+        try {
+          const response = await fetch(`/api/users/${encodeURIComponent(matchedUser.userId)}/verify-pin`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin: pinToMatch, pinHash: null }),
+            signal: AbortSignal.timeout(5000),
+          });
+          if (response.ok) {
+            const result = await response.json();
+            pinVerified = result.success === true;
+            if (result.newPinHash) {
+              DBService.updateUser(matchedUser.userId, { pinHash: result.newPinHash }).catch(() => {});
+            }
+          }
+        } catch {
+          // Server not reachable (web/Android) — cannot verify without hash
+          pinVerified = false;
+        }
       }
 
-      const result = await response.json();
-
-      if (!result.success) {
+      if (!pinVerified) {
         setAuthError('Invalid credentials. Please verify your Registered Full Name and Security PIN.');
         setLoginPin('');
         setIsVerifyingPin(false);
         return;
       }
 
-      // If server generated a new upgraded bcrypt hash for a legacy user, update Firestore
-      if (result.newPinHash && !matchedUser.pinHash) {
-        DBService.updateUser(matchedUser.userId, { pinHash: result.newPinHash }).catch(e => {
-          console.warn("Could not save auto-upgraded pinHash to Firestore:", e);
-        });
-      }
-
       // Login successful
-      setCurrentUser({
-        ...matchedUser,
-        pinHash: result.newPinHash || matchedUser.pinHash
-      });
+      setCurrentUser({ ...matchedUser });
       sessionStorage.setItem('mfr_active_user_uid', matchedUser.userId);
       setLoginName('');
       setLoginPin('');
       setSelectedLoginUser(null);
-      await DBService.logAction(matchedUser.userId, matchedUser.name, 'USER_LOGIN', `Logged in via secure bcrypt PIN verification.`);
+      await DBService.logAction(matchedUser.userId, matchedUser.name, 'USER_LOGIN', 'Logged in via bcrypt PIN verification.');
     } catch (err: any) {
-      console.warn("Backend PIN verification error:", err);
-      setAuthError('Invalid credentials or could not reach verification service. Please try again.');
+      console.warn('PIN verification error:', err);
+      setAuthError('An error occurred during login. Please try again.');
       setLoginPin('');
     } finally {
       setIsVerifyingPin(false);
