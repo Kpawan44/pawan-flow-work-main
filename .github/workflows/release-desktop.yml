@@ -1,4 +1,4 @@
-name: Release Desktop App
+﻿name: Release Desktop App
 
 # Builds and publishes Windows + Linux installers to a GitHub Release
 # whenever you push a version tag (e.g. `git tag v1.0.1 && git push --tags`).
@@ -22,11 +22,6 @@ permissions:
 jobs:
   release:
     strategy:
-      # max-parallel: 1 makes Windows and Linux build one after another
-      # instead of at the same time. Both jobs publish to the SAME GitHub
-      # release - running them in parallel can race and cause one job's
-      # uploaded files to silently vanish/get overwritten. Sequential is
-      # slightly slower but reliable.
       max-parallel: 1
       matrix:
         include:
@@ -50,7 +45,7 @@ jobs:
         shell: bash
 
       - run: npm run build
-      - run: npm run build:electron-main
+      - run: npm run electron:build-main
       - run: npx electron-builder ${{ matrix.build_flag }} --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
