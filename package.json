@@ -1,4 +1,4 @@
-{
+﻿{
   "name": "pmw-tracker",
   "productName": "PMW Manufacturing Tracker",
   "private": true,
@@ -19,7 +19,7 @@
   "build": {
     "appId": "com.pawan.pmwtracker",
     "productName": "PMW Manufacturing Tracker",
-    "copyright": "Copyright © 2026 Pawan Kumar",
+    "copyright": "Copyright Â© 2026 Pawan Kumar",
     "directories": {
       "output": "release"
     },
@@ -73,7 +73,7 @@
     },
     "linux": {
       "target": "AppImage",
-      "icon": "public/icon.ico",
+      "icon": "public/icon.png",
       "category": "Office"
     }
   },
@@ -116,3 +116,4 @@
     "vite": "^6.2.3"
   }
 }
+
