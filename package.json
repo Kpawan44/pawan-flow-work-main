@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "pmw-tracker",
   "productName": "PMW Manufacturing Tracker",
   "private": true,
@@ -11,7 +11,7 @@
     "start": "node dist/server.cjs",
     "clean": "rm -rf dist dist-electron release",
     "lint": "tsc --noEmit",
-    "electron:build-main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --outdir=dist-electron --external:electron --external:electron-updater --external:path --external:fs --external:url",
+    "electron:build-main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --outdir=dist-electron --external:electron --external:electron-updater --external:path --external:fs --external:url && node scripts/write-cjs-marker.cjs",
     "electron:dev": "npm run build && npm run electron:build-main && electron .",
     "electron:dist": "npm run build && npm run electron:build-main && electron-builder --win --publish never",
     "electron:release": "npm run build && npm run electron:build-main && electron-builder --win --publish always"
