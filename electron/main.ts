@@ -2,7 +2,6 @@ import { app, BrowserWindow, shell, Menu, dialog, ipcMain } from 'electron';
 import path from 'path';
 import { autoUpdater } from 'electron-updater';
 
-// ── Auto-updater config ───────────────────────────────────────────────────────
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 
@@ -11,7 +10,7 @@ let mainWindow: BrowserWindow | null = null;
 function setupAutoUpdater() {
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch(err => {
-      console.log('Update check failed (offline?):', err.message);
+      console.log('Update check failed:', err.message);
     });
   }, 5000);
 
@@ -20,7 +19,6 @@ function setupAutoUpdater() {
   }, 4 * 60 * 60 * 1000);
 
   autoUpdater.on('update-available', (info) => {
-    console.log('Update available:', info.version);
     mainWindow?.webContents.send('update-available', info.version);
   });
 
@@ -42,8 +40,6 @@ function setupAutoUpdater() {
   });
 }
 
-// ── Window ────────────────────────────────────────────────────────────────────
-
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -56,7 +52,6 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      // Allow loading local files — needed for packaged app
       webSecurity: false,
     },
     show: false,
@@ -72,11 +67,8 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
-    // Use app.getAppPath() for reliable path resolution in packaged app
     const indexPath = path.join(app.getAppPath(), 'dist', 'index.html');
-    mainWindow.loadFile(indexPath).catch(err => {
-      console.error('Failed to load index.html:', err);
-      // Fallback: try relative path
+    mainWindow.loadFile(indexPath).catch(() => {
       mainWindow?.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
     });
   }
@@ -86,7 +78,6 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  // Log any page errors for debugging
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDesc) => {
     console.error('Page failed to load:', errorCode, errorDesc);
   });
@@ -94,10 +85,8 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// ── IPC ───────────────────────────────────────────────────────────────────────
 ipcMain.handle('get-app-version', () => app.getVersion());
 
-// ── App lifecycle ─────────────────────────────────────────────────────────────
 Menu.setApplicationMenu(null);
 
 app.whenReady().then(() => {

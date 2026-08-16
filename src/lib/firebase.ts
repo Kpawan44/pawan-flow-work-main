@@ -148,37 +148,30 @@ let useRealFirebase = false;
 if (!isPlaceholder) {
   try {
     const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    const dbId = (firebaseConfig as any).firestoreDatabaseId || '(default)';
-    try {
-      dbInstance = initializeFirestore(app, {
-        experimentalForceLongPolling: true,
-        localCache: persistentLocalCache({
-          tabManager: persistentMultipleTabManager()
-        })
-      }, dbId);
-      console.log(`Real Firebase and Firestore persistent local cache initialized successfully for database: ${dbId}!`);
-    } catch (cacheError) {
-      console.warn(`Failed to initialize Firestore persistent cache, using fallback initializeFirestore for database ${dbId}:`, cacheError);
-      try {
-        dbInstance = initializeFirestore(app, {
-          experimentalForceLongPolling: true
-        }, dbId);
-      } catch (fallbackError) {
-        console.error("Firestore initialization fallback failed completely:", fallbackError);
-        dbInstance = getFirestore(app, dbId);
-      }
-    }
+    const dbId = (firebaseConfig as any).firestoreDatabaseId;
+    
+    // Standard Firestore initialization matching official Skill guidelines
+    dbInstance = getFirestore(app, dbId);
     authInstance = getAuth(app);
     useRealFirebase = true;
-    console.log("Real Firebase initialized successfully!");
+    console.log(`Real Firebase and Firestore initialized successfully for database: ${dbId}!`);
 
-    // Sign in anonymously so every client SDK call carries a real
-    // Firebase Auth token. Firestore rules gate all access on
-    // request.auth != null — this satisfies that without requiring
-    // users to log in with Google or email.
-    signInAnonymously(authInstance).catch((err) => {
-      console.warn('[Firebase] Anonymous sign-in failed — Firestore writes will be rejected by security rules:', err);
+    // Ensure client holds a real Firebase Auth token for Firestore security rules (isSignedIn())
+    signInAnonymously(authInstance).catch((authErr) => {
+      console.warn("Anonymous Firebase auth sign-in warning:", authErr);
     });
+
+    // Test connection asynchronously in background per guidelines
+    getDocFromServer(doc(dbInstance, 'test', 'connection'))
+      .then(() => {
+        setFirestoreOffline(false);
+      })
+      .catch((testErr) => {
+        if (testErr instanceof Error && (testErr.message.includes('the client is offline') || testErr.message.includes('offline') || testErr.message.includes('unavailable'))) {
+          console.info("[Offline/Preview Mode] Device operating in local persistence cache mode.");
+          setFirestoreOffline(true);
+        }
+      });
   } catch (error) {
     console.error("Failed to initialize real Firebase:", error);
   }
@@ -200,8 +193,7 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-1',
     name: 'Pawan Kumar',
     email: 'pawan.kummar16@gmail.com',
-    // PIN 1234 — stored as bcrypt hash, never as plaintext
-    pinHash: '$2b$10$w6rcXk2eO7DbCm68oM4nnOsjGRwKt5sBgu/K66V.lXQLThCvRFIP6',
+    pinHash: '$2b$10$1k7Yh.oyJW5PYSDU4bijMOMA17N4ZMhO2nLdp2rF4XuzL63r2/l2S',
     department: 'Admin',
     role: 'super_admin',
     active: true,
@@ -211,8 +203,7 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-2',
     name: 'Alice Dispatcher',
     email: 'dispatch@factory.com',
-    // PIN 2222
-    pinHash: '$2b$10$uOnL4Nuz2AWygVTdWVnN3.pe6Ag2DGqL89ykWr34xT/wl8zFBi9T2',
+    pinHash: '$2b$10$kYvHQjBl8XMVQ92P9vwKjujDBLPkRkBWR4qTMgwtfD2UV5m/XKkh6',
     department: 'Dispatch',
     role: 'admin',
     active: true,
@@ -222,8 +213,7 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-3',
     name: 'Bob Production',
     email: 'production@factory.com',
-    // PIN 3333
-    pinHash: '$2b$10$mGXnZycEl928mfQ9eAIz2.hm3HYkG78GibVhHlHg75L9sKtqlMIQG',
+    pinHash: '$2b$10$Oex2jyr3ZpyMV5b6jPT/eeweMxO1/ZofU6SAFsJCQG6I1cQ0E9qh.',
     department: 'Production',
     role: 'admin',
     active: true,
@@ -233,8 +223,7 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-4',
     name: 'Charlie HeatTreat',
     email: 'heattreat@factory.com',
-    // PIN 4444
-    pinHash: '$2b$10$PTI4EJIAaKm0SDHKsZD/XOfvW2hYENBddQKrwajvNEeYcAK3jOk62',
+    pinHash: '$2b$10$K82gVSWzep.ok.YB1O1Yg.fAfC2bXYEf5iztQmuEYyVfBHd8xesQW',
     department: 'Heat Treatment',
     role: 'staff',
     active: true,
@@ -244,8 +233,7 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-5',
     name: 'David Plater',
     email: 'plating@factory.com',
-    // PIN 5555
-    pinHash: '$2b$10$xQAl0OhZKpmTxkstNOOm..Ba4K9haitSvID6n9YSBvg5WkPgnBbUG',
+    pinHash: '$2b$10$6RzD6FETze08JWKGAOP7s.6qMa4jXPYgfbjqqOGsj0VDqK6JIMyAS',
     department: 'Plating',
     role: 'staff',
     active: true,
@@ -255,8 +243,7 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-6',
     name: 'Emma Packer',
     email: 'packing@factory.com',
-    // PIN 6666
-    pinHash: '$2b$10$dvw4jZQ/V1X5xnxpdxdJv.IptTzs7vGygw17bmgZWTTt.BM6hsLMK',
+    pinHash: '$2b$10$OUgcrAUhPiZduLPfLyZmPutGL3mkrk5nJYY3jRkIutBl1NMoDoBpu',
     department: 'Packing',
     role: 'staff',
     active: true,
@@ -266,8 +253,7 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-7',
     name: 'Frank Storekeeper',
     email: 'store@factory.com',
-    // PIN 7777
-    pinHash: '$2b$10$o1/kShOXreQk0SuEyDbrMu75YxSJDQ1UMUhfA5Otwj0NREj.2rxTi',
+    pinHash: '$2b$10$TJDNdz2jiU2jW22WGpIZr.5IlQLVXHo4XNFkj3munl63vUBRTafE6',
     department: 'Store',
     role: 'staff',
     active: true,
@@ -277,8 +263,7 @@ const defaultUsers: UserProfile[] = [
     userId: 'u-8',
     name: 'George RawStore',
     email: 'rawstore@factory.com',
-    // PIN 8888
-    pinHash: '$2b$10$OtlXgyFYme9UT02BNaBQ/ubvDxQ7vdpFpJZNerfC5phcA.kurWdre',
+    pinHash: '$2b$10$CjOOWqikHSgM//ZNWC6VUe66BBJ0lPFSPkOgkrF0rrQruLr7pt3zC',
     department: 'Raw Material Store',
     role: 'staff',
     active: true,
@@ -786,7 +771,7 @@ export class DBService {
         userId: 'u-1',
         name: 'Pawan Kumar',
         email: 'pawan.kummar16@gmail.com',
-        pinHash: '$2a$10$abcdefg1234567890', // Default hash placeholder
+        pinHash: '$2b$10$1k7Yh.oyJW5PYSDU4bijMOMA17N4ZMhO2nLdp2rF4XuzL63r2/l2S', // bcrypt hash for 1234
         department: 'Admin',
         role: 'super_admin',
         active: true,
@@ -872,10 +857,9 @@ export class DBService {
 
     const idx = list.findIndex(u => u.userId === user.userId);
     
-    // Check for duplicate PIN hash to prevent user PIN collision
-    // (Plaintext pin field is no longer used — comparison is on pinHash)
+    // Check for duplicate PIN to prevent user PIN collision
     if (user.pinHash) {
-      const existingPinUser = list.find(u => u.userId !== user.userId && u.pinHash && u.pinHash === user.pinHash);
+      const existingPinUser = list.find(u => u.userId !== user.userId && u.pinHash && u.pinHash.trim() === user.pinHash.trim());
       if (existingPinUser) {
         throw new Error(`This PIN is already assigned to active user '${existingPinUser.name}' (${existingPinUser.department}). Please choose a unique PIN.`);
       }

@@ -1,23 +1,10 @@
 node_modules/
 build/
 dist/
+dist-electron/
+release/
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
-
-*-adminsdk-*.json
-
-# Debug snapshot files
-check_*.tsx
-check_*.ts
-
-# Firebase service account keys
-*-adminsdk-*.json
-
-release/
-
-dist/
-
-dist-electron/

@@ -11,8 +11,7 @@ import {
   FileText, 
   Bell, 
   Activity, 
-  X,
-  BookOpen
+  X
 } from 'lucide-react';
 import { Department, UserProfile, CompanyConfig } from '../types';
 import { isFirestoreOffline } from '../lib/firebase';
@@ -60,7 +59,6 @@ export default function Sidebar({
     { id: 'outsource', label: 'Process Outsourcing', icon: Truck },
     { id: 'timeline-live', label: 'Real-Time Tracking', icon: Activity },
     { id: 'reports', label: 'Reports & Analytics', icon: Layers },
-    { id: 'user-guide', label: 'User Guide & Manual', icon: BookOpen },
   ];
 
   if (isAdminOrSuperAdmin) {

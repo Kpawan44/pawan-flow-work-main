@@ -2,42 +2,19 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // -------------------------------------------------------
-    // DEFAULT DENY — nothing is accessible unless a rule below
-    // explicitly grants it. Any collection not listed here is
-    // locked to the world.
-    // -------------------------------------------------------
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // -------------------------------------------------------
-    // AUTH GATE
-    // The app calls signInAnonymously() on startup (firebase.ts).
-    // Every client SDK call therefore carries a real Firebase Auth
-    // token, so request.auth != null for every legitimate user.
-    // An unauthenticated HTTP request (curl, Postman without a
-    // token, scraper) has request.auth == null and hits the
-    // default deny above.
-    // -------------------------------------------------------
     function isSignedIn() {
       return request.auth != null;
     }
 
-    // -------------------------------------------------------
-    // SCHEMA VALIDATORS
-    // Keep the validators from the original rules — they are good
-    // defence-in-depth against malformed writes even from
-    // authenticated clients.
-    // -------------------------------------------------------
     function isValidUserProfile(data) {
       return data.keys().hasAll(['userId', 'name', 'email', 'department', 'role', 'active', 'createdAt'])
-        && data.userId is string
-        && data.name is string && data.name.size() > 0
-        && data.email is string
-        && data.department is string
-        && data.role is string
-        && data.active is bool;
+        && data.userId is string && data.name is string && data.name.size() > 0
+        && data.email is string && data.department is string
+        && data.role is string && data.active is bool;
     }
 
     function isValidJobCard(data) {
@@ -46,19 +23,12 @@ service cloud.firestore {
           'orderQty', 'currentQty', 'balanceQty', 'currentDepartment',
           'status', 'heatTreatmentRequired', 'createdBy', 'createdAt', 'completed'
         ])
-        && data.jobCardNo is string
-        && data.orderNo is string
-        && data.partyName is string
-        && data.itemName is string
-        && data.itemCode is string
-        && data.orderQty is number
-        && data.currentQty is number
-        && data.balanceQty is number
-        && data.currentDepartment is string
-        && data.status is string
-        && data.heatTreatmentRequired is bool
-        && data.createdBy is string
-        && data.completed is bool;
+        && data.jobCardNo is string && data.orderNo is string
+        && data.partyName is string && data.itemName is string
+        && data.orderQty is number && data.currentQty is number
+        && data.balanceQty is number && data.currentDepartment is string
+        && data.status is string && data.heatTreatmentRequired is bool
+        && data.createdBy is string && data.completed is bool;
     }
 
     function isValidMaterialMovement(data) {
@@ -66,44 +36,26 @@ service cloud.firestore {
           'movementId', 'jobCardNo', 'fromDepartment', 'toDepartment',
           'quantity', 'transferBy', 'transferDate', 'accepted'
         ])
-        && data.movementId is string
-        && data.jobCardNo is string
-        && data.fromDepartment is string
-        && data.toDepartment is string
-        && data.quantity is number
-        && data.transferBy is string
-        && data.accepted is bool;
+        && data.movementId is string && data.jobCardNo is string
+        && data.fromDepartment is string && data.toDepartment is string
+        && data.quantity is number && data.transferBy is string && data.accepted is bool;
     }
 
     function isValidAppNotification(data) {
       return data.keys().hasAll(['notificationId', 'userId', 'title', 'message', 'read', 'createdAt'])
-        && data.notificationId is string
-        && data.userId is string
-        && data.title is string
-        && data.message is string
-        && data.read is bool;
+        && data.notificationId is string && data.userId is string
+        && data.title is string && data.message is string && data.read is bool;
     }
 
     function isValidAuditLog(data) {
       return data.keys().hasAll(['id', 'timestamp', 'userId', 'userName', 'action', 'details'])
-        && data.id is string
-        && data.userId is string
-        && data.userName is string
-        && data.action is string
-        && data.details is string;
+        && data.id is string && data.userId is string
+        && data.userName is string && data.action is string && data.details is string;
     }
 
     function isValidCompanyConfig(data) {
       return data.keys().hasAll(['companyName', 'details'])
-        && data.companyName is string
-        && data.details is string;
-    }
-
-    function isValidSavedItem(data) {
-      return data.keys().hasAll(['id', 'itemName', 'itemCode'])
-        && data.id is string
-        && data.itemName is string
-        && data.itemCode is string;
+        && data.companyName is string && data.details is string;
     }
 
     function isValidOutsourceOrder(data) {
@@ -113,91 +65,56 @@ service cloud.firestore {
           'orderedByUserName', 'orderedAt', 'assignedToUserId',
           'assignedToUserName', 'status'
         ])
-        && data.orderId is string
-        && data.partyName is string
-        && data.itemName is string
-        && data.orderQty is number
-        && data.unit is string
-        && data.processType is string
-        && data.outsourceMaterialType is string
-        && data.orderedByUserId is string
-        && data.assignedToUserId is string
-        && data.status is string;
+        && data.orderId is string && data.partyName is string
+        && data.itemName is string && data.orderQty is number
+        && data.orderedByUserId is string && data.status is string;
     }
 
-    // -------------------------------------------------------
-    // COLLECTIONS
-    // -------------------------------------------------------
-
-    // User profiles
-    // Read: any authenticated session (needed to load the user
-    //        list on the login screen for PIN selection).
-    // Write: any authenticated session + schema valid.
-    //        The app already enforces role checks in the UI; this
-    //        layer stops unauthenticated outside writes.
-    // NOTE: the `pin` (plaintext) field must NOT be written here —
-    //       enforce that separately by migrating all users to
-    //       pinHash and removing the `pin` field from documents.
     match /mfr_users/{userId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && isValidUserProfile(request.resource.data);
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow update, delete: if isSignedIn();
     }
 
-    // Job cards
     match /mfr_job_cards/{jobCardNo} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && isValidJobCard(request.resource.data);
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow update, delete: if isSignedIn();
     }
 
-    // Material movements
     match /mfr_movements/{movementId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && isValidMaterialMovement(request.resource.data);
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow update, delete: if isSignedIn();
     }
 
-    // Notifications
     match /mfr_notifications/{notificationId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && isValidAppNotification(request.resource.data);
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow update, delete: if isSignedIn();
     }
 
-    // Audit logs — write-once, immutable. No update or delete ever.
     match /mfr_audit_logs/{logId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && isValidAuditLog(request.resource.data);
       allow update, delete: if false;
     }
 
-    // Company config
     match /mfr_company_config/{configId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && isValidCompanyConfig(request.resource.data);
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow update, delete: if isSignedIn();
     }
 
-    // Saved items catalogue
     match /mfr_items/{itemId} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidSavedItem(request.resource.data);
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow create, update, delete: if isSignedIn();
     }
 
-    // Outsource orders
     match /mfr_outsource_orders/{orderId} {
       allow read: if isSignedIn();
       allow create: if isSignedIn() && isValidOutsourceOrder(request.resource.data);
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn();
+      allow update, delete: if isSignedIn();
     }
   }
 }

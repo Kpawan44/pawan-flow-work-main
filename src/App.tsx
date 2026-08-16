@@ -107,7 +107,6 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [loginName, setLoginName] = useState('');
   const [loginPin, setLoginPin] = useState('');
-  const [isVerifyingPin, setIsVerifyingPin] = useState(false);
   const [showPin, setShowPin] = useState(false);
   const [authError, setAuthError] = useState('');
   const [selectedLoginUser, setSelectedLoginUser] = useState<UserProfile | null>(null);
@@ -531,7 +530,83 @@ export default function App() {
     }
   };
 
-  // --- LOAD INITIAL DATASE ---
+  // --- PER-COLLECTION REFRESH & INCREMENTAL SYNC ---
+  const refreshUsers = async () => {
+    try {
+      const u = await DBService.getUsers();
+      setUsers(u);
+      const savedUserUid = sessionStorage.getItem('mfr_active_user_uid');
+      if (savedUserUid && !currentUser) {
+        const found = u.find(user => user.userId === savedUserUid);
+        if (found) setCurrentUser(found);
+      }
+    } catch (err) {
+      console.error("Failed to refresh users", err);
+    }
+  };
+
+  const refreshJobCards = async () => {
+    try {
+      const jc = await DBService.getJobCards();
+      setJobCards(jc);
+      setSelectedJob(prev => {
+        if (!prev) return null;
+        const freshJob = jc.find(j => j.jobCardNo.toLowerCase() === prev.jobCardNo.toLowerCase());
+        return freshJob || prev;
+      });
+    } catch (err) {
+      console.error("Failed to refresh job cards", err);
+    }
+  };
+
+  const refreshNotifications = async () => {
+    try {
+      const n = await DBService.getNotifications();
+      setNotifications(n);
+    } catch (err) {
+      console.error("Failed to refresh notifications", err);
+    }
+  };
+
+  const refreshCompanyConfig = async () => {
+    try {
+      const config = await DBService.getCompanyConfig();
+      setCompanyConfig(config);
+    } catch (err) {
+      console.error("Failed to refresh company config", err);
+    }
+  };
+
+  const applyMovementChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: MaterialMovement }[]) => {
+    setMovements(prev => {
+      const map = new Map<string, MaterialMovement>(prev.map(m => [m.movementId, m]));
+      for (const change of changes) {
+        if (change.type === 'removed') {
+          map.delete(change.doc.movementId);
+        } else {
+          map.set(change.doc.movementId, change.doc);
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => new Date(b.transferDate).getTime() - new Date(a.transferDate).getTime());
+    });
+  };
+
+  const applyAuditLogChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => {
+    setAuditLogs(prev => {
+      const map = new Map<string, AuditLog>(prev.map(l => [l.id, l]));
+      for (const change of changes) {
+        if (change.type === 'removed') {
+          map.delete(change.doc.id);
+        } else {
+          map.set(change.doc.id, change.doc);
+        }
+      }
+      const sorted = Array.from(map.values()).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      return sorted.slice(0, 500);
+    });
+  };
+
+  // --- LOAD INITIAL DATASET ---
   const refreshAllStates = async () => {
     try {
       const [u, jc, mov, n, logs, config] = await Promise.all([
@@ -594,122 +669,32 @@ export default function App() {
         console.warn('Daily auto-backup check failed:', err);
       });
 
-    // Per-collection refresh: each live update now only re-reads the ONE
-    // collection that actually changed, instead of re-fetching all six
-    // collections on every single change. At higher write volumes / more
-    // simultaneously-open devices, this cuts redundant Firestore reads
-    // roughly 6x versus refreshing everything every time.
-    const refreshUsers = async () => {
-      try {
-        const u = await DBService.getUsers();
-        setUsers(u);
-        const savedUserUid = sessionStorage.getItem('mfr_active_user_uid');
-        if (savedUserUid && !currentUser) {
-          const found = u.find(user => user.userId === savedUserUid);
-          if (found) setCurrentUser(found);
-        }
-      } catch (err) {
-        console.error('Failed to refresh users', err);
-      }
+    const debounceTimeouts: Record<string, NodeJS.Timeout> = {};
+    const makeDebounced = (key: string, fn: () => void, delay = 100) => {
+      return () => {
+        if (debounceTimeouts[key]) clearTimeout(debounceTimeouts[key]);
+        debounceTimeouts[key] = setTimeout(() => {
+          fn();
+        }, delay);
+      };
     };
 
-    const refreshJobCards = async () => {
-      try {
-        const jc = await DBService.getJobCards();
-        setJobCards(jc);
-        setSelectedJob(prev => {
-          if (!prev) return null;
-          const freshJob = jc.find(j => j.jobCardNo.toLowerCase() === prev.jobCardNo.toLowerCase());
-          return freshJob || prev;
-        });
-      } catch (err) {
-        console.error('Failed to refresh job cards', err);
-      }
-    };
-
-    // Movements and audit logs are the two collections that grow without
-    // bound over time (every transfer, every action). Re-fetching either
-    // one in full on every single change gets proportionally more
-    // expensive forever as they grow. These two merge only the documents
-    // that actually changed into existing state instead.
-    const applyMovementChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: MaterialMovement }[]) => {
-      setMovements(prev => {
-        const byId = new Map<string, MaterialMovement>(prev.map(m => [m.movementId, m]));
-        for (const change of changes) {
-          if (change.type === 'removed') {
-            byId.delete(change.doc.movementId);
-          } else {
-            byId.set(change.doc.movementId, change.doc);
-          }
-        }
-        return Array.from(byId.values()).sort(
-          (a, b) => new Date(b.transferDate).getTime() - new Date(a.transferDate).getTime()
-        );
-      });
-    };
-
-    const applyAuditLogChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => {
-      setAuditLogs(prev => {
-        const byId = new Map<string, AuditLog>(prev.map(a => [a.id, a]));
-        for (const change of changes) {
-          if (change.type === 'removed') {
-            byId.delete(change.doc.id);
-          } else {
-            byId.set(change.doc.id, change.doc);
-          }
-        }
-        // Keep only the most recent 500, matching the existing display cap,
-        // so this array (and the app's memory usage) doesn't grow forever.
-        return Array.from(byId.values())
-          .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-          .slice(0, 500);
-      });
-    };
-
-    const refreshNotifications = async () => {
-      try {
-        setNotifications(await DBService.getNotifications());
-      } catch (err) {
-        console.error('Failed to refresh notifications', err);
-      }
-    };
-
-    const refreshCompanyConfig = async () => {
-      try {
-        setCompanyConfig(await DBService.getCompanyConfig());
-      } catch (err) {
-        console.error('Failed to refresh company config', err);
-      }
-    };
-
-    // Debounce each collection's own refresh independently, so a burst of
-    // writes to the same collection coalesces into one refetch, without
-    // making unrelated collections wait on each other.
-    const debounceTimeouts: Record<string, NodeJS.Timeout | null> = {};
-    const makeDebounced = (key: string, fn: () => void) => () => {
-      if (debounceTimeouts[key]) clearTimeout(debounceTimeouts[key]!);
-      debounceTimeouts[key] = setTimeout(fn, 100);
-    };
-
-    // Attach real-time subscription streams - each now only refreshes its
-    // own collection's state. Movements and audit logs use the incremental
-    // merge above directly (no debounce needed - merging is cheap and
-    // doesn't re-read anything).
-    const unsubUsers = DBService.subscribeToUpdates('mfr_users', makeDebounced('users', refreshUsers));
-    const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', makeDebounced('jobs', refreshJobCards));
+    // Attach targeted per-collection real-time listeners and incremental sync streams
+    const unsubUsers = DBService.subscribeToUpdates('mfr_users', makeDebounced('mfr_users', refreshUsers));
+    const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', makeDebounced('mfr_job_cards', refreshJobCards));
+    const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', makeDebounced('mfr_notifications', refreshNotifications));
+    const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', makeDebounced('mfr_company_config', refreshCompanyConfig));
     const unsubMoves = DBService.subscribeMovementsIncremental(setMovements, applyMovementChanges);
-    const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', makeDebounced('notifs', refreshNotifications));
     const unsubAudits = DBService.subscribeAuditLogsIncremental(setAuditLogs, applyAuditLogChanges);
-    const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', makeDebounced('company', refreshCompanyConfig));
 
     return () => {
-      Object.values(debounceTimeouts).forEach(t => t && clearTimeout(t));
+      Object.values(debounceTimeouts).forEach(clearTimeout);
       unsubUsers();
       unsubJobs();
-      unsubMoves();
       unsubNotifs();
-      unsubAudits();
       unsubCompany();
+      unsubMoves();
+      unsubAudits();
     };
   }, []);
 
@@ -870,8 +855,11 @@ export default function App() {
   }, [jobCards, mobileViewMode, activeTab]);
 
   // --- CORE CALLBACK METRIC HANDLERS ---
+  const [isVerifyingPin, setIsVerifyingPin] = useState(false);
+
   const handleUsernamePinLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (isVerifyingPin) return;
     setAuthError('');
     setRegSuccess('');
 
@@ -903,30 +891,52 @@ export default function App() {
 
     setIsVerifyingPin(true);
     try {
+      // Call secure backend endpoint to verify PIN against bcrypt hash
       const response = await fetch(`/api/users/${encodeURIComponent(matchedUser.userId)}/verify-pin`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: pinToMatch, pinHash: matchedUser.pinHash || null }),
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ 
+          pin: pinToMatch,
+          pinHash: matchedUser.pinHash || null
+        })
       });
-      if (!response.ok) throw new Error('Authentication failed');
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || errData.message || 'Authentication failed');
+      }
+
       const result = await response.json();
+
       if (!result.success) {
         setAuthError('Invalid credentials. Please verify your Registered Full Name and Security PIN.');
         setLoginPin('');
         setIsVerifyingPin(false);
         return;
       }
+
+      // If server generated a new upgraded bcrypt hash for a legacy user, update Firestore
       if (result.newPinHash && !matchedUser.pinHash) {
-        DBService.updateUser(matchedUser.userId, { pinHash: result.newPinHash }).catch(() => {});
+        DBService.updateUser(matchedUser.userId, { pinHash: result.newPinHash }).catch(e => {
+          console.warn("Could not save auto-upgraded pinHash to Firestore:", e);
+        });
       }
-      setCurrentUser({ ...matchedUser, pinHash: result.newPinHash || matchedUser.pinHash });
+
+      // Login successful
+      setCurrentUser({
+        ...matchedUser,
+        pinHash: result.newPinHash || matchedUser.pinHash
+      });
       sessionStorage.setItem('mfr_active_user_uid', matchedUser.userId);
       setLoginName('');
       setLoginPin('');
       setSelectedLoginUser(null);
-      await DBService.logAction(matchedUser.userId, matchedUser.name, 'USER_LOGIN', 'Logged in via secure bcrypt PIN verification.');
+      await DBService.logAction(matchedUser.userId, matchedUser.name, 'USER_LOGIN', `Logged in via secure bcrypt PIN verification.`);
     } catch (err: any) {
-      setAuthError('Could not reach verification service. Please check your connection and try again.');
+      console.warn("Backend PIN verification error:", err);
+      setAuthError('Invalid credentials or could not reach verification service. Please try again.');
       setLoginPin('');
     } finally {
       setIsVerifyingPin(false);
@@ -935,13 +945,13 @@ export default function App() {
 
   // Automatically submit when name is present and PIN is 4 digits
   useEffect(() => {
-    if (loginName.trim() && loginPin.length === 4) {
+    if (loginName.trim() && loginPin.length === 4 && !isVerifyingPin) {
       const timer = setTimeout(() => {
         handleUsernamePinLogin();
       }, 350);
       return () => clearTimeout(timer);
     }
-  }, [loginPin, loginName]);
+  }, [loginPin, loginName, isVerifyingPin]);
 
   const handleRegisterUser = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -967,7 +977,6 @@ export default function App() {
       userId: newUserId,
       name: trimmedName,
       email: `${trimmedName.toLowerCase().replace(/\s+/g, '')}@factory.com`,
-      pin: isSuper ? '1234' : '0000', // Default PIN
       department: 'Admin',
       role: isSuper ? 'super_admin' : 'admin',
       active: true,
@@ -976,7 +985,7 @@ export default function App() {
 
     try {
       await DBService.saveUser(newProfile);
-      
+
       // Seed welcome notification
       await DBService.createNotification({
         department: 'All',
@@ -1001,7 +1010,6 @@ export default function App() {
 
   const handleDemoQuickLogin = (user: UserProfile) => {
     setLoginName(user.name);
-    // PIN auto-fill removed
     setCurrentUser(user);
     sessionStorage.setItem('mfr_active_user_uid', user.userId);
     DBService.logAction(user.userId, user.name, 'USER_LOGIN', `Logged in via quick demo selector.`);
@@ -1064,17 +1072,17 @@ export default function App() {
     );
   };
 
-  const handleCreateJobCard = async (jobOrJobs: any) => {
+  const handleCreateJobCard = async (jobOrJobs: any, initialMovementOverride?: any) => {
     if (!currentUser) return;
     console.log("Creating job card(s):", jobOrJobs);
     try {
       if (Array.isArray(jobOrJobs)) {
         for (const j of jobOrJobs) {
-          await DBService.createJobCard(j, currentUser.userId, currentUser.name);
+          await DBService.createJobCard(j, currentUser.userId, currentUser.name, initialMovementOverride);
         }
         showToast(`${jobOrJobs.length} Job Cards successfully created!`, "success");
       } else {
-        const newCard = await DBService.createJobCard(jobOrJobs, currentUser.userId, currentUser.name);
+        const newCard = await DBService.createJobCard(jobOrJobs, currentUser.userId, currentUser.name, initialMovementOverride);
         console.log("Job card created:", newCard);
         showToast(`Job Card successfully created!`, "success");
       }

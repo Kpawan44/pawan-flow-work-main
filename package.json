@@ -1,91 +1,60 @@
 {
   "name": "pmw-tracker",
-  "productName": "PMW Manufacturing Tracker",
   "private": true,
-  "main": "dist-electron/main.js",
-  "version": "1.0.42",
+  "main": "dist-electron/main.cjs",
+  "version": "1.0.52",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
-    "clean": "rm -rf dist dist-electron release",
+    "build:electron": "vite build && esbuild electron/main.ts --bundle --platform=node --format=cjs --outfile=dist-electron/main.cjs --external:electron && esbuild electron/preload.ts --bundle --platform=node --format=cjs --outfile=dist-electron/preload.cjs --external:electron",
+    "dist:electron": "npm run build:electron && electron-builder",
+    "cap:sync": "vite build && npx cap sync",
+    "migrate:pins": "node migrate-remove-plaintext-pins.js",
+    "clean": "rm -rf dist dist-electron",
     "lint": "tsc --noEmit",
-    "electron:build-main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --outdir=dist-electron --external:electron --external:electron-updater --external:path --external:fs --external:url && node scripts/write-cjs-marker.cjs",
-    "electron:dev": "npm run build && npm run electron:build-main && electron .",
+    "electron:build-main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --outdir=dist-electron --external:electron --external:electron-updater --external:path --external:fs --external:url",
     "electron:dist": "npm run build && npm run electron:build-main && electron-builder --win --publish never",
     "electron:release": "npm run build && npm run electron:build-main && electron-builder --win --publish always"
   },
   "build": {
-    "appId": "com.pawan.pmwtracker",
+    "appId": "com.pmw.tracker",
     "productName": "PMW Manufacturing Tracker",
-    "copyright": "Copyright \u00c2\u00a9 2026 Pawan Kumar",
     "directories": {
       "output": "release"
     },
     "files": [
       "dist/**/*",
-      "dist-electron/**/*",
-      "package.json"
+      "dist-electron/**/*"
     ],
-    "extraResources": [
-      {
-        "from": "public/icon.png",
-        "to": "icon.jpg"
-      }
-    ],
-    "publish": {
-      "provider": "github",
-      "owner": "Kpawan44",
-      "repo": "pawan-flow-work-main"
-    },
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "icon": "public/icon.ico",
-      "requestedExecutionLevel": "asInvoker"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "PMW Tracker",
-      "installerIcon": "public/icon.ico",
-      "uninstallerIcon": "public/icon.ico"
+        "nsis"
+      ]
     },
     "mac": {
-      "target": "dmg",
-      "icon": "public/icon.ico",
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.business"
     },
     "linux": {
-      "target": "AppImage",
-      "icon": "public/icon.png",
+      "target": [
+        "AppImage"
+      ],
       "category": "Office"
     },
     "asar": false
   },
   "dependencies": {
-    "@capacitor/android": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "bcryptjs": "^3.0.3",
     "dotenv": "^17.2.3",
-    "electron-updater": "^6.3.9",
+    "electron-updater": "^6.8.9",
     "express": "^4.21.2",
     "firebase": "^12.14.0",
     "firebase-admin": "^14.2.0",
@@ -101,8 +70,8 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
+    "@capacitor/android": "^8.5.0",
     "@capacitor/cli": "^8.5.0",
-    "@capacitor/core": "^8.5.0",
     "@types/bcryptjs": "^3.0.0",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
