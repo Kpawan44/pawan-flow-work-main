@@ -2,35 +2,29 @@ import { app, BrowserWindow, shell, Menu, dialog, ipcMain } from 'electron';
 import path from 'path';
 import { autoUpdater } from 'electron-updater';
 
-
-// ── Auto-updater config ──────────────────────────────────────────────────────
-autoUpdater.autoDownload = true;        // download in background automatically
-autoUpdater.autoInstallOnAppQuit = true; // install when user closes the app
+// ── Auto-updater config ───────────────────────────────────────────────────────
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
 
 let mainWindow: BrowserWindow | null = null;
 
 function setupAutoUpdater() {
-  // Check for updates 5 seconds after launch (give window time to load)
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch(err => {
       console.log('Update check failed (offline?):', err.message);
     });
   }, 5000);
 
-  // Check again every 4 hours while app is running
   setInterval(() => {
     autoUpdater.checkForUpdates().catch(() => {});
   }, 4 * 60 * 60 * 1000);
 
   autoUpdater.on('update-available', (info) => {
     console.log('Update available:', info.version);
-    // Notify renderer so it can show a subtle "Updating in background..." banner
     mainWindow?.webContents.send('update-available', info.version);
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    console.log('Update downloaded:', info.version);
-    // Ask user if they want to restart now or on next launch
     dialog.showMessageBox(mainWindow!, {
       type: 'info',
       title: 'Update Ready',
@@ -48,7 +42,7 @@ function setupAutoUpdater() {
   });
 }
 
-// ── Window ─────────────────────────────────────────────────────────────────
+// ── Window ────────────────────────────────────────────────────────────────────
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -57,12 +51,13 @@ function createWindow() {
     minWidth: 800,
     minHeight: 600,
     title: 'PMW Manufacturing Tracker',
-    icon: path.join(__dirname, '../dist/icon.png'),
+    icon: path.join(app.getAppPath(), 'dist', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      webSecurity: true,
+      // Allow loading local files — needed for packaged app
+      webSecurity: false,
     },
     show: false,
     backgroundColor: '#F8FAFC',
@@ -77,27 +72,37 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    // Use app.getAppPath() for reliable path resolution in packaged app
+    const indexPath = path.join(app.getAppPath(), 'dist', 'index.html');
+    mainWindow.loadFile(indexPath).catch(err => {
+      console.error('Failed to load index.html:', err);
+      // Fallback: try relative path
+      mainWindow?.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    });
   }
 
-  // Open external links in browser, not Electron
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
   });
 
+  // Log any page errors for debugging
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDesc) => {
+    console.error('Page failed to load:', errorCode, errorDesc);
+  });
+
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// ── IPC: let renderer check app version ─────────────────────────────────────
+// ── IPC ───────────────────────────────────────────────────────────────────────
 ipcMain.handle('get-app-version', () => app.getVersion());
 
-// ── App lifecycle ─────────────────────────────────────────────────────────
+// ── App lifecycle ─────────────────────────────────────────────────────────────
 Menu.setApplicationMenu(null);
 
 app.whenReady().then(() => {
   createWindow();
-  if (app.isPackaged) setupAutoUpdater(); // only in production build
+  if (app.isPackaged) setupAutoUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
