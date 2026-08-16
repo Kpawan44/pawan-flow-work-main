@@ -632,14 +632,14 @@ export default function App() {
     // one in full on every single change gets proportionally more
     // expensive forever as they grow. These two merge only the documents
     // that actually changed into existing state instead.
-    const applyMovementChanges = (changes: { type: 'added' | 'modified' | 'removed'; data: MaterialMovement }[]) => {
+    const applyMovementChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: MaterialMovement }[]) => {
       setMovements(prev => {
         const byId = new Map<string, MaterialMovement>(prev.map(m => [m.movementId, m]));
         for (const change of changes) {
           if (change.type === 'removed') {
-            byId.delete(change.data.movementId);
+            byId.delete(change.doc.movementId);
           } else {
-            byId.set(change.data.movementId, change.data);
+            byId.set(change.doc.movementId, change.doc);
           }
         }
         return Array.from(byId.values()).sort(
@@ -648,14 +648,14 @@ export default function App() {
       });
     };
 
-    const applyAuditLogChanges = (changes: { type: 'added' | 'modified' | 'removed'; data: AuditLog }[]) => {
+    const applyAuditLogChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => {
       setAuditLogs(prev => {
         const byId = new Map<string, AuditLog>(prev.map(a => [a.id, a]));
         for (const change of changes) {
           if (change.type === 'removed') {
-            byId.delete(change.data.id);
+            byId.delete(change.doc.id);
           } else {
-            byId.set(change.data.id, change.data);
+            byId.set(change.doc.id, change.doc);
           }
         }
         // Keep only the most recent 500, matching the existing display cap,
