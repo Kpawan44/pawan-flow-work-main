@@ -1,11 +1,9 @@
 import { app, BrowserWindow, shell, Menu, dialog, ipcMain } from 'electron';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { autoUpdater } from 'electron-updater';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// ── Auto-updater config ───────────────────────────────────────────────────────
+// â”€â”€ Auto-updater config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 autoUpdater.autoDownload = true;        // download in background automatically
 autoUpdater.autoInstallOnAppQuit = true; // install when user closes the app
 
@@ -50,7 +48,7 @@ function setupAutoUpdater() {
   });
 }
 
-// ── Window ────────────────────────────────────────────────────────────────────
+// â”€â”€ Window â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -91,10 +89,10 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
-// ── IPC: let renderer check app version ──────────────────────────────────────
+// â”€â”€ IPC: let renderer check app version â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 ipcMain.handle('get-app-version', () => app.getVersion());
 
-// ── App lifecycle ─────────────────────────────────────────────────────────────
+// â”€â”€ App lifecycle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 Menu.setApplicationMenu(null);
 
 app.whenReady().then(() => {
