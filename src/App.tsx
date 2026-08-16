@@ -697,9 +697,9 @@ export default function App() {
     // doesn't re-read anything).
     const unsubUsers = DBService.subscribeToUpdates('mfr_users', makeDebounced('users', refreshUsers));
     const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', makeDebounced('jobs', refreshJobCards));
-    const unsubMoves = DBService.subscribeMovementsIncremental(applyMovementChanges);
+    const unsubMoves = DBService.subscribeMovementsIncremental(setMovements, applyMovementChanges);
     const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', makeDebounced('notifs', refreshNotifications));
-    const unsubAudits = DBService.subscribeAuditLogsIncremental(applyAuditLogChanges);
+    const unsubAudits = DBService.subscribeAuditLogsIncremental(setAuditLogs, applyAuditLogChanges);
     const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', makeDebounced('company', refreshCompanyConfig));
 
     return () => {
