@@ -22,6 +22,16 @@ allprojects {
         google()
         mavenCentral()
     }
+
+    // Fix duplicate Kotlin stdlib classes (kotlin-stdlib-jdk7/jdk8 merged
+    // into kotlin-stdlib since Kotlin 1.8 — force the unified version)
+    configurations.all {
+        resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+            if (details.requested.group == 'org.jetbrains.kotlin') {
+                details.useVersion '1.8.22'
+            }
+        }
+    }
 }
 
 task clean(type: Delete) {
