@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import * as bcrypt from 'bcryptjs';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Factory, 
