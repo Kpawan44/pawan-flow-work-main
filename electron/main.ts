@@ -27,7 +27,7 @@ function setupAutoUpdater() {
       type: 'info',
       title: 'Update Ready',
       message: `PMW Tracker v${info.version} is ready to install.`,
-      detail: 'Restart now to apply the update, or it will install automatically when you next close the app.',
+      detail: 'Restart now to apply the update, or it will install automatically when you close the app.',
       buttons: ['Restart Now', 'Later'],
       defaultId: 0,
     }).then(({ response }) => {
@@ -49,7 +49,7 @@ function createWindow() {
     title: 'PMW Manufacturing Tracker',
     icon: path.join(app.getAppPath(), 'dist', 'icon.png'),
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: false,
@@ -67,6 +67,7 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
+    // Use app.getAppPath() for reliable path in packaged app
     const indexPath = path.join(app.getAppPath(), 'dist', 'index.html');
     mainWindow.loadFile(indexPath).catch(() => {
       mainWindow?.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
@@ -78,8 +79,8 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDesc) => {
-    console.error('Page failed to load:', errorCode, errorDesc);
+  mainWindow.webContents.on('did-fail-load', (_event, code, desc) => {
+    console.error('Page failed to load:', code, desc);
   });
 
   mainWindow.on('closed', () => { mainWindow = null; });
@@ -92,7 +93,6 @@ Menu.setApplicationMenu(null);
 app.whenReady().then(() => {
   createWindow();
   if (app.isPackaged) setupAutoUpdater();
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

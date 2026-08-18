@@ -2,7 +2,7 @@
   "name": "pmw-tracker",
   "private": true,
   "main": "dist-electron/main.cjs",
-  "version": "1.0.52",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -13,11 +13,7 @@
     "cap:sync": "vite build && npx cap sync",
     "migrate:pins": "node migrate-remove-plaintext-pins.js",
     "clean": "rm -rf dist dist-electron",
-    "lint": "tsc --noEmit",
-    "electron:build-main": "esbuild electron/main.ts electron/preload.ts --bundle --platform=node --format=cjs --outdir=dist-electron --external:electron --external:electron-updater --external:path --external:fs --external:url",
-    "electron:dist": "cross-env BUILD_TARGET=electron npm run build && npm run electron:build-main && electron-builder --win --publish never",
-    "electron:release": "cross-env BUILD_TARGET=electron npm run build && npm run electron:build-main && electron-builder --win --publish always",
-    "electron:dev": "npm run build && npm run electron:build-main && electron ."
+    "lint": "tsc --noEmit"
   },
   "build": {
     "appId": "com.pmw.tracker",
@@ -85,7 +81,6 @@
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3",
-    "cross-env": "^7.0.3"
+    "vite": "^6.2.3"
   }
 }
