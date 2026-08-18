@@ -1,23 +1,24 @@
 {
   "name": "pmw-tracker",
   "private": true,
-  "main": "dist-electron/main.cjs",
-  "version": "1.0.0",
+  "main": "dist-electron/main.js",
+  "version": "1.0.53",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
-    "build:electron": "vite build && esbuild electron/main.ts --bundle --platform=node --format=cjs --outfile=dist-electron/main.cjs --external:electron && esbuild electron/preload.ts --bundle --platform=node --format=cjs --outfile=dist-electron/preload.cjs --external:electron",
+    "build:electron": "vite build && esbuild electron/main.ts --bundle --platform=node --format=esm --outfile=dist-electron/main.js --external:electron --external:electron-updater && esbuild electron/preload.ts --bundle --platform=node --format=cjs --outfile=dist-electron/preload.cjs --external:electron",
     "dist:electron": "npm run build:electron && electron-builder",
     "cap:sync": "vite build && npx cap sync",
     "migrate:pins": "node migrate-remove-plaintext-pins.js",
-    "clean": "rm -rf dist dist-electron",
+    "clean": "rm -rf dist dist-electron release",
     "lint": "tsc --noEmit"
   },
   "build": {
     "appId": "com.pmw.tracker",
     "productName": "PMW Manufacturing Tracker",
+    "asar": true,
     "directories": {
       "output": "release"
     },
@@ -30,6 +31,10 @@
         "nsis"
       ]
     },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
     "mac": {
       "target": [
         "dmg"
@@ -41,8 +46,7 @@
         "AppImage"
       ],
       "category": "Office"
-    },
-    "asar": false
+    }
   },
   "dependencies": {
     "@capacitor/core": "^8.5.0",

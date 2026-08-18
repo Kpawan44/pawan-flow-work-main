@@ -19,8 +19,6 @@ export interface UserProfile {
   empId?: string; // Employee ID e.g. EMP-101
   name: string;
   email: string;
-  pin?: string; // Deprecated plaintext PIN for backward compatibility during migration
-  pinHash?: string; // Bcrypt hashed PIN
   phone?: string;
   department: Department | 'Admin' | 'Management';
   allowedDepartments?: (Department | 'Admin' | 'Management')[]; // Additional departments user is authorized to access
@@ -167,6 +165,9 @@ export interface JobCard {
   createdBy: string; // user name/id
   createdAt: string;
   completed: boolean;
+  version?: number;
+  updatedAt?: string;
+  updatedBy?: string;
   priority?: 'Low' | 'Medium' | 'High' | 'Urgent';
   isHold?: boolean;
   isCancelled?: boolean;

@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import bcrypt from 'bcryptjs';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Factory, 
@@ -48,7 +47,7 @@ import {
   Info,
   RotateCcw
 } from 'lucide-react';
-import { DBService, auth } from './lib/firebase';
+import { DBService, auth, signInWithCustomToken, signInAnonymously, signOut, onAuthStateChanged } from './lib/firebase';
 import { runDailyAutoBackupIfNeeded } from './lib/backup';
 import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SyncQueueItem } from './types';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
@@ -342,7 +341,6 @@ export default function App() {
   const [sheetsModalTab, setSheetsModalTab] = useState<'cloud' | 'offline'>('cloud');
   const [sheetsFeedback, setSheetsFeedback] = useState('');
   const [showSheetsInspector, setShowSheetsInspector] = useState(false);
-  const [showEmulatedSheetsBtn, setShowEmulatedSheetsBtn] = useState(true);
   
   // --- MODALS AND DRILLS ---
   const [selectedJob, setSelectedJob] = useState<JobCard | null>(null);
@@ -536,11 +534,6 @@ export default function App() {
     try {
       const u = await DBService.getUsers();
       setUsers(u);
-      const savedUserUid = sessionStorage.getItem('mfr_active_user_uid');
-      if (savedUserUid && !currentUser) {
-        const found = u.find(user => user.userId === savedUserUid);
-        if (found) setCurrentUser(found);
-      }
     } catch (err) {
       console.error("Failed to refresh users", err);
     }
@@ -632,13 +625,6 @@ export default function App() {
         return freshJob || prev;
       });
 
-      // Handle user state persistence or automatic demo login if logged in previously
-      const savedUserUid = sessionStorage.getItem('mfr_active_user_uid');
-      if (savedUserUid && !currentUser) {
-        const found = u.find(user => user.userId === savedUserUid);
-        if (found) setCurrentUser(found);
-      }
-
       // Deep link support for tracking QR Code clicks
       const urlParams = new URLSearchParams(window.location.search);
       const queryJobCardNo = urlParams.get('jobCardNo');
@@ -656,7 +642,54 @@ export default function App() {
     }
   };
 
+  // Authentication state listener & initial users directory for login screen
   useEffect(() => {
+    refreshUsers();
+
+    let unsubAuth = () => {};
+    if (auth) {
+      unsubAuth = onAuthStateChanged(auth, async (firebaseUser) => {
+        if (firebaseUser) {
+          try {
+            const userProfile = await DBService.getUserProfile(firebaseUser.uid);
+            if (userProfile) {
+              if (userProfile.active === false) {
+                // Inactive user, enforce logout
+                if (auth) await signOut(auth);
+                setCurrentUser(null);
+                sessionStorage.removeItem('mfr_active_user_uid');
+                setAuthError('Your account has been deactivated. Please contact an administrator.');
+              } else {
+                setCurrentUser(userProfile);
+                sessionStorage.setItem('mfr_active_user_uid', userProfile.userId);
+              }
+            } else {
+              // User document deleted or not found
+              if (auth) await signOut(auth);
+              setCurrentUser(null);
+              sessionStorage.removeItem('mfr_active_user_uid');
+              setAuthError('User profile record not found. Please contact an administrator.');
+            }
+          } catch (err) {
+            console.error("Auth state synchronization error:", err);
+          }
+        } else {
+          // Unauthenticated or signed out
+          setCurrentUser(null);
+          sessionStorage.removeItem('mfr_active_user_uid');
+        }
+      });
+    }
+
+    return () => {
+      unsubAuth();
+    };
+  }, []);
+
+  // When authenticated, load all operational datasets and attach real-time listeners
+  useEffect(() => {
+    if (!currentUser) return;
+
     refreshAllStates();
 
     // Trigger daily automated backup if day has changed
@@ -697,7 +730,7 @@ export default function App() {
       unsubMoves();
       unsubAudits();
     };
-  }, []);
+  }, [currentUser?.userId]);
 
   useEffect(() => {
     if (!autoRefreshEnabled) return;
@@ -895,11 +928,10 @@ export default function App() {
       let pinVerified = false;
 
       if (matchedUser.pinHash) {
-        // Verify PIN directly against bcrypt hash in the browser
-        // This works on web, Android (Capacitor), and Electron — no server needed
+        // Client-side bcrypt — works on web, Android, and Electron without a server
         pinVerified = await bcrypt.compare(pinToMatch, matchedUser.pinHash);
       } else {
-        // No hash yet — try server-side upgrade (Electron/local dev only)
+        // No hash yet — try server upgrade (Electron/local dev only)
         try {
           const response = await fetch(`/api/users/${encodeURIComponent(matchedUser.userId)}/verify-pin`, {
             method: 'POST',
@@ -915,7 +947,6 @@ export default function App() {
             }
           }
         } catch {
-          // Server not reachable (web/Android) — cannot verify without hash
           pinVerified = false;
         }
       }
@@ -927,7 +958,6 @@ export default function App() {
         return;
       }
 
-      // Login successful
       setCurrentUser({ ...matchedUser });
       sessionStorage.setItem('mfr_active_user_uid', matchedUser.userId);
       setLoginName('');
@@ -972,13 +1002,12 @@ export default function App() {
     }
 
     const newUserId = `u-${Date.now()}`;
-    const isSuper = trimmedName.toLowerCase() === 'pawan kumar';
     const newProfile: UserProfile = {
       userId: newUserId,
       name: trimmedName,
       email: `${trimmedName.toLowerCase().replace(/\s+/g, '')}@factory.com`,
       department: 'Admin',
-      role: isSuper ? 'super_admin' : 'admin',
+      role: 'admin',
       active: true,
       createdAt: new Date().toISOString()
     };
@@ -1010,25 +1039,33 @@ export default function App() {
 
   const handleDemoQuickLogin = (user: UserProfile) => {
     setLoginName(user.name);
-    setCurrentUser(user);
-    sessionStorage.setItem('mfr_active_user_uid', user.userId);
-    DBService.logAction(user.userId, user.name, 'USER_LOGIN', `Logged in via quick demo selector.`);
+    setLoginPin('');
+    setAuthError('');
+    showToast(`Selected user ${user.name}. Please enter 4-digit PIN to authenticate.`, "info");
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     if (currentUser) {
       DBService.logAction(currentUser.userId, currentUser.name, 'USER_LOGOUT', 'Logged out of terminal');
     }
     setCurrentUser(null);
     sessionStorage.removeItem('mfr_active_user_uid');
+    if (auth) {
+      try {
+        await signOut(auth);
+      } catch (e) {
+        console.warn("Firebase sign out error:", e);
+      }
+    }
   };
 
   const handleSwitchUserSimulated = (userId: string) => {
     const found = users.find(u => u.userId === userId);
     if (found) {
-      setCurrentUser(found);
-      sessionStorage.setItem('mfr_active_user_uid', found.userId);
-      DBService.logAction(found.userId, found.name, 'SWITCH_ROLE', `Simulated operation shift switched department to ${found.department}`);
+      handleLogout();
+      setLoginName(found.name);
+      setLoginPin('');
+      showToast(`Switched account to ${found.name}. Please verify PIN to log in.`, "info");
     }
   };
 
@@ -1371,39 +1408,12 @@ export default function App() {
   };
 
   // --- GOOGLE WORKSPACE ACTION HANDLERS ---
-  const handleConnectEmulatedSheets = async () => {
-    setSheetsFeedback('Initializing "Factory Material Flow Ledger" Simulation...');
-    try {
-      const token = 'dev-simulated-token-99933211-' + Math.random().toString(36).substring(7);
-      setGoogleAccessToken(token);
-      
-      const id = await initializeSpreadsheet();
-      const details = getSpreadsheetDetails();
-      setSheetsDetails(details);
-      setIsSheetsActive(true);
-      setSheetsFeedback('');
-      setShowSheetsModal(false);
-      setShowEmulatedSheetsBtn(false);
-      
-      await DBService.logAction(
-        currentUser?.userId || 'unknown',
-        currentUser?.name || 'unknown',
-        'CONNECT_GOOGLE_SHEETS',
-        `Linked Google Spreadsheet "${details.name}" in high-fidelity sandbox simulation mode.`
-      );
-    } catch (err: any) {
-      console.error(err);
-      setSheetsFeedback('Failed to initialize emulated sheets: ' + err.message);
-    }
-  };
-
   const handleConnectGoogleSheets = async () => {
     setSheetsFeedback('Connecting to Google Account...');
-    setShowEmulatedSheetsBtn(false);
     
     // We use a clean Google OAuth 2.0 Implicit Grant popup flow.
     // This avoids Firebase auth/unauthorized-domain errors inside the dynamic preview iframe environment,
-    // and is 100% permanent and reliable.
+    // and is permanent and reliable.
     const clientId = '928410476586-eo7rm1vb9200d72d6u1dn9ubtdad58f8.apps.googleusercontent.com';
     const scopes = encodeURIComponent('https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file');
     const redirectUri = encodeURIComponent(window.location.origin + '/');
@@ -1438,7 +1448,6 @@ export default function App() {
         } catch (err: any) {
           console.error(err);
           setSheetsFeedback(err.message || String(err));
-          setShowEmulatedSheetsBtn(true);
         }
       }
     };
@@ -1449,7 +1458,6 @@ export default function App() {
     if (!popup) {
       window.removeEventListener('message', handleAuthMessage);
       setSheetsFeedback('Popup blocked. Please allow popups for this site to log in with Google.');
-      setShowEmulatedSheetsBtn(true);
     }
   };
 
@@ -1941,7 +1949,7 @@ export default function App() {
                     <Users className="absolute left-3 top-3 h-4 w-4 text-slate-450" />
                     <input
                       type="text"
-                      placeholder="e.g. Pawan Kumar"
+                      placeholder="e.g. Registered Name"
                       required
                       value={loginName}
                       onChange={e => setLoginName(e.target.value)}
@@ -2881,7 +2889,7 @@ export default function App() {
                                       try {
                                         await DBService.updateJobCard(j.jobCardNo, { 
                                           customRoutedToPlating: val !== null ? val : undefined 
-                                        }, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                        }, currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
                                         refreshAllStates();
                                       } catch (err) {
                                         console.error("Failed to update custom Routed Plating value", err);
@@ -2946,7 +2954,7 @@ export default function App() {
                                           `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible, and all related material transitions and notifications will be deleted!`,
                                           async () => {
                                             try {
-                                              await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                              await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
                                               showToast(`Job Card ${j.jobCardNo} has been deleted successfully.`, "success");
                                               refreshAllStates();
                                             } catch (err: any) {
@@ -3315,7 +3323,7 @@ export default function App() {
                                     `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible, and all related material transitions and notifications will be deleted!`,
                                     async () => {
                                       try {
-                                        await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                        await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
                                         showToast(`Job Card ${j.jobCardNo} has been deleted successfully.`, "success");
                                         refreshAllStates();
                                       } catch (err: any) {
@@ -4003,18 +4011,8 @@ export default function App() {
                     <FileSpreadsheet className="h-4 w-4" />
                     <span>Link via Google Account</span>
                   </button>
-                  {showEmulatedSheetsBtn && (
-                    <button
-                      onClick={handleConnectEmulatedSheets}
-                      className="w-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 font-bold py-2 px-4 rounded-lg flex items-center justify-center gap-2 shadow-sm transition uppercase tracking-wider text-[11px] font-mono cursor-pointer border border-slate-200 dark:border-slate-700 animate-pulse"
-                      id="btn_emulate_sheets"
-                    >
-                      <Layers className="h-4 w-4 text-[#107C41]" />
-                      <span>Use Sandbox Emulation Fallback</span>
-                    </button>
-                  )}
                   <p className="text-[9.5px] text-center text-slate-450 font-light pt-1">
-                    Secure OAuth token integration. Google Sheets permission is sandbox restricted to spreadsheets created by this app.
+                    Secure OAuth token integration. Google Sheets permission is restricted to spreadsheets created by this app.
                   </p>
                 </div>
               </div>

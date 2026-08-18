@@ -2,119 +2,196 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    function isSignedIn() {
+    // Helper functions for User Identity & RBAC
+    function isAuthenticated() {
       return request.auth != null;
     }
 
-    function isValidUserProfile(data) {
-      return data.keys().hasAll(['userId', 'name', 'email', 'department', 'role', 'active', 'createdAt'])
-        && data.userId is string && data.name is string && data.name.size() > 0
-        && data.email is string && data.department is string
-        && data.role is string && data.active is bool;
+    function getUserDoc(uid) {
+      return get(/databases/$(database)/documents/mfr_users/$(uid)).data;
     }
 
-    function isValidJobCard(data) {
-      return data.keys().hasAll([
-          'jobCardNo', 'orderNo', 'partyName', 'itemName', 'itemCode',
-          'orderQty', 'currentQty', 'balanceQty', 'currentDepartment',
-          'status', 'heatTreatmentRequired', 'createdBy', 'createdAt', 'completed'
-        ])
-        && data.jobCardNo is string && data.orderNo is string
-        && data.partyName is string && data.itemName is string
-        && data.orderQty is number && data.currentQty is number
-        && data.balanceQty is number && data.currentDepartment is string
-        && data.status is string && data.heatTreatmentRequired is bool
-        && data.createdBy is string && data.completed is bool;
+    function hasUserDoc(uid) {
+      return exists(/databases/$(database)/documents/mfr_users/$(uid));
     }
 
-    function isValidMaterialMovement(data) {
-      return data.keys().hasAll([
-          'movementId', 'jobCardNo', 'fromDepartment', 'toDepartment',
-          'quantity', 'transferBy', 'transferDate', 'accepted'
-        ])
-        && data.movementId is string && data.jobCardNo is string
-        && data.fromDepartment is string && data.toDepartment is string
-        && data.quantity is number && data.transferBy is string && data.accepted is bool;
+    // A valid user MUST be authenticated, have a physical mfr_users/{uid} document, and be active == true
+    // Missing user document or inactive user = STRICT DENIAL
+    function isActiveUser() {
+      return isAuthenticated() && hasUserDoc(request.auth.uid) && getUserDoc(request.auth.uid).active == true;
     }
 
-    function isValidAppNotification(data) {
-      return data.keys().hasAll(['notificationId', 'userId', 'title', 'message', 'read', 'createdAt'])
-        && data.notificationId is string && data.userId is string
-        && data.title is string && data.message is string && data.read is bool;
+    function getUserRole() {
+      return hasUserDoc(request.auth.uid) ? getUserDoc(request.auth.uid).role : '';
     }
 
+    function isSuperAdmin() {
+      return isActiveUser() && getUserRole() == 'super_admin';
+    }
+
+    function isAdmin() {
+      return isActiveUser() && (
+        getUserRole() == 'admin' || 
+        getUserRole() == 'super_admin'
+      );
+    }
+
+    function isManager() {
+      return isActiveUser() && (
+        getUserRole() == 'manager' || 
+        getUserRole() == 'admin' || 
+        getUserRole() == 'super_admin'
+      );
+    }
+
+    function getUserDepartment() {
+      return hasUserDoc(request.auth.uid) ? getUserDoc(request.auth.uid).department : '';
+    }
+
+    // Audit logs strictly require request.auth.uid as the authoritative actor identity
     function isValidAuditLog(data) {
-      return data.keys().hasAll(['id', 'timestamp', 'userId', 'userName', 'action', 'details'])
-        && data.id is string && data.userId is string
-        && data.userName is string && data.action is string && data.details is string;
+      return data.keys().hasAll(['id', 'timestamp', 'userId', 'userName', 'action', 'details']) &&
+             data.id is string &&
+             data.userId is string &&
+             data.userName is string &&
+             data.action is string &&
+             data.details is string &&
+             data.userId == request.auth.uid;
     }
 
-    function isValidCompanyConfig(data) {
-      return data.keys().hasAll(['companyName', 'details'])
-        && data.companyName is string && data.details is string;
+    // Connection test document
+    match /test/{docId} {
+      allow read, write: if isAuthenticated();
     }
 
-    function isValidOutsourceOrder(data) {
-      return data.keys().hasAll([
-          'orderId', 'partyName', 'itemName', 'orderQty', 'unit',
-          'processType', 'outsourceMaterialType', 'orderedByUserId',
-          'orderedByUserName', 'orderedAt', 'assignedToUserId',
-          'assignedToUserName', 'status'
-        ])
-        && data.orderId is string && data.partyName is string
-        && data.itemName is string && data.orderQty is number
-        && data.orderedByUserId is string && data.status is string;
+    // Collection: User Credentials (Server-authoritative PIN hashes)
+    // Client SDK MUST NEVER read or write credentials
+    match /mfr_user_credentials/{uid} {
+      allow read, write: if false;
     }
 
+    // Collection: User Profiles (mfr_users)
+    // Client cannot self-promote to super_admin or admin; normal users cannot change role, department, active, or pinHash
     match /mfr_users/{userId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidUserProfile(request.resource.data);
-      allow update, delete: if isSignedIn();
+      allow get, list: if isAuthenticated();
+      
+      // Only Super Admin can create super_admin; Admins can create staff; pinHash cannot be written from client rules
+      allow create: if (isSuperAdmin() || (
+        isAdmin() && 
+        request.resource.data.role != 'super_admin'
+      )) && !request.resource.data.keys().hasAny(['pinHash', 'pin', 'password']);
+
+      // Normal users cannot modify role, department, active, or pinHash
+      allow update: if ((
+        isSuperAdmin()
+      ) || (
+        isAdmin() && 
+        resource.data.role != 'super_admin' && 
+        request.resource.data.role != 'super_admin'
+      ) || (
+        isActiveUser() &&
+        request.auth.uid == userId &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.department == resource.data.department &&
+        request.resource.data.active == resource.data.active
+      )) && !request.resource.data.keys().hasAny(['pinHash', 'pin', 'password']);
+
+      // Only super_admin can delete user profiles
+      allow delete: if isSuperAdmin();
     }
 
+    // Collection: Manufacturing Job Cards
+    // Protected against arbitrary modification of immutable fields (jobCardNo, createdAt, createdBy, orderQty)
     match /mfr_job_cards/{jobCardNo} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidJobCard(request.resource.data);
-      allow update, delete: if isSignedIn();
+      allow read: if isActiveUser();
+      
+      allow create: if isActiveUser() && 
+                    request.resource.data.keys().hasAll(['jobCardNo', 'itemName', 'orderQty', 'status']) &&
+                    request.resource.data.orderQty > 0;
+
+      allow update: if isActiveUser() && (
+        isAdmin() || (
+          request.resource.data.jobCardNo == resource.data.jobCardNo &&
+          request.resource.data.createdAt == resource.data.createdAt &&
+          request.resource.data.createdBy == resource.data.createdBy &&
+          request.resource.data.orderQty == resource.data.orderQty
+        )
+      );
+
+      allow delete: if isSuperAdmin();
     }
 
+    // Collection: Material Movements (Physical Ledger)
+    // Strictly requires positive quantities and movement metadata; immutable fields cannot be changed on update
     match /mfr_movements/{movementId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidMaterialMovement(request.resource.data);
-      allow update, delete: if isSignedIn();
+      allow read: if isActiveUser();
+      
+      allow create: if isActiveUser() && 
+                    request.resource.data.quantity > 0 && 
+                    request.resource.data.keys().hasAll(['movementId', 'jobCardNo', 'fromDepartment', 'toDepartment', 'quantity', 'transferDate']);
+
+      allow update: if isActiveUser() && (
+        isAdmin() || (
+          request.resource.data.movementId == resource.data.movementId &&
+          request.resource.data.jobCardNo == resource.data.jobCardNo &&
+          request.resource.data.fromDepartment == resource.data.fromDepartment &&
+          request.resource.data.toDepartment == resource.data.toDepartment &&
+          request.resource.data.quantity == resource.data.quantity &&
+          request.resource.data.transferDate == resource.data.transferDate &&
+          request.resource.data.initiatedByUserId == resource.data.initiatedByUserId &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'accepted', 'acceptedBy', 'acceptedDate', 'acceptedByUserId', 'remarks', 
+            'allottedLocation', 'rackNo', 'issueStatus', 'modifiedByUserId', 'modifiedByUserName', 
+            'modifiedDate', 'modifiedAction', 'deletedDate', 'deletedByUserId', 'deletedByUserName'
+          ])
+        )
+      );
+
+      allow delete: if isSuperAdmin();
     }
 
-    match /mfr_notifications/{notificationId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidAppNotification(request.resource.data);
-      allow update, delete: if isSignedIn();
+    // Collection: Idempotency Keys (Deduplication store)
+    // Client cannot create arbitrary keys to manipulate workflows; backend Admin SDK manages idempotency records
+    match /mfr_idempotency_keys/{keyId} {
+      allow read: if isActiveUser();
+      allow write: if false;
     }
 
+    // Collection: Audit Logs (Immutable write-once audit trails)
+    // Strictly append-only: Updates and Deletions are forbidden; Authoritative actor must match request.auth.uid
     match /mfr_audit_logs/{logId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidAuditLog(request.resource.data);
+      allow read: if isActiveUser();
+      allow create: if isActiveUser() && isValidAuditLog(request.resource.data);
       allow update, delete: if false;
     }
 
+    // Collection: Application Notifications
+    match /mfr_notifications/{notificationId} {
+      allow read: if isActiveUser();
+      allow create: if isActiveUser();
+      allow update: if isActiveUser();
+      allow delete: if isAdmin() || isSuperAdmin();
+    }
+
+    // Collection: Company Configuration & Master Seeds
     match /mfr_company_config/{configId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidCompanyConfig(request.resource.data);
-      allow update, delete: if isSignedIn();
+      allow read: if isActiveUser();
+      allow write: if isAdmin() || isSuperAdmin();
     }
 
+    // Collection: Saved Items Autocomplete
     match /mfr_items/{itemId} {
-      allow read: if isSignedIn();
-      allow create, update, delete: if isSignedIn();
+      allow read: if isActiveUser();
+      allow create, update: if isActiveUser();
+      allow delete: if isAdmin() || isSuperAdmin();
     }
 
+    // Collection: Process Outsource Orders
     match /mfr_outsource_orders/{orderId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && isValidOutsourceOrder(request.resource.data);
-      allow update, delete: if isSignedIn();
+      allow read: if isActiveUser();
+      allow create: if isActiveUser() && request.resource.data.orderQty > 0;
+      allow update: if isActiveUser();
+      allow delete: if isAdmin() || isSuperAdmin();
     }
   }
 }

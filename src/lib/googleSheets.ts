@@ -5,16 +5,8 @@ let spreadsheetId: string | null = localStorage.getItem('mfr_sheets_spreadsheet_
 let spreadsheetUrl: string | null = localStorage.getItem('mfr_sheets_spreadsheet_url');
 let spreadsheetName: string | null = localStorage.getItem('mfr_sheets_spreadsheet_name') || 'Factory Material Flow Ledger';
 
-// Auto-restore simulated session for smooth user experience if it was emulated
-if (spreadsheetId && spreadsheetId.includes('emulated') && !cachedToken) {
-  cachedToken = 'dev-simulated-token-restored';
-}
-
 export function setGoogleAccessToken(token: string | null) {
   cachedToken = token;
-  if (token && token.startsWith('dev-simulated-token') && spreadsheetId && spreadsheetId.includes('emulated')) {
-    // Keep aligned
-  }
 }
 
 export function getGoogleAccessToken(): string | null {
@@ -48,31 +40,6 @@ async function sheetsFetch(url: string, options: RequestInit = {}) {
     throw new Error('Google Sheets OAuth token not active. Please connect Google Account.');
   }
 
-  // Support offline emulation for high-fidelity preview & automated checks
-  const isSimulated = token.startsWith('dev-simulated-') || 
-                      token.toLowerCase().includes('mock') || 
-                      token.toLowerCase().includes('simulated') ||
-                      token === 'placeholder-token';
-
-  if (isSimulated) {
-    console.log(`[Emulated Google Sheets API] Mocking request to: ${url}`);
-    if (url.includes('/drive/v3/files')) {
-      // Return empty file search so initialization creates a new spreadsheet
-      return { files: [] };
-    }
-    if (url.includes('/v4/spreadsheets') && options.method === 'POST') {
-      return {
-        spreadsheetId: 'emulated-spreadsheet-id-12345',
-        spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/emulated-spreadsheet-id-12345/edit'
-      };
-    }
-    return {
-      spreadsheetId: 'emulated-spreadsheet-id-12345',
-      updatedCells: 1,
-      updatedRows: 1
-    };
-  }
-
   const headers = {
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json',
@@ -94,19 +61,6 @@ async function sheetsFetch(url: string, options: RequestInit = {}) {
 export async function initializeSpreadsheet(): Promise<string> {
   if (!cachedToken) {
     throw new Error('Please sign in to Google to initialize.');
-  }
-
-  if (cachedToken.startsWith('dev-simulated-token')) {
-    spreadsheetId = 'emulated-spreadsheet-id-' + Math.random().toString(36).substring(7);
-    spreadsheetUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
-    localStorage.setItem('mfr_sheets_spreadsheet_id', spreadsheetId!);
-    localStorage.setItem('mfr_sheets_spreadsheet_url', spreadsheetUrl!);
-    localStorage.setItem('mfr_sheets_spreadsheet_name', spreadsheetName!);
-    
-    // Setup emulated rows with proper initial headers
-    const defaultData = getEmulatedSheetRows();
-    localStorage.setItem('mfr_sheets_emulated_rows', JSON.stringify(defaultData));
-    return spreadsheetId!;
   }
 
   try {
@@ -340,7 +294,7 @@ async function appendRow(range: string, rowValues: any[]) {
     console.warn('Failed to append to emulated storage:', err);
   }
 
-  if (!spreadsheetId || !cachedToken || cachedToken.startsWith('dev-simulated-token')) return; // Silent skip if not authenticated or connected or emulated
+  if (!spreadsheetId || !cachedToken) return; // Silent skip if not authenticated or connected
   
   try {
     const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED`;

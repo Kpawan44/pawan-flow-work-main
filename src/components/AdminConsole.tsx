@@ -276,7 +276,7 @@ export default function AdminConsole({
   const handleRestoreBackup = async (backup: DatabaseBackup) => {
     try {
       showToast("Restoring database from backup...", "info");
-      await DBService.restoreDatabaseDump(backup.data, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+      await DBService.restoreDatabaseDump(backup.data, currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
       showToast("Database successfully restored! Reloading system cache...", "success");
       if (onRefreshJobs) onRefreshJobs();
       if (onRefreshCompany) onRefreshCompany();
@@ -399,7 +399,7 @@ export default function AdminConsole({
       async () => {
         try {
           for (const jobCardNo of selectedJobNos) {
-            await DBService.deleteJobCard(jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+            await DBService.deleteJobCard(jobCardNo, currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
           }
           onLogAction('BULK_DELETE_JOBS', `Bulk deleted ${selectedJobNos.length} job cards: [${selectedJobNos.join(', ')}]`);
           setSelectedJobNos([]);
@@ -420,8 +420,8 @@ export default function AdminConsole({
       await DBService.bulkUpdateJobCardStatus(
         selectedJobNos,
         targetStatus,
-        currentUser?.userId || 'u-1',
-        currentUser?.name || 'Admin User'
+        currentUser?.userId || '',
+        currentUser?.name || 'Authorized Admin'
       );
       showToast(`Successfully updated status for ${selectedJobNos.length} job cards to '${targetStatus}'.`, 'success');
       setSelectedJobNos([]);
@@ -466,7 +466,7 @@ export default function AdminConsole({
       async () => {
         try {
           for (const logId of selectedAuditLogIds) {
-            await DBService.deleteAuditLog(logId, currentUser?.userId || 'u-1');
+            await DBService.deleteAuditLog(logId, currentUser?.userId || '');
           }
           onLogAction('BULK_DELETE_AUDIT_LOGS', `Bulk deleted ${selectedAuditLogIds.length} audit logs`);
           setSelectedAuditLogIds([]);
@@ -635,24 +635,6 @@ export default function AdminConsole({
     const allowedDepts = currentUser?.role === 'super_admin' ? newUserAllowedDepts : [];
     const newUserId = `u-${Math.floor(Math.random() * 9000) + 1000}`;
 
-    // Hash PIN on the backend via set-pin endpoint before persisting
-    let generatedPinHash: string | undefined = undefined;
-    try {
-      const res = await fetch(`/api/users/${encodeURIComponent(newUserId)}/set-pin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: generatedPin })
-      });
-      if (res.ok) {
-        const resData = await res.json();
-        if (resData.pinHash) {
-          generatedPinHash = resData.pinHash;
-        }
-      }
-    } catch (err) {
-      console.warn("Could not pre-hash PIN via API:", err);
-    }
-
     const newProfile: UserProfile = {
       userId: newUserId,
       name: newUserName,
@@ -663,11 +645,18 @@ export default function AdminConsole({
       role: newUserRole,
       active: true,
       canOutsource: newUserCanOutsource,
-      pinHash: generatedPinHash,
       createdAt: new Date().toISOString()
     };
 
-    onSaveUser(newProfile);
+    await onSaveUser(newProfile);
+
+    // Securely hash and store PIN on the server via Admin SDK
+    try {
+      await DBService.setUserPin(newUserId, generatedPin);
+    } catch (err: any) {
+      console.warn("Could not set PIN via API:", err);
+      showToast(err.message || "User created, but PIN configuration failed. Please set PIN.", 'error');
+    }
 
     onLogAction('CREATE_USER', `Created new user account '${newProfile.name}' for department ${newProfile.department} with role ${newUserRole}${newUserCanOutsource ? ' [Outsource Authorized]' : ''}${newProfile.allowedDepartments?.length ? ` [Multi-Dept Allowed: ${newProfile.allowedDepartments.join(', ')}]` : ''}`);
     
@@ -739,25 +728,10 @@ export default function AdminConsole({
     }
 
     try {
-      // Call backend API to bcrypt hash and store the PIN in Firestore
-      const res = await fetch(`/api/users/${encodeURIComponent(user.userId)}/set-pin`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: cleanPin })
-      });
+      // Call backend API to bcrypt hash and store the PIN in mfr_user_credentials
+      await DBService.setUserPin(user.userId, cleanPin);
 
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || 'Failed to update PIN on server');
-      }
-
-      const resData = await res.json().catch(() => ({}));
-
-      // Update local profile state with real bcrypt pinHash
-      const { pin: _removedPin, ...sanitizedUser } = user as any;
-      const updated: UserProfile = { ...sanitizedUser, pinHash: resData.pinHash || user.pinHash };
-      await onSaveUser(updated);
-      onLogAction('UPDATE_USER_PIN', `Updated security PIN code (bcrypt hashed) for user '${user.name}'`);
+      onLogAction('UPDATE_USER_PIN', `Updated security PIN code for user '${user.name}'`);
       showToast(`Successfully updated and secured PIN for ${user.name}.`, 'success');
       setEditingUserIdPin(null);
     } catch (err: any) {
@@ -798,12 +772,10 @@ export default function AdminConsole({
     }
 
     const name = u.name || '';
-    const pin = u.pin || '';
     const email = u.email || '';
     const dept = u.department || '';
     return (
       name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      pin.includes(searchTerm) ||
       email.toLowerCase().includes(searchTerm.toLowerCase()) ||
       dept.toLowerCase().includes(searchTerm.toLowerCase())
     );
@@ -1089,7 +1061,7 @@ export default function AdminConsole({
                   "Are you sure you want to PERMANENTLY ERASE all active and completed job cards, material movements, notifications, item catalog, and Raw Material Store inventory? This will wipe all application data completely clean! This step is completely irreversible.\n\nTo confirm, type DELETE ALL below:",
                   async () => {
                     try {
-                      await DBService.deleteAllJobCards(currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                      await DBService.deleteAllJobCards(currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
                       showToast("All application data including Raw Material Store wiped successfully.", "success");
                       if (onRefreshJobs) onRefreshJobs();
                     } catch (err: any) {
@@ -1122,7 +1094,7 @@ export default function AdminConsole({
       {showAddForm && activeSubTab === 'users' && isManager && (
         <form onSubmit={handleCreateUser} className="bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 space-y-4 max-w-xl transition-all">
           <h4 className="text-sm font-bold text-slate-800 dark:text-slate-200 font-sans uppercase">
-            Create Simulated User profile
+            Create User profile
           </h4>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
@@ -1130,7 +1102,7 @@ export default function AdminConsole({
               <label className="block text-slate-400 font-medium mb-1">Full Name</label>
               <input
                 type="text"
-                placeholder="Pawan Kumar"
+                placeholder="Full Name"
                 required
                 value={newUserName}
                 onChange={e => setNewUserName(e.target.value)}
@@ -1806,7 +1778,7 @@ export default function AdminConsole({
                               "Are you sure you want to permanently delete this audit log? This action is irreversible!",
                               async () => {
                                 try {
-                                  await DBService.deleteAuditLog(l.id, currentUser?.userId || 'u-1');
+                                  await DBService.deleteAuditLog(l.id, currentUser?.userId || '');
                                   showToast("Audit log successfully deleted.", "success");
                                   setSelectedAuditLogIds(prev => prev.filter(id => id !== l.id));
                                   if (onRefreshJobs) onRefreshJobs();
@@ -1870,7 +1842,7 @@ export default function AdminConsole({
                             "Are you sure you want to permanently delete this audit log? This action is irreversible!",
                             async () => {
                               try {
-                                await DBService.deleteAuditLog(l.id, currentUser?.userId || 'u-1');
+                                await DBService.deleteAuditLog(l.id, currentUser?.userId || '');
                                 showToast("Audit log successfully deleted.", "success");
                                 setSelectedAuditLogIds(prev => prev.filter(id => id !== l.id));
                                 if (onRefreshJobs) onRefreshJobs();
@@ -2027,10 +1999,10 @@ export default function AdminConsole({
                         companyName: companyConfig?.companyName || 'Precision Metal Works',
                         details: companyConfig?.details || 'Specialists in high-tensile fasteners, engine components, and industrial finishes.',
                         requireRawMaterialForProduction: newValue,
-                        updatedBy: currentUser?.name || 'Pawan Kumar',
+                        updatedBy: currentUser?.name || 'Administrator',
                         updatedAt: new Date().toISOString()
                       };
-                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || '', currentUser?.name || 'Administrator');
                       showToast(`Raw Material requirement for production ${newValue ? 'ENABLED (Compulsory)' : 'DISABLED (Optional)'}!`, "success");
                       if (onRefreshCompany) onRefreshCompany();
                     } catch (err) {
@@ -2085,10 +2057,10 @@ export default function AdminConsole({
                         companyName: companyConfig?.companyName || 'Precision Metal Works',
                         details: companyConfig?.details || 'Specialists in high-tensile fasteners, engine components, and industrial finishes.',
                         customerItemFilterEnabled: newValue,
-                        updatedBy: currentUser?.name || 'Pawan Kumar',
+                        updatedBy: currentUser?.name || 'Administrator',
                         updatedAt: new Date().toISOString()
                       };
-                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || '', currentUser?.name || 'Administrator');
                       showToast(`Customer Item Filtering feature ${newValue ? 'ENABLED' : 'DISABLED'}!`, "success");
                       if (onRefreshCompany) onRefreshCompany();
                     } catch (err) {
@@ -2152,10 +2124,10 @@ export default function AdminConsole({
                         companyName: companyConfig?.companyName || 'Precision Metal Works',
                         details: companyConfig?.details || 'Specialists in high-tensile fasteners, engine components, and industrial finishes.',
                         whatsappEnabled: newValue,
-                        updatedBy: currentUser?.name || 'Pawan Kumar',
+                        updatedBy: currentUser?.name || 'Administrator',
                         updatedAt: new Date().toISOString()
                       };
-                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || '', currentUser?.name || 'Administrator');
                       showToast(`WhatsApp Movement Notifications feature ${newValue ? 'ENABLED' : 'DISABLED'}!`, "success");
                       if (onRefreshCompany) onRefreshCompany();
                     } catch (err) {
@@ -2190,7 +2162,7 @@ export default function AdminConsole({
                       onChange={async (e) => {
                         const val = e.target.value;
                         const updated = { ...companyConfig, companyName: companyConfig?.companyName || 'Precision Metal Works', details: companyConfig?.details || '', whatsappPhoneNumber: val };
-                        await DBService.saveCompanyConfig(updated, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                        await DBService.saveCompanyConfig(updated, currentUser?.userId || '', currentUser?.name || 'Administrator');
                         if (onRefreshCompany) onRefreshCompany();
                       }}
                       placeholder="e.g. +91 98765 43210 or WhatsApp Group Invite Link"
@@ -2207,7 +2179,7 @@ export default function AdminConsole({
                           requestedUnit: 'KGS',
                           fromDepartment: 'Production',
                           toDepartment: 'Heat Treatment',
-                          transferBy: currentUser?.name || 'Pawan Kumar',
+                          transferBy: currentUser?.name || 'Operator',
                           transferDate: new Date().toISOString()
                         }, {
                           jobCardNo: 'JC-1001',
@@ -2240,7 +2212,7 @@ export default function AdminConsole({
   requestedUnit: 'KGS',
   fromDepartment: 'Production',
   toDepartment: 'Heat Treatment',
-  transferBy: currentUser?.name || 'Pawan Kumar',
+  transferBy: currentUser?.name || 'Operator',
   transferDate: new Date().toISOString()
 }, {
   jobCardNo: 'JC-1001',
@@ -2456,7 +2428,7 @@ export default function AdminConsole({
                     "Are you sure you want to trigger a FULL SYSTEM RESET? This will permanently wipe all active job cards, custom material movements, notifications, audit logs, and user profiles, restoring everything to the default demo seed state.\n\nTo confirm, type FACTORY RESET below:",
                     async () => {
                       try {
-                        await DBService.factoryReset(currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                        await DBService.factoryReset(currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
                         showToast("System factory reset completed successfully! Re-seeded initial default datasets.", "success");
                         if (onRefreshJobs) onRefreshJobs();
                       } catch (err: any) {
@@ -2662,7 +2634,7 @@ export default function AdminConsole({
                                       `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is irreversible, and all related material transitions and notifications will be deleted!`,
                                       async () => {
                                         try {
-                                          await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                          await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
                                           showToast(`Job Card ${j.jobCardNo} successfully removed.`, "success");
                                           if (onRefreshJobs) onRefreshJobs();
                                         } catch (err: any) {
@@ -2744,7 +2716,7 @@ export default function AdminConsole({
                                   `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is irreversible, and all related material transitions and notifications will be deleted!`,
                                   async () => {
                                     try {
-                                      await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                      await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
                                       showToast(`Job Card ${j.jobCardNo} successfully removed.`, "success");
                                       if (onRefreshJobs) onRefreshJobs();
                                     } catch (err: any) {
@@ -3446,10 +3418,10 @@ export default function AdminConsole({
                     try {
                       const updatedWithMeta = {
                         ...updated,
-                        updatedBy: currentUser?.name || 'Pawan Kumar',
+                        updatedBy: currentUser?.name || 'Authorized Admin',
                         updatedAt: new Date().toISOString()
                       };
-                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                      await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
                       showToast("Corporate Works Profile successfully synchronized to the secure cloud ledger!", "success");
                       if (onRefreshCompany) onRefreshCompany();
                     } catch (err) {

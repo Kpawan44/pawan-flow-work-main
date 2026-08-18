@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, signInWithPopup, GoogleAuthProvider, signInAnonymously } from 'firebase/auth';
+import { getAuth, signInWithCustomToken, signInAnonymously, signOut, onAuthStateChanged, GoogleAuthProvider } from 'firebase/auth';
 import { 
   getFirestore, 
   initializeFirestore,
@@ -17,7 +17,8 @@ import {
   query, 
   where, 
   orderBy, 
-  limit 
+  limit,
+  runTransaction
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder } from '../types';
@@ -28,7 +29,10 @@ import {
   logActionToSheets 
 } from './googleSheets';
 
-// Let's check if the configuration consists of placeholders
+// Directly use configuration from firebase-applet-config.json
+export { firebaseConfig };
+
+// Check if the configuration consists of placeholders
 const isPlaceholder = 
   !firebaseConfig || 
   !firebaseConfig.apiKey ||
@@ -103,13 +107,14 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     setFirestoreOffline(true);
   }
 
+  const currentAuthUser = authInstance?.currentUser;
   const errInfo: FirestoreErrorInfo = {
     error: errorMessage,
     authInfo: {
-      userId: isPlaceholder ? 'mock-user' : getAuth().currentUser?.uid,
-      email: isPlaceholder ? 'pawan.kummar16@gmail.com' : getAuth().currentUser?.email,
-      emailVerified: true,
-      isAnonymous: false,
+      userId: isPlaceholder ? 'mock-user' : (currentAuthUser?.uid || null),
+      email: isPlaceholder ? 'offline@terminal.local' : (currentAuthUser?.email || null),
+      emailVerified: currentAuthUser?.emailVerified ?? true,
+      isAnonymous: currentAuthUser?.isAnonymous ?? false,
     },
     operationType,
     path
@@ -148,18 +153,22 @@ let useRealFirebase = false;
 if (!isPlaceholder) {
   try {
     const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    const dbId = (firebaseConfig as any).firestoreDatabaseId;
+    const databaseId = (firebaseConfig as any).firestoreDatabaseId;
     
-    // Standard Firestore initialization matching official Skill guidelines
-    dbInstance = getFirestore(app, dbId);
+    // Standard Firestore initialization matching official Firebase SDK guidelines
+    try {
+      dbInstance = initializeFirestore(app, {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager()
+        })
+      }, databaseId);
+    } catch {
+      dbInstance = getFirestore(app, databaseId);
+    }
+
     authInstance = getAuth(app);
     useRealFirebase = true;
-    console.log(`Real Firebase and Firestore initialized successfully for database: ${dbId}!`);
-
-    // Ensure client holds a real Firebase Auth token for Firestore security rules (isSignedIn())
-    signInAnonymously(authInstance).catch((authErr) => {
-      console.warn("Anonymous Firebase auth sign-in warning:", authErr);
-    });
+    console.log(`Real Firebase and Firestore initialized successfully for database: ${databaseId || '(default)'}!`);
 
     // Test connection asynchronously in background per guidelines
     getDocFromServer(doc(dbInstance, 'test', 'connection'))
@@ -179,7 +188,7 @@ if (!isPlaceholder) {
   console.log("Starting app in HIGH-FIDELITY LOCAL STORAGE EMULATION mode (Real Firebase disabled).");
 }
 
-export { useRealFirebase };
+export { useRealFirebase, signInWithCustomToken, signInAnonymously, signOut, onAuthStateChanged };
 export const db = dbInstance;
 export const auth = authInstance;
 
@@ -187,89 +196,8 @@ export const auth = authInstance;
 // MOCK STATE AND REALTIME STREAM DATABASE
 // ============================================
 
-// Standard initial seed data for demonstration
-const defaultUsers: UserProfile[] = [
-  {
-    userId: 'u-1',
-    name: 'Pawan Kumar',
-    email: 'pawan.kummar16@gmail.com',
-    pinHash: '$2b$10$1k7Yh.oyJW5PYSDU4bijMOMA17N4ZMhO2nLdp2rF4XuzL63r2/l2S',
-    department: 'Admin',
-    role: 'super_admin',
-    active: true,
-    createdAt: new Date().toISOString()
-  },
-  {
-    userId: 'u-2',
-    name: 'Alice Dispatcher',
-    email: 'dispatch@factory.com',
-    pinHash: '$2b$10$kYvHQjBl8XMVQ92P9vwKjujDBLPkRkBWR4qTMgwtfD2UV5m/XKkh6',
-    department: 'Dispatch',
-    role: 'admin',
-    active: true,
-    createdAt: new Date().toISOString()
-  },
-  {
-    userId: 'u-3',
-    name: 'Bob Production',
-    email: 'production@factory.com',
-    pinHash: '$2b$10$Oex2jyr3ZpyMV5b6jPT/eeweMxO1/ZofU6SAFsJCQG6I1cQ0E9qh.',
-    department: 'Production',
-    role: 'admin',
-    active: true,
-    createdAt: new Date().toISOString()
-  },
-  {
-    userId: 'u-4',
-    name: 'Charlie HeatTreat',
-    email: 'heattreat@factory.com',
-    pinHash: '$2b$10$K82gVSWzep.ok.YB1O1Yg.fAfC2bXYEf5iztQmuEYyVfBHd8xesQW',
-    department: 'Heat Treatment',
-    role: 'staff',
-    active: true,
-    createdAt: new Date().toISOString()
-  },
-  {
-    userId: 'u-5',
-    name: 'David Plater',
-    email: 'plating@factory.com',
-    pinHash: '$2b$10$6RzD6FETze08JWKGAOP7s.6qMa4jXPYgfbjqqOGsj0VDqK6JIMyAS',
-    department: 'Plating',
-    role: 'staff',
-    active: true,
-    createdAt: new Date().toISOString()
-  },
-  {
-    userId: 'u-6',
-    name: 'Emma Packer',
-    email: 'packing@factory.com',
-    pinHash: '$2b$10$OUgcrAUhPiZduLPfLyZmPutGL3mkrk5nJYY3jRkIutBl1NMoDoBpu',
-    department: 'Packing',
-    role: 'staff',
-    active: true,
-    createdAt: new Date().toISOString()
-  },
-  {
-    userId: 'u-7',
-    name: 'Frank Storekeeper',
-    email: 'store@factory.com',
-    pinHash: '$2b$10$TJDNdz2jiU2jW22WGpIZr.5IlQLVXHo4XNFkj3munl63vUBRTafE6',
-    department: 'Store',
-    role: 'staff',
-    active: true,
-    createdAt: new Date().toISOString()
-  },
-  {
-    userId: 'u-8',
-    name: 'George RawStore',
-    email: 'rawstore@factory.com',
-    pinHash: '$2b$10$CjOOWqikHSgM//ZNWC6VUe66BBJ0lPFSPkOgkrF0rrQruLr7pt3zC',
-    department: 'Raw Material Store',
-    role: 'staff',
-    active: true,
-    createdAt: new Date().toISOString()
-  }
-];
+// Empty initial user seed — user credentials and accounts are provisioned via authoritative authentication
+const defaultUsers: UserProfile[] = [];
 
 const defaultSavedItems: SavedItem[] = [
   {
@@ -311,7 +239,7 @@ const defaultJobCards: JobCard[] = [
     currentDepartment: 'Production',
     status: 'Pending',
     heatTreatmentRequired: true,
-    createdBy: 'Pawan Kumar',
+    createdBy: 'Dispatch Operator',
     createdAt: new Date(Date.now() - 3600000 * 24 * 3).toISOString(), // 3 days ago
     completed: false
   },
@@ -327,7 +255,7 @@ const defaultJobCards: JobCard[] = [
     currentDepartment: 'Heat Treatment',
     status: 'In Process',
     heatTreatmentRequired: true,
-    createdBy: 'Pawan Kumar',
+    createdBy: 'Production Supervisor',
     createdAt: new Date(Date.now() - 3600000 * 24 * 1.5).toISOString(),
     completed: false
   },
@@ -343,7 +271,7 @@ const defaultJobCards: JobCard[] = [
     currentDepartment: 'Completed',
     status: 'Completed',
     heatTreatmentRequired: false,
-    createdBy: 'Alice Dispatcher',
+    createdBy: 'Quality Inspector',
     createdAt: new Date(Date.now() - 3600000 * 24 * 5).toISOString(),
     completed: true,
     dispatchDetails: {
@@ -363,10 +291,10 @@ const defaultMovements: MaterialMovement[] = [
     fromDepartment: 'Dispatch',
     toDepartment: 'Production',
     quantity: 1200,
-    transferBy: 'Alice Dispatcher',
+    transferBy: 'Dispatch Operator',
     transferDate: new Date(Date.now() - 3600000 * 24 * 3.1).toISOString(),
     accepted: true,
-    acceptedBy: 'Bob Production',
+    acceptedBy: 'Production Supervisor',
     acceptedDate: new Date(Date.now() - 3600000 * 24 * 3.0).toISOString(),
     remarks: 'Initial raw material dispatch'
   },
@@ -376,10 +304,10 @@ const defaultMovements: MaterialMovement[] = [
     fromDepartment: 'Dispatch',
     toDepartment: 'Production',
     quantity: 500,
-    transferBy: 'Alice Dispatcher',
+    transferBy: 'Dispatch Operator',
     transferDate: new Date(Date.now() - 3600000 * 24 * 1.4).toISOString(),
     accepted: true,
-    acceptedBy: 'Bob Production',
+    acceptedBy: 'Production Supervisor',
     acceptedDate: new Date(Date.now() - 3600000 * 24 * 1.3).toISOString(),
     remarks: 'Dispatched raw material bars'
   },
@@ -389,10 +317,10 @@ const defaultMovements: MaterialMovement[] = [
     fromDepartment: 'Production',
     toDepartment: 'Heat Treatment',
     quantity: 450,
-    transferBy: 'Bob Production',
+    transferBy: 'Production Supervisor',
     transferDate: new Date(Date.now() - 3600000 * 24 * 1.1).toISOString(),
     accepted: true,
-    acceptedBy: 'Charlie HeatTreat',
+    acceptedBy: 'Heat Treatment Lead',
     acceptedDate: new Date(Date.now() - 3600000 * 24 * 1.0).toISOString(),
     remarks: 'Produced with 50 KG scrap loss due to edge trimming.',
     processDetails: {
@@ -403,116 +331,9 @@ const defaultMovements: MaterialMovement[] = [
 
 const defaultNotifications: AppNotification[] = [];
 
-const defaultAuditLogs: AuditLog[] = [
-  {
-    id: 'AL-1',
-    timestamp: new Date(Date.now() - 3600000 * 4).toISOString(),
-    userId: 'u-1',
-    userName: 'Pawan Kumar',
-    action: 'USER_LOGIN',
-    details: 'Logged into Admin Dashboard'
-  },
-  {
-    id: 'AL-2',
-    timestamp: new Date(Date.now() - 3600000 * 3).toISOString(),
-    userId: 'u-2',
-    userName: 'Alice Dispatcher',
-    action: 'CREATE_JOB_CARD',
-    details: 'Created Job Card JC-1001 with quantity 1200 KG'
-  }
-];
+const defaultAuditLogs: AuditLog[] = [];
 
-const defaultOutsourceOrders: OutsourceOrder[] = [
-  {
-    orderId: 'OUT-2026-001',
-    partyName: 'Global Heavy Industries',
-    itemName: 'Precision Plated Spacer Sleeve',
-    itemCode: 'MFR-LOAD-101',
-    orderQty: 800,
-    unit: 'PCS',
-    processType: 'External Heat Treatment',
-    outsourceMaterialType: 'Semi Finished Goods',
-    orderedByUserId: 'u-2',
-    orderedByUserName: 'Alice Dispatcher',
-    orderedAt: new Date(Date.now() - 3600000 * 48).toISOString(),
-    assignedToUserId: 'u-1',
-    assignedToUserName: 'Pawan Kumar',
-    status: 'Supplier PO Placed',
-    supplierName: 'Apex Vacuum Heat Treaters',
-    supplierPoNo: 'PO-OUT-9102',
-    supplierRate: 42.50,
-    poDate: new Date(Date.now() - 3600000 * 36).toISOString(),
-    estimatedDelivery: new Date(Date.now() - 3600000 * 24 * 3).toISOString().slice(0, 10), // 3 days ago -> OVERDUE
-    poRemarks: 'Vacuum hardening spec required. Overdue for delivery.',
-    dispatchRemarks: 'High priority external vacuum heat treatment required.'
-  },
-  {
-    orderId: 'OUT-2026-002',
-    partyName: 'Bharat Auto Components',
-    itemName: 'Hardened Transmission Flange',
-    itemCode: 'BAC-FLG-402',
-    orderQty: 350,
-    unit: 'KGS',
-    processType: 'Precision Plating & Coating',
-    outsourceMaterialType: 'Finished Goods',
-    orderedByUserId: 'u-2',
-    orderedByUserName: 'Alice Dispatcher',
-    orderedAt: new Date(Date.now() - 3600000 * 24).toISOString(),
-    assignedToUserId: 'u-1',
-    assignedToUserName: 'Pawan Kumar',
-    status: 'Supplier PO Placed',
-    supplierName: 'Supreme Zinc Platers Ltd',
-    supplierPoNo: 'PO-OUT-9105',
-    supplierRate: 65.00,
-    poDate: new Date(Date.now() - 3600000 * 18).toISOString(),
-    estimatedDelivery: new Date().toISOString().slice(0, 10), // Today!
-    poRemarks: 'Zinc-nickel anti-corrosion coating.',
-    dispatchRemarks: 'Deliver directly to finished goods store upon receipt.'
-  },
-  {
-    orderId: 'OUT-2026-003',
-    partyName: 'Mahindra Heavy Gear Corp',
-    itemName: 'CNC Threaded Pinion Shaft',
-    itemCode: 'MHG-PIN-088',
-    orderQty: 500,
-    unit: 'PCS',
-    processType: 'CNC Threading & Grinding',
-    outsourceMaterialType: 'Semi Finished Goods',
-    orderedByUserId: 'u-2',
-    orderedByUserName: 'Alice Dispatcher',
-    orderedAt: new Date(Date.now() - 3600000 * 72).toISOString(),
-    assignedToUserId: 'u-1',
-    assignedToUserName: 'Pawan Kumar',
-    status: 'Material Received',
-    supplierName: 'Micro-Turn CNC Works',
-    supplierPoNo: 'PO-OUT-9088',
-    supplierRate: 110.00,
-    poDate: new Date(Date.now() - 3600000 * 60).toISOString(),
-    estimatedDelivery: new Date(Date.now() - 3600000 * 12).toISOString().slice(0, 10),
-    receivedQty: 500,
-    receivedAt: new Date(Date.now() - 3600000 * 6).toISOString(),
-    receivedChallanNo: 'CH-9088-A',
-    receivedMaterialType: 'Semi Finished Goods',
-    receiptRemarks: '100% thread gauge verified. Passed quality control.'
-  },
-  {
-    orderId: 'OUT-2026-004',
-    partyName: 'Tata Precision Systems',
-    itemName: 'Cast Iron Braking Hub',
-    itemCode: 'TPS-HUB-109',
-    orderQty: 1200,
-    unit: 'KGS',
-    processType: 'Braking & Bending',
-    outsourceMaterialType: 'Semi Finished Goods',
-    orderedByUserId: 'u-2',
-    orderedByUserName: 'Alice Dispatcher',
-    orderedAt: new Date(Date.now() - 3600000 * 6).toISOString(),
-    assignedToUserId: 'u-1',
-    assignedToUserName: 'Pawan Kumar',
-    status: 'Assigned',
-    dispatchRemarks: 'Brake pressing required as per drawing rev 4.'
-  }
-];
+const defaultOutsourceOrders: OutsourceOrder[] = [];
 
 const defaultCompanyConfig: CompanyConfig = {
   companyName: 'Precision Metal Works',
@@ -564,7 +385,7 @@ export class DBService {
   }
 
   static async ensureSeeded(): Promise<void> {
-    if (!useRealFirebase || !db || this.isOfflineMode() || this.isSeededInSession) return;
+    if (!useRealFirebase || !db || this.isOfflineMode() || this.isSeededInSession || !auth?.currentUser) return;
     if (this.seedingPromise) return this.seedingPromise;
 
     this.seedingPromise = (async () => {
@@ -576,18 +397,9 @@ export class DBService {
           return;
         }
 
-        console.log("Database 'seeded' marker not found. Running one-time collection seeding...");
+        console.log("Database 'seeded' marker not found. Initializing operational collections...");
         
-        // 1. Users
-        const usersSnap = await getDocs(collection(db, 'mfr_users'));
-        if (usersSnap.empty) {
-          console.log("One-time seed: mfr_users");
-          for (const u of defaultUsers) {
-            await setDoc(doc(db, 'mfr_users', u.userId), u);
-          }
-        }
-
-        // 2. Job Cards
+        // 1. Job Cards
         const jobsSnap = await getDocs(collection(db, 'mfr_job_cards'));
         if (jobsSnap.empty) {
           console.log("One-time seed: mfr_job_cards");
@@ -596,7 +408,7 @@ export class DBService {
           }
         }
 
-        // 3. Movements
+        // 2. Movements
         const movementsSnap = await getDocs(collection(db, 'mfr_movements'));
         if (movementsSnap.empty) {
           console.log("One-time seed: mfr_movements");
@@ -605,7 +417,7 @@ export class DBService {
           }
         }
 
-        // 4. Notifications
+        // 3. Notifications
         const notificationsSnap = await getDocs(collection(db, 'mfr_notifications'));
         if (notificationsSnap.empty) {
           console.log("One-time seed: mfr_notifications");
@@ -614,7 +426,7 @@ export class DBService {
           }
         }
 
-        // 5. Audit logs
+        // 4. Audit logs
         const auditLogsSnap = await getDocs(collection(db, 'mfr_audit_logs'));
         if (auditLogsSnap.empty) {
           console.log("One-time seed: mfr_audit_logs");
@@ -623,7 +435,7 @@ export class DBService {
           }
         }
 
-        // 5.5. Saved Items
+        // 5. Saved Items
         const itemsSnap = await getDocs(collection(db, 'mfr_items'));
         if (itemsSnap.empty) {
           console.log("One-time seed: mfr_items");
@@ -741,104 +553,126 @@ export class DBService {
   }
 
   // --- USERS ---
+  static async getAuthHeaders(): Promise<Record<string, string>> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json'
+    };
+    if (auth && auth.currentUser) {
+      try {
+        const token = await auth.currentUser.getIdToken();
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+      } catch (e) {
+        console.warn("Could not retrieve Firebase ID token:", e);
+      }
+    }
+    return headers;
+  }
+
   static async getUsers(): Promise<UserProfile[]> {
     let usersList: UserProfile[] = [];
-    let fetchedFromFirebase = false;
 
-    if (useRealFirebase && db && !this.isOfflineMode()) {
-      try {
-        await this.ensureSeeded();
-        const querySnapshot = await getDocs(collection(db, 'mfr_users'));
-        querySnapshot.forEach((docSnap) => {
-          usersList.push(docSnap.data() as UserProfile);
-        });
-        fetchedFromFirebase = true;
-      } catch (err) {
-        handleFirestoreError(err, OperationType.LIST, 'mfr_users');
-      }
-    }
-
-    if (!fetchedFromFirebase || usersList.length === 0) {
-      usersList = getLocalStorageItem<UserProfile[]>('mfr_users', defaultUsers);
-    }
-
-    // Ensure Pawan Kumar is super_admin with PIN '1234'
-    let pawan = usersList.find(u => u.name.trim().toLowerCase() === 'pawan kumar');
-    let dirty = false;
-
-    if (!pawan) {
-      pawan = {
-        userId: 'u-1',
-        name: 'Pawan Kumar',
-        email: 'pawan.kummar16@gmail.com',
-        pinHash: '$2b$10$1k7Yh.oyJW5PYSDU4bijMOMA17N4ZMhO2nLdp2rF4XuzL63r2/l2S', // bcrypt hash for 1234
-        department: 'Admin',
-        role: 'super_admin',
-        active: true,
-        createdAt: new Date().toISOString()
-      };
-      usersList.push(pawan);
-      dirty = true;
-    } else {
-      if (pawan.role !== 'super_admin' || !pawan.active || pawan.department !== 'Admin') {
-        pawan.role = 'super_admin';
-        pawan.active = true;
-        pawan.department = 'Admin';
-        dirty = true;
-      }
-    }
-
-    // Demote any OTHER super_admin
-    for (let i = 0; i < usersList.length; i++) {
-      const u = usersList[i];
-      if (u.name.trim().toLowerCase() !== 'pawan kumar' && u.role === 'super_admin') {
-        u.role = 'admin';
-        dirty = true;
-        // Save demoted user to Firestore if online
-        if (useRealFirebase && db && fetchedFromFirebase) {
-          try {
-            await setDoc(doc(db, 'mfr_users', u.userId), u);
-          } catch (err) {
-            console.error('Failed to demote non-Pawan super admin in Firestore', err);
-          }
+    // Always fetch sanitized user directory from server-authoritative API
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch('/api/users', { headers });
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success && Array.isArray(resData.users) && resData.users.length > 0) {
+          usersList = resData.users.map((u: any) => ({
+            userId: u.userId,
+            name: u.name || '',
+            email: u.email || '',
+            role: u.role || 'staff',
+            department: u.department || 'Production',
+            allowedDepartments: u.allowedDepartments || [],
+            accessList: u.accessList || [],
+            canOutsource: u.canOutsource || false,
+            active: u.active !== false,
+            createdAt: u.createdAt || new Date().toISOString(),
+            updatedAt: u.updatedAt || u.createdAt || new Date().toISOString()
+          }));
+          // Cache sanitized list for offline resilience
+          setLocalStorageItem('mfr_users', usersList);
+          return usersList;
         }
       }
+    } catch (apiErr) {
+      console.warn("Could not reach /api/users, checking local offline fallback:", apiErr);
     }
 
-    if (dirty) {
-      // Save Pawan Kumar to Firestore if online
-      if (useRealFirebase && db && fetchedFromFirebase && pawan) {
-        try {
-          await setDoc(doc(db, 'mfr_users', pawan.userId), pawan);
-        } catch (err) {
-          console.error('Failed to save Pawan Kumar to Firestore', err);
+    // Fall back to local storage offline cache
+    usersList = getLocalStorageItem<UserProfile[]>('mfr_users', defaultUsers);
+    return usersList.map((u: any) => ({
+      userId: u.userId,
+      name: u.name || '',
+      email: u.email || '',
+      role: u.role || 'staff',
+      department: u.department || 'Production',
+      allowedDepartments: u.allowedDepartments || [],
+      accessList: u.accessList || [],
+      canOutsource: u.canOutsource || false,
+      active: u.active !== false,
+      createdAt: u.createdAt || new Date().toISOString(),
+      updatedAt: u.updatedAt || u.createdAt || new Date().toISOString()
+    }));
+  }
+
+  static async getUserProfile(userId: string): Promise<UserProfile | null> {
+    if (!userId) return null;
+
+    // 1. Fetch via safe backend API with authentication headers
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`/api/users/${encodeURIComponent(userId)}`, { headers });
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success && resData.user) {
+          return resData.user as UserProfile;
         }
       }
-      // Save the updated list to localStorage
-      setLocalStorageItem('mfr_users', usersList);
+    } catch (e) {
+      console.warn(`API getUserProfile failed for ${userId}:`, e);
     }
 
-    return usersList;
+    // 2. Fallback only to already-sanitized local profile cache (never direct raw Firestore document)
+    const users = await this.getUsers();
+    return users.find(u => u.userId === userId) || null;
+  }
+
+  static async setUserPin(userId: string, pin: string): Promise<{ success: boolean; message?: string }> {
+    const headers = await this.getAuthHeaders();
+    const res = await fetch(`/api/users/${encodeURIComponent(userId)}/set-pin`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ pin })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Failed to update PIN on server');
+    }
+    return data;
   }
 
   static async saveUser(user: UserProfile): Promise<void> {
-    // Prevent anyone else from becoming super_admin
-    if (user.role === 'super_admin' && user.name.trim().toLowerCase() !== 'pawan kumar') {
-      user.role = 'admin';
-    }
+    // Sanitize user object to ensure pinHash/pin are never saved in client state, localStorage, or client Firestore writes
+    const { pinHash: _ph, pin: _p, ...sanitizedUser } = user as any;
+    const cleanUser: UserProfile = sanitizedUser as UserProfile;
 
     // 1. Update Local Storage offline cache first
     const list = await this.getUsers();
 
     // Enforce strictly only one super_admin exists in the system
-    if (user.role === 'super_admin') {
+    if (cleanUser.role === 'super_admin') {
       for (let i = 0; i < list.length; i++) {
-        if (list[i].userId !== user.userId && list[i].role === 'super_admin') {
+        if (list[i].userId !== cleanUser.userId && list[i].role === 'super_admin') {
           list[i].role = 'admin';
           // Also write this demoted user to Firestore
           if (useRealFirebase && db) {
             try {
-              await setDoc(doc(db, 'mfr_users', list[i].userId), list[i]);
+              const { pinHash: _demotedPh, pin: _demotedP, ...demotedClean } = list[i] as any;
+              await setDoc(doc(db, 'mfr_users', list[i].userId), demotedClean, { merge: true });
             } catch (err) {
               handleFirestoreError(err, OperationType.WRITE, `mfr_users/${list[i].userId}`);
             }
@@ -848,52 +682,44 @@ export class DBService {
     }
 
     // Enforce At Most One Department Head (Manager) per department (excluding 'Admin' department / Super Admins)
-    if (user.role === 'admin' && user.department !== 'Admin') {
-      const otherDeptManager = list.find(u => u.userId !== user.userId && u.role === 'admin' && u.department === user.department);
+    if (cleanUser.role === 'admin' && cleanUser.department !== 'Admin') {
+      const otherDeptManager = list.find(u => u.userId !== cleanUser.userId && u.role === 'admin' && u.department === cleanUser.department);
       if (otherDeptManager) {
-        throw new Error(`Only one Department Head is permitted for ${user.department}. '${otherDeptManager.name}' is already registered as manager.`);
+        throw new Error(`Only one Department Head is permitted for ${cleanUser.department}. '${otherDeptManager.name}' is already registered as manager.`);
       }
     }
 
-    const idx = list.findIndex(u => u.userId === user.userId);
-    
-    // Check for duplicate PIN to prevent user PIN collision
-    if (user.pinHash) {
-      const existingPinUser = list.find(u => u.userId !== user.userId && u.pinHash && u.pinHash.trim() === user.pinHash.trim());
-      if (existingPinUser) {
-        throw new Error(`This PIN is already assigned to active user '${existingPinUser.name}' (${existingPinUser.department}). Please choose a unique PIN.`);
-      }
-    }
-
+    const idx = list.findIndex(u => u.userId === cleanUser.userId);
     if (idx >= 0) {
-      list[idx] = { ...list[idx], ...user };
+      list[idx] = { ...list[idx], ...cleanUser };
     } else {
-      list.push(user);
+      list.push(cleanUser);
     }
     setLocalStorageItem('mfr_users', list);
 
-    // 2. Write to physical Firestore
+    // 2. Write to physical Firestore (without pinHash/pin, as client rules forbid credential writes)
     if (useRealFirebase && db) {
       try {
-        await setDoc(doc(db, 'mfr_users', user.userId), user);
+        await setDoc(doc(db, 'mfr_users', cleanUser.userId), cleanUser, { merge: true });
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `mfr_users/${user.userId}`);
+        handleFirestoreError(err, OperationType.WRITE, `mfr_users/${cleanUser.userId}`);
       }
     }
 
-    await this.logAction(user.userId, user.name, 'UPDATE_USER', `Saved changes for user '${user.name}'`);
+    await this.logAction(cleanUser.userId, cleanUser.name, 'UPDATE_USER', `Saved changes for user '${cleanUser.name}'`);
   }
 
   static async updateUser(userId: string, updates: Partial<UserProfile>): Promise<void> {
+    const { pinHash: _ph, pin: _p, ...cleanUpdates } = updates as any;
     const list = await this.getUsers();
     const idx = list.findIndex(u => u.userId === userId);
     if (idx !== -1) {
-      const updatedUser: UserProfile = { ...list[idx], ...updates };
+      const updatedUser: UserProfile = { ...list[idx], ...cleanUpdates };
       list[idx] = updatedUser;
       setLocalStorageItem('mfr_users', list);
       if (useRealFirebase && db) {
         try {
-          await updateDoc(doc(db, 'mfr_users', userId), updates as any);
+          await updateDoc(doc(db, 'mfr_users', userId), cleanUpdates as any);
         } catch (err) {
           try {
             await setDoc(doc(db, 'mfr_users', userId), updatedUser, { merge: true });
@@ -968,7 +794,7 @@ export class DBService {
 
   // --- JOB CARDS ---
   static async getJobCards(): Promise<JobCard[]> {
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_job_cards'));
@@ -1335,8 +1161,7 @@ export class DBService {
   static async factoryReset(userId: string, userName: string): Promise<void> {
     await this.verifyAdmin(userId);
 
-    // 1. Reset Local Storage offline cache
-    setLocalStorageItem('mfr_users', defaultUsers);
+    // 1. Reset Local Storage operational data offline cache (users are preserved)
     setLocalStorageItem('mfr_job_cards', defaultJobCards);
     setLocalStorageItem('mfr_movements', defaultMovements);
     setLocalStorageItem('mfr_notifications', defaultNotifications);
@@ -1344,11 +1169,10 @@ export class DBService {
     setLocalStorageItem('mfr_audit_logs', defaultAuditLogs);
     setLocalStorageItem('mfr_company_config', defaultCompanyConfig);
 
-    // 2. Write to physical Firestore
+    // 2. Write operational collections to physical Firestore (never recreate or delete mfr_users)
     if (useRealFirebase && db) {
       try {
         const collectionsToReset = [
-          { name: 'mfr_users', data: defaultUsers, idKey: 'userId' },
           { name: 'mfr_job_cards', data: defaultJobCards, idKey: 'jobCardNo' },
           { name: 'mfr_movements', data: defaultMovements, idKey: 'movementId' },
           { name: 'mfr_notifications', data: defaultNotifications, idKey: 'notificationId' },
@@ -1379,12 +1203,12 @@ export class DBService {
       }
     }
 
-    await this.logAction(userId, userName, 'FACTORY_RESET', `Triggered full system Factory Reset back to initial default seed state`);
+    await this.logAction(userId, userName, 'FACTORY_RESET', `Triggered system factory reset for operational workflows and configuration`);
   }
 
   // --- MATERIAL MOVEMENTS ---
   static async getMovements(): Promise<MaterialMovement[]> {
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_movements'));
@@ -1404,6 +1228,10 @@ export class DBService {
   }
 
   static async createMovement(movement: Omit<MaterialMovement, 'movementId' | 'transferDate' | 'accepted'>, userId: string, userName: string): Promise<MaterialMovement> {
+    if (movement.quantity <= 0) {
+      throw new Error(`Invalid movement quantity: ${movement.quantity}. Must be greater than 0.`);
+    }
+
     const movements = await this.getMovements();
 
     // Check for duplicate pending transfer request for same job card between same departments
@@ -1421,12 +1249,13 @@ export class DBService {
     }
 
     const newId = `M-${2000 + movements.length + 1}`;
+    const nowIso = new Date().toISOString();
     
     const newMov: MaterialMovement = {
       ...movement,
       transferBy: movement.transferBy || userName || 'Staff',
       movementId: newId,
-      transferDate: new Date().toISOString(),
+      transferDate: nowIso,
       accepted: false,
       initiatedByUserId: userId,
       initiatedByUserName: userName
@@ -1457,17 +1286,72 @@ export class DBService {
       userId: isRawStoreReq ? 'all_raw_material_store' : (movement.isIssueRequest ? 'all_store' : `all_${movement.toDepartment.toLowerCase().replace(' ', '_')}`)
     });
 
-    // 2. Write to physical Firestore
-    await this.tryPhysicalWrite(
-      'Transfer Material',
-      `Transfer ${movement.quantity} KG of ${movement.jobCardNo} to ${movement.toDepartment}`,
-      [
-        { collection: 'mfr_movements', docId: newId, data: newMov, operation: 'set' }
-      ],
-      async () => {
-        await setDoc(doc(db, 'mfr_movements', newId), newMov);
+    // 2. Write to physical Firestore using Atomic Transaction
+    if (useRealFirebase && db && !this.isOfflineMode()) {
+      try {
+        await runTransaction(db, async (transaction) => {
+          // Check Idempotency key
+          const idempRef = doc(db, 'mfr_idempotency_keys', newId);
+          const idempSnap = await transaction.get(idempRef);
+          if (idempSnap.exists()) {
+            return;
+          }
+
+          // Check Job Card snapshot
+          const jcUpperRef = doc(db, 'mfr_job_cards', movement.jobCardNo.toUpperCase());
+          let jcSnap = await transaction.get(jcUpperRef);
+          let targetJcRef = jcUpperRef;
+
+          if (!jcSnap.exists()) {
+            const jcAsIsRef = doc(db, 'mfr_job_cards', movement.jobCardNo);
+            const asIsSnap = await transaction.get(jcAsIsRef);
+            if (asIsSnap.exists()) {
+              jcSnap = asIsSnap;
+              targetJcRef = jcAsIsRef;
+            }
+          }
+
+          if (jcSnap.exists()) {
+            const jcData = jcSnap.data() as JobCard;
+            const availableQty = Number(jcData.currentQty ?? jcData.orderQty ?? 0);
+            if (!movement.isIssueRequest && movement.fromDepartment !== 'Purchase' && movement.fromDepartment !== 'Raw Material Store') {
+              if (movement.quantity > availableQty) {
+                throw new Error(`Insufficient available quantity. Requested ${movement.quantity} KG, but only ${availableQty} KG available.`);
+              }
+            }
+
+            const nextVersion = (jcData.version || 1) + 1;
+            if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
+              transaction.update(targetJcRef, {
+                currentDepartment: movement.toDepartment,
+                status: 'Pending Acceptance',
+                version: nextVersion,
+                updatedAt: nowIso,
+                updatedBy: userName || userId
+              });
+            }
+          }
+
+          // Set Movement
+          const movRef = doc(db, 'mfr_movements', newId);
+          transaction.set(movRef, newMov);
+
+          // Set Idempotency Key
+          transaction.set(idempRef, {
+            operationId: newId,
+            movementId: newId,
+            jobCardNo: movement.jobCardNo,
+            quantity: movement.quantity,
+            processedAt: nowIso,
+            userId
+          });
+        });
+      } catch (txnErr) {
+        console.error("Firestore material movement atomic transaction failed:", txnErr);
+        handleFirestoreError(txnErr, OperationType.WRITE, `mfr_movements/${newId}`);
+        throw txnErr;
       }
-    );
+    }
 
     await this.logAction(
       userId, 
@@ -1527,17 +1411,94 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     setLocalStorageItem('mfr_movements', list);
 
-    // 2. Write to physical Firestore
-    await this.tryPhysicalWrite(
-      'Accept Material',
-      `Accept ${mov.quantity} KG of ${mov.jobCardNo} at ${mov.toDepartment}`,
-      [
-        { collection: 'mfr_movements', docId: movementId, data: mov, operation: 'set' }
-      ],
-      async () => {
-        await setDoc(doc(db, 'mfr_movements', movementId), mov);
+    // 2. Write to physical Firestore using Atomic Transaction when online
+    if (useRealFirebase && db && !this.isOfflineMode()) {
+      try {
+        await runTransaction(db, async (transaction) => {
+          const movRef = doc(db, 'mfr_movements', movementId);
+          transaction.set(movRef, mov);
+
+          if (!mov.jobCardNo.startsWith('STOCK-IN-')) {
+            const jcUpperRef = doc(db, 'mfr_job_cards', mov.jobCardNo.toUpperCase());
+            let jcSnap = await transaction.get(jcUpperRef);
+            let targetJcRef = jcUpperRef;
+            if (!jcSnap.exists()) {
+              const jcAsIsRef = doc(db, 'mfr_job_cards', mov.jobCardNo);
+              const asIsSnap = await transaction.get(jcAsIsRef);
+              if (asIsSnap.exists()) {
+                jcSnap = asIsSnap;
+                targetJcRef = jcAsIsRef;
+              }
+            }
+
+            if (jcSnap.exists()) {
+              const jcData = jcSnap.data() as JobCard;
+              const nextVersion = (jcData.version || 1) + 1;
+              const nowIso = new Date().toISOString();
+
+              if (mov.toDepartment === 'Completed') {
+                const newBalance = Math.max(0, (jcData.orderQty || 0) - mov.quantity);
+                transaction.update(targetJcRef, {
+                  status: 'Completed',
+                  completed: true,
+                  currentQty: mov.quantity,
+                  balanceQty: newBalance,
+                  version: nextVersion,
+                  updatedAt: nowIso,
+                  updatedBy: acceptedByName || acceptedByUserId
+                });
+              } else {
+                const targetStatus = mov.toDepartment === 'Production' ? 'Pending' : 'In Process';
+                const updates: any = {
+                  status: targetStatus,
+                  currentDepartment: mov.toDepartment,
+                  currentQty: mov.quantity,
+                  version: nextVersion,
+                  updatedAt: nowIso,
+                  updatedBy: acceptedByName || acceptedByUserId
+                };
+
+                if (mov.toDepartment === 'Store' && extraFields) {
+                  updates.storeDetails = {
+                    ...(jcData?.storeDetails || {}),
+                    locationBin: extraFields.allottedLocation || jcData?.storeDetails?.locationBin || '',
+                    rackNo: extraFields.rackNo || jcData?.storeDetails?.rackNo || ''
+                  };
+                }
+
+                if (mov.fromDepartment === 'Raw Material Store' && mov.isIssueRequest) {
+                  const prevIssuedQty = jcData?.rawMaterialStoreDetails?.issuedQty || 0;
+                  const prevRequestedQty = jcData?.rawMaterialStoreDetails?.requestedQty || 0;
+                  const newThisIssue = extraFields?.quantity || (mov as any).requestedQty || 0;
+                  const newThisReq = (mov as any).requestedQty || 0;
+
+                  updates.rawMaterialStoreDetails = {
+                    ...(jcData?.rawMaterialStoreDetails || {}),
+                    materialCode: (mov as any).processDetails?.rawMaterialCode || jcData?.rawMaterialStoreDetails?.materialCode || '',
+                    materialName: (mov as any).processDetails?.rawMaterialName || jcData?.rawMaterialStoreDetails?.materialName || '',
+                    requestedQty: prevRequestedQty > 0 ? (prevRequestedQty + newThisReq) : newThisReq,
+                    issuedQty: extraFields?.issueStatus === 'Issued' ? (prevIssuedQty + newThisIssue) : prevIssuedQty,
+                    issueStatus: extraFields?.issueStatus || 'Issued',
+                    remarks: remarks || mov.remarks || '',
+                    binLocation: extraFields?.allottedLocation || '',
+                    rejectionReason: extraFields?.issueStatus === 'Rejected' ? remarks : ''
+                  };
+                  if (extraFields?.issueStatus === 'Issued') {
+                    updates.currentQty = (jcData?.currentQty || 0) + newThisIssue;
+                  }
+                }
+
+                transaction.update(targetJcRef, updates);
+              }
+            }
+          }
+        });
+      } catch (txnErr) {
+        console.error("Firestore accept movement atomic transaction failed:", txnErr);
+        handleFirestoreError(txnErr, OperationType.WRITE, `mfr_movements/${movementId}`);
+        throw txnErr;
       }
-    );
+    }
 
     // Update the corresponding job card status
     // If sent to 'Completed', process job card closure
@@ -1643,17 +1604,43 @@ export class DBService {
     list.splice(idx, 1);
     setLocalStorageItem('mfr_movements', list);
 
-    // 2. Write to physical Firestore
-    await this.tryPhysicalWrite(
-      'Reject Material',
-      `Reject ${mov.quantity} KG of ${mov.jobCardNo} from ${mov.fromDepartment}`,
-      [
-        { collection: 'mfr_movements', docId: movementId, operation: 'delete' }
-      ],
-      async () => {
-        await deleteDoc(doc(db, 'mfr_movements', movementId));
+    // 2. Write to physical Firestore using Atomic Transaction when online
+    if (useRealFirebase && db && !this.isOfflineMode()) {
+      try {
+        await runTransaction(db, async (transaction) => {
+          const movRef = doc(db, 'mfr_movements', movementId);
+          transaction.delete(movRef);
+
+          const jcUpperRef = doc(db, 'mfr_job_cards', mov.jobCardNo.toUpperCase());
+          let jcSnap = await transaction.get(jcUpperRef);
+          let targetJcRef = jcUpperRef;
+          if (!jcSnap.exists()) {
+            const jcAsIsRef = doc(db, 'mfr_job_cards', mov.jobCardNo);
+            const asIsSnap = await transaction.get(jcAsIsRef);
+            if (asIsSnap.exists()) {
+              jcSnap = asIsSnap;
+              targetJcRef = jcAsIsRef;
+            }
+          }
+
+          if (jcSnap.exists()) {
+            const jcData = jcSnap.data() as JobCard;
+            const nextVersion = (jcData.version || 1) + 1;
+            transaction.update(targetJcRef, {
+              status: 'Rejected',
+              currentDepartment: mov.fromDepartment,
+              version: nextVersion,
+              updatedAt: new Date().toISOString(),
+              updatedBy: rejectedByName || rejectedByUserId
+            });
+          }
+        });
+      } catch (txnErr) {
+        console.error("Firestore reject movement atomic transaction failed:", txnErr);
+        handleFirestoreError(txnErr, OperationType.DELETE, `mfr_movements/${movementId}`);
+        throw txnErr;
       }
-    );
+    }
 
     // Revert Job Card department to previous and mark status 'Rejected'
     await this.updateJobCard(mov.jobCardNo, {
@@ -1802,7 +1789,7 @@ export class DBService {
 
   // --- NOTIFICATIONS ---
   static async getNotifications(): Promise<AppNotification[]> {
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_notifications'));
@@ -1942,7 +1929,7 @@ export class DBService {
 
   // --- AUDIT LOGS ---
   static async getAuditLogs(): Promise<AuditLog[]> {
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_audit_logs'));
@@ -1961,10 +1948,11 @@ export class DBService {
   static async logAction(userId: string, userName: string, action: string, details: string): Promise<void> {
     const logs = await this.getAuditLogs();
     const newId = `AL-${logs.length + 1}-${Date.now()}`;
+    const authoritativeUid = (auth && auth.currentUser?.uid) ? auth.currentUser.uid : userId;
     const newLog: AuditLog = {
       id: newId,
       timestamp: new Date().toISOString(),
-      userId,
+      userId: authoritativeUid,
       userName,
       action,
       details
@@ -1983,24 +1971,13 @@ export class DBService {
     logActionToSheets(newLog).catch(err => console.warn('Google Sheets action log failed:', err));
   }
 
-  static async deleteAuditLog(logId: string, performerId: string): Promise<void> {
-    await this.verifyAdmin(performerId);
-    if (useRealFirebase && db) {
-      try {
-        await deleteDoc(doc(db, 'mfr_audit_logs', logId));
-        return;
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `mfr_audit_logs/${logId}`);
-      }
-    }
-    const logs = await this.getAuditLogs();
-    const filtered = logs.filter(l => l.id !== logId);
-    setLocalStorageItem('mfr_audit_logs', filtered);
+  static async deleteAuditLog(_logId: string, _performerId: string): Promise<void> {
+    throw new Error("Audit logs are strictly append-only for enterprise regulatory compliance and cannot be modified or deleted.");
   }
 
   // --- SAVED ITEMS ---
   static async getSavedItems(): Promise<SavedItem[]> {
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_items'));
@@ -2235,7 +2212,7 @@ export class DBService {
 
   // --- OUTSOURCE ORDERS ---
   static async getOutsourceOrders(): Promise<OutsourceOrder[]> {
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_outsource_orders'));
@@ -2415,7 +2392,7 @@ export class DBService {
 
   // --- COMPANY CONFIG ---
   static async getCompanyConfig(): Promise<CompanyConfig> {
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         await this.ensureSeeded();
         const docRef = doc(db, 'mfr_company_config', 'global');
@@ -2527,11 +2504,12 @@ export class DBService {
 
   // Realtime subscription emulation & Live Firestore triggers
   static subscribeToUpdates(collectionName: string, callback: () => void): () => void {
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
         const unsub = onSnapshot(collection(db, collectionName), () => {
           callback();
         }, (err) => {
+          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
           console.error(`Firestore watch failed for collection [${collectionName}]: `, err);
           try {
             handleFirestoreError(err, OperationType.GET, collectionName);
@@ -2561,7 +2539,7 @@ export class DBService {
     onInitial: (movements: MaterialMovement[]) => void,
     onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: MaterialMovement }[]) => void
   ): () => void {
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
         let isInitial = true;
         const unsub = onSnapshot(collection(db, 'mfr_movements'), (snapshot) => {
@@ -2580,6 +2558,7 @@ export class DBService {
             }
           }
         }, (err) => {
+          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
           console.error("Firestore watch failed for movements:", err);
           try {
             handleFirestoreError(err, OperationType.GET, 'mfr_movements');
@@ -2607,7 +2586,7 @@ export class DBService {
     onInitial: (logs: AuditLog[]) => void,
     onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => void
   ): () => void {
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
         let isInitial = true;
         const unsub = onSnapshot(collection(db, 'mfr_audit_logs'), (snapshot) => {
@@ -2626,6 +2605,7 @@ export class DBService {
             }
           }
         }, (err) => {
+          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
           console.error("Firestore watch failed for audit logs:", err);
           try {
             handleFirestoreError(err, OperationType.GET, 'mfr_audit_logs');

@@ -3,9 +3,7 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig } from 'vite';
 
-export default defineConfig(({ command }) => {
-  // Use relative base when building for Electron (file:// protocol)
-  // Use '/' for web/Capacitor builds served over http
+export default defineConfig(() => {
   const isElectron = process.env.BUILD_TARGET === 'electron';
 
   return {
