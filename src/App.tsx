@@ -925,6 +925,13 @@ export default function App() {
       return;
     }
 
+    const matchedUser = users.find(u => u.name.trim().toLowerCase() === nameToMatch.toLowerCase());
+    if (!matchedUser) {
+      setAuthError('Invalid credentials. Please verify your Registered Full Name and Security PIN.');
+      setLoginPin('');
+      return;
+    }
+
     setIsVerifyingPin(true);
     try {
       let pinVerified = false;
