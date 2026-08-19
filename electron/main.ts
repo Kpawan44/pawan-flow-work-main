@@ -2,11 +2,14 @@ import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { autoUpdater } from 'electron-updater';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
+
+// electron-updater is CommonJS; import it via require to avoid ESM named-export
+// interop failures ("Named export 'autoUpdater' not found") in the packaged app.
+const { autoUpdater } = require('electron-updater');
 
 function createWindow() {
   const preloadCandidate = path.join(__dirname, 'preload.cjs');
