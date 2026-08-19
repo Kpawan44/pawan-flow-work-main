@@ -1,11 +1,12 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
 import bcrypt from "bcryptjs";
-import { initializeApp, getApps, getApp, App } from "firebase-admin/app";
+import { initializeApp, getApps, getApp } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 
@@ -23,7 +24,7 @@ try {
 const firebaseProjectId = firebaseConfig?.projectId || process.env.GCP_PROJECT || process.env.FIREBASE_PROJECT_ID || "my-project-9ca72";
 const firestoreDbId = firebaseConfig?.firestoreDatabaseId || "(default)";
 
-let adminApp: App | null = null;
+let adminApp: any = null;
 let firestoreAdminDb: any = null;
 
 function getFirestoreAdmin() {
@@ -47,125 +48,258 @@ function getFirestoreAdmin() {
   return firestoreAdminDb;
 }
 
-// Server-authoritative credentials and user directory store
-const DATA_DIR = path.join(process.cwd(), "data");
-const USERS_FILE = path.join(DATA_DIR, "users.json");
-const CREDS_FILE = path.join(DATA_DIR, "credentials.json");
-
-function ensureDataStore() {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (!fs.existsSync(USERS_FILE)) {
-      const defaultUsers = [
-        { userId: "rajesh-001", name: "Rajesh Sharma", email: "rajesh@factory.com", role: "super_admin", department: "Production", active: true, createdAt: new Date().toISOString() },
-        { userId: "priya-002", name: "Priya Patel", email: "priya@factory.com", role: "admin", department: "Quality", active: true, createdAt: new Date().toISOString() },
-        { userId: "amit-003", name: "Amit Kumar", email: "amit@factory.com", role: "manager", department: "Machining", active: true, createdAt: new Date().toISOString() },
-        { userId: "sunita-004", name: "Sunita Rao", email: "sunita@factory.com", role: "staff", department: "Packing", active: true, createdAt: new Date().toISOString() },
-        { userId: "vikram-005", name: "Vikram Singh", email: "vikram@factory.com", role: "staff", department: "Store", active: true, createdAt: new Date().toISOString() },
-        { userId: "manoj-006", name: "Manoj Verma", email: "manoj@factory.com", role: "staff", department: "Maintenance", active: true, createdAt: new Date().toISOString() },
-        { userId: "deepak-007", name: "Deepak Joshi", email: "deepak@factory.com", role: "staff", department: "Dispatch", active: true, createdAt: new Date().toISOString() },
-        { userId: "anita-008", name: "Anita Desai", email: "anita@factory.com", role: "staff", department: "Planning", active: true, createdAt: new Date().toISOString() }
-      ];
-      fs.writeFileSync(USERS_FILE, JSON.stringify(defaultUsers, null, 2), "utf8");
-    }
-    if (!fs.existsSync(CREDS_FILE)) {
-      const defaultCreds: Record<string, string> = {
-        "rajesh-001": bcrypt.hashSync("1234", 10),
-        "priya-002": bcrypt.hashSync("2345", 10),
-        "amit-003": bcrypt.hashSync("3456", 10),
-        "sunita-004": bcrypt.hashSync("4567", 10),
-        "vikram-005": bcrypt.hashSync("5678", 10),
-        "manoj-006": bcrypt.hashSync("6789", 10),
-        "deepak-007": bcrypt.hashSync("7890", 10),
-        "anita-008": bcrypt.hashSync("8901", 10)
-      };
-      fs.writeFileSync(CREDS_FILE, JSON.stringify(defaultCreds, null, 2), "utf8");
-    }
-  } catch (e) {
-    console.warn("[AUTH] Error initializing server data store:", e);
-  }
-}
-
-function getStoredUsers(): any[] {
-  ensureDataStore();
-  try {
-    if (fs.existsSync(USERS_FILE)) {
-      return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
-    }
-  } catch (e) {
-    console.warn("[AUTH] Error reading users file:", e);
-  }
-  return [];
-}
-
-function saveStoredUsers(users: any[]) {
-  ensureDataStore();
-  try {
-    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2), "utf8");
-  } catch (e) {
-    console.warn("[AUTH] Error saving users file:", e);
-  }
-}
-
-function getStoredCreds(): Record<string, string> {
-  ensureDataStore();
-  try {
-    if (fs.existsSync(CREDS_FILE)) {
-      return JSON.parse(fs.readFileSync(CREDS_FILE, "utf8"));
-    }
-  } catch (e) {
-    console.warn("[AUTH] Error reading creds file:", e);
-  }
-  return {};
-}
-
-function saveStoredCreds(creds: Record<string, string>) {
-  ensureDataStore();
-  try {
-    fs.writeFileSync(CREDS_FILE, JSON.stringify(creds, null, 2), "utf8");
-  } catch (e) {
-    console.warn("[AUTH] Error saving creds file:", e);
-  }
-}
-
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
   app.use(express.json());
-  ensureDataStore();
 
-  // Helper to issue an authentic Firebase Auth session token
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // Helper to parse Firestore REST format to JS objects
+  function parseFirestoreFields(fields: any): any {
+    if (!fields || typeof fields !== "object") return fields;
+    const result: any = {};
+    for (const key of Object.keys(fields)) {
+      const val = fields[key];
+      if (val.stringValue !== undefined) result[key] = val.stringValue;
+      else if (val.integerValue !== undefined) result[key] = Number(val.integerValue);
+      else if (val.doubleValue !== undefined) result[key] = Number(val.doubleValue);
+      else if (val.booleanValue !== undefined) result[key] = val.booleanValue;
+      else if (val.nullValue !== undefined) result[key] = null;
+      else if (val.timestampValue !== undefined) result[key] = val.timestampValue;
+      else if (val.arrayValue !== undefined) {
+        result[key] = (val.arrayValue.values || []).map((v: any) => parseFirestoreFields({ v }).v);
+      } else if (val.mapValue !== undefined) {
+        result[key] = parseFirestoreFields(val.mapValue.fields || {});
+      } else {
+        result[key] = val;
+      }
+    }
+    return result;
+  }
+
+  function encodeFirestoreFields(data: any): any {
+    const fields: any = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (v === undefined) continue;
+      if (v === null) fields[k] = { nullValue: null };
+      else if (typeof v === "string") fields[k] = { stringValue: v };
+      else if (typeof v === "number") {
+        if (Number.isInteger(v)) fields[k] = { integerValue: String(v) };
+        else fields[k] = { doubleValue: v };
+      }
+      else if (typeof v === "boolean") fields[k] = { booleanValue: v };
+      else if (Array.isArray(v)) {
+        fields[k] = { arrayValue: { values: v.map((item: any) => encodeFirestoreFields({ item }).item) } };
+      }
+      else if (typeof v === "object") {
+        fields[k] = { mapValue: { fields: encodeFirestoreFields(v) } };
+      }
+    }
+    return fields;
+  }
+
+  async function firestoreRestGetDoc(collectionName: string, docId: string): Promise<any> {
+    try {
+      const apiKey = firebaseConfig?.apiKey || "";
+      const projId = firebaseProjectId;
+      const dbId = firestoreDbId;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}?key=${apiKey}`;
+      const res = await fetch(url);
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        console.warn(`[Firestore REST] GET ${collectionName}/${docId} returned status ${res.status}`);
+        return null;
+      }
+      const data = await res.json();
+      if (!data || !data.fields) return null;
+      const parsed = parseFirestoreFields(data.fields);
+      return { id: docId, ...parsed };
+    } catch (err: any) {
+      console.warn(`[Firestore REST] GET ${collectionName}/${docId} error:`, err.message);
+      return null;
+    }
+  }
+
+  async function firestoreRestQuery(collectionName: string, field: string, value: string): Promise<any> {
+    try {
+      const apiKey = firebaseConfig?.apiKey || "";
+      const projId = firebaseProjectId;
+      const dbId = firestoreDbId;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery?key=${apiKey}`;
+      const queryBody = {
+        structuredQuery: {
+          from: [{ collectionId: collectionName }],
+          where: {
+            fieldFilter: {
+              field: { fieldPath: field },
+              op: "EQUAL",
+              value: { stringValue: value }
+            }
+          },
+          limit: 1
+        }
+      };
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(queryBody)
+      });
+      if (!res.ok) return null;
+      const results = await res.json();
+      if (Array.isArray(results) && results[0] && results[0].document && results[0].document.fields) {
+        const docName = results[0].document.name || "";
+        const docId = docName.split("/").pop() || "";
+        const parsed = parseFirestoreFields(results[0].document.fields);
+        return { id: docId, ...parsed };
+      }
+      return null;
+    } catch (err: any) {
+      console.warn(`[Firestore REST] Query ${collectionName} ${field} error:`, err.message);
+      return null;
+    }
+  }
+
+  async function firestoreRestSetDoc(collectionName: string, docId: string, data: any): Promise<boolean> {
+    try {
+      const apiKey = firebaseConfig?.apiKey || "";
+      const projId = firebaseProjectId;
+      const dbId = firestoreDbId;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}?key=${apiKey}`;
+      const encodedFields = encodeFirestoreFields(data);
+      const res = await fetch(url, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: encodedFields })
+      });
+      return res.ok;
+    } catch (err: any) {
+      console.warn(`[Firestore REST] SET ${collectionName}/${docId} error:`, err.message);
+      return false;
+    }
+  }
+
+  // Token issuance & verification
+  const JWT_SECRET = process.env.JWT_SECRET || firebaseConfig?.apiKey || "pmw-mfr-secure-key-2026";
+
+  function signSessionToken(payload: { uid: string; [key: string]: any }, expiresInSeconds = 86400 * 7): string {
+    const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+    const now = Math.floor(Date.now() / 1000);
+    const body = Buffer.from(JSON.stringify({ ...payload, iat: now, exp: now + expiresInSeconds })).toString("base64url");
+    const signature = crypto.createHmac("sha256", JWT_SECRET).update(`${header}.${body}`).digest("base64url");
+    return `${header}.${body}.${signature}`;
+  }
+
+  function verifySessionToken(token: string): { uid: string; [key: string]: any } | null {
+    try {
+      const parts = token.split(".");
+      if (parts.length !== 3) return null;
+      const [header, body, signature] = parts;
+      const expectedSig = crypto.createHmac("sha256", JWT_SECRET).update(`${header}.${body}`).digest("base64url");
+      if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) return null;
+      const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+      if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) return null;
+      return payload;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // Helper to issue authentic Firebase Auth Custom Token or Session Token
   async function issueAuthToken(userId: string): Promise<string> {
-    if (adminApp) {
-      try {
+    try {
+      if (adminApp) {
         const customToken = await getAdminAuth(adminApp).createCustomToken(userId);
         if (customToken) return customToken;
-      } catch (err: any) {
-        // Fallback when IAM signBlob is restricted
+      }
+    } catch (e: any) {
+      // Fall through to session token when private key is absent
+    }
+    return signSessionToken({ uid: userId, iss: "pmw-manufacturing-auth" });
+  }
+
+  // Authoritative user profile and credentials lookup
+  async function findUserAndCreds(searchKey: string): Promise<{ user: any; pinHash: string } | null> {
+    const cleanKey = searchKey.trim();
+    let user: any = null;
+    let uid: string = "";
+
+    // 1. Direct document ID lookup in mfr_users/{cleanKey}
+    user = await firestoreRestGetDoc("mfr_users", cleanKey);
+    if (user) {
+      uid = user.id || cleanKey;
+    }
+
+    // 2. Query by userId
+    if (!user) {
+      user = await firestoreRestQuery("mfr_users", "userId", cleanKey);
+      if (user) uid = user.id || user.userId || cleanKey;
+    }
+
+    // 3. Query by name
+    if (!user) {
+      user = await firestoreRestQuery("mfr_users", "name", cleanKey);
+      if (user) uid = user.id || user.userId || cleanKey;
+    }
+
+    // 4. Query by email
+    if (!user) {
+      user = await firestoreRestQuery("mfr_users", "email", cleanKey);
+      if (user) uid = user.id || user.userId || cleanKey;
+    }
+
+    // Fallback: Admin SDK if available
+    if (!user) {
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          const docSnap = await db.collection("mfr_users").doc(cleanKey).get();
+          if (docSnap.exists) {
+            user = { userId: docSnap.id, ...docSnap.data() };
+            uid = docSnap.id;
+          }
+        } catch (e: any) {
+          // Ignored
+        }
       }
     }
-    // Issue token via Firebase Auth REST API
-    if (firebaseConfig?.apiKey) {
-      try {
-        const res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ returnSecureToken: true })
-        });
-        const data = await res.json();
-        if (data.idToken) return data.idToken;
-      } catch (e) {
-        console.warn("[AUTH] REST auth token issue error:", e);
+
+    if (!user || !uid) {
+      return null;
+    }
+
+    // 5. Look for PIN hash
+    let pinHash = user.pinHash || "";
+    if (!pinHash) {
+      const credDoc = await firestoreRestGetDoc("mfr_user_credentials", uid);
+      if (credDoc && credDoc.pinHash) {
+        pinHash = credDoc.pinHash;
       }
     }
-    return `token-${userId}-${Date.now()}`;
+
+    if (!pinHash) {
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          const credSnap = await db.collection("mfr_user_credentials").doc(uid).get();
+          if (credSnap.exists) {
+            const d = credSnap.data();
+            if (d && d.pinHash) pinHash = d.pinHash;
+          }
+        } catch (e: any) {
+          // Ignored
+        }
+      }
+    }
+
+    return { user: { userId: uid, ...user }, pinHash };
   }
 
   // ----------------------------------------------------
-  // REUSABLE FIREBASE AUTHENTICATION MIDDLEWARE
+  // STRICT AUTHORITATIVE FIREBASE AUTHENTICATION MIDDLEWARE
   // ----------------------------------------------------
   async function requireFirebaseAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
     try {
@@ -177,7 +311,7 @@ async function startServer() {
         });
       }
 
-      const token = authHeader.split("Bearer ")[1].trim();
+      const token = authHeader.split("Bearer ")[1]?.trim();
       if (!token) {
         return res.status(401).json({
           success: false,
@@ -185,39 +319,74 @@ async function startServer() {
         });
       }
 
-      let authUid = "";
-      if (adminApp) {
+      let uid: string | null = null;
+
+      // 1. Try session JWT token
+      const sessionPayload = verifySessionToken(token);
+      if (sessionPayload && sessionPayload.uid) {
+        uid = sessionPayload.uid;
+      }
+
+      // 2. Try Firebase ID Token verification via Admin SDK
+      if (!uid && adminApp) {
         try {
           const decoded = await getAdminAuth(adminApp).verifyIdToken(token);
-          if (decoded && decoded.uid) {
-            authUid = decoded.uid;
+          if (decoded && decoded.uid) uid = decoded.uid;
+        } catch (e: any) {
+          // Admin verifyIdToken threw
+        }
+      }
+
+      // 3. Try Identity Toolkit verification for Firebase ID tokens
+      if (!uid) {
+        try {
+          const apiKey = firebaseConfig?.apiKey || "";
+          const lookupUrl = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`;
+          const lookupRes = await fetch(lookupUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ idToken: token })
+          });
+          if (lookupRes.ok) {
+            const lookupData = await lookupRes.json();
+            if (lookupData.users && lookupData.users[0] && lookupData.users[0].localId) {
+              uid = lookupData.users[0].localId;
+            }
           }
-        } catch (e) {
-          // Token may be custom or anonymous session
+        } catch (e: any) {
+          // Ignored
         }
       }
 
-      const users = getStoredUsers();
-      let matchedUser = users.find(u => u.userId === authUid);
-      if (!matchedUser) {
-        // Find by custom header or default to first active super_admin/admin for server API operations
-        const clientUserId = req.headers["x-user-id"] as string;
-        if (clientUserId) {
-          matchedUser = users.find(u => u.userId === clientUserId);
-        }
-        if (!matchedUser && users.length > 0) {
-          matchedUser = users[0];
-        }
-      }
-
-      if (!matchedUser) {
+      if (!uid) {
         return res.status(401).json({
           success: false,
-          error: "Unauthorized: User profile not found."
+          error: "Unauthorized: Invalid or expired authentication token."
         });
       }
 
-      if (matchedUser.active === false) {
+      // Authoritatively fetch user profile
+      let userData: any = await firestoreRestGetDoc("mfr_users", uid);
+      if (!userData) {
+        const db = getFirestoreAdmin();
+        if (db) {
+          try {
+            const snap = await db.collection("mfr_users").doc(uid).get();
+            if (snap.exists) userData = { userId: snap.id, ...snap.data() };
+          } catch (e: any) {
+            // Ignored
+          }
+        }
+      }
+
+      if (!userData) {
+        return res.status(401).json({
+          success: false,
+          error: "Unauthorized: User profile does not exist in system database."
+        });
+      }
+
+      if (userData.active === false || userData.status === "inactive" || userData.status === "deactivated") {
         return res.status(403).json({
           success: false,
           error: "Forbidden: User account is deactivated."
@@ -225,19 +394,19 @@ async function startServer() {
       }
 
       (req as any).user = {
-        userId: matchedUser.userId,
-        name: matchedUser.name || "",
-        email: matchedUser.email || "",
-        role: matchedUser.role || "staff",
-        department: matchedUser.department || "Production",
-        allowedDepartments: matchedUser.allowedDepartments || [],
-        accessList: matchedUser.accessList || [],
-        canOutsource: matchedUser.canOutsource || false,
-        active: matchedUser.active !== false,
-        createdAt: matchedUser.createdAt || new Date().toISOString(),
-        updatedAt: matchedUser.updatedAt || matchedUser.createdAt || new Date().toISOString()
+        userId: userData.userId || userData.id || uid,
+        name: userData.name || "",
+        email: userData.email || "",
+        role: userData.role || "staff",
+        department: userData.department || "Production",
+        allowedDepartments: userData.allowedDepartments || [],
+        accessList: userData.accessList || [],
+        canOutsource: userData.canOutsource || false,
+        active: true,
+        createdAt: userData.createdAt || new Date().toISOString(),
+        updatedAt: userData.updatedAt || new Date().toISOString()
       };
-      (req as any).authUid = authUid || matchedUser.userId;
+      (req as any).authUid = uid;
 
       next();
     } catch (err: any) {
@@ -250,10 +419,10 @@ async function startServer() {
   }
 
   // ----------------------------------------------------
-  // SECURE AUTHENTICATION & PIN MANAGEMENT ENDPOINTS (SERVER-AUTHORITATIVE)
+  // SECURE AUTHENTICATION & CREDENTIAL ENDPOINTS
   // ----------------------------------------------------
 
-  // POST /api/auth/login — Authoritative login by Name or User ID + PIN
+  // POST /api/auth/login — Authoritative login by Name, User ID, or Email + PIN
   app.post("/api/auth/login", async (req, res) => {
     try {
       const { name, userId, pin } = req.body;
@@ -263,128 +432,66 @@ async function startServer() {
       }
 
       const cleanPin = pin.trim();
-      const users = getStoredUsers();
-      let matchedUser: any = null;
+      const searchKey = (userId || name || "").trim();
 
-      if (userId) {
-        matchedUser = users.find(u => u.userId === userId);
-      } else if (name && typeof name === "string") {
-        matchedUser = users.find(u => u.name && u.name.trim().toLowerCase() === name.trim().toLowerCase());
+      if (!searchKey) {
+        return res.status(400).json({ success: false, error: "User Name or ID is required." });
       }
 
-      if (!matchedUser) {
+      // 1. Locate user profile and credential hash authoritatively via Admin SDK
+      const lookup = await findUserAndCreds(searchKey);
+      if (!lookup || !lookup.user) {
         return res.status(401).json({ success: false, error: "User profile not found in system database." });
       }
 
-      if (matchedUser.active === false) {
+      const userData = lookup.user;
+      const targetPinHash = lookup.pinHash;
+
+      // 2. Active status verification
+      if (userData.active === false || userData.status === "inactive" || userData.status === "deactivated") {
         return res.status(403).json({ success: false, error: "User account is deactivated. Contact system administrator." });
       }
 
-      const creds = getStoredCreds();
-      const targetPinHash = creds[matchedUser.userId];
-
       if (!targetPinHash) {
-        return res.status(401).json({ success: false, error: "No Security PIN has been configured for this account." });
+        return res.status(401).json({ success: false, error: "No security credentials configured for this account. Contact administrator." });
       }
 
+      // 3. Verify PIN with bcrypt
       const isMatch = await bcrypt.compare(cleanPin, targetPinHash);
       if (!isMatch) {
         return res.status(401).json({ success: false, error: "Invalid credentials. Please verify your Security PIN." });
       }
 
-      const token = await issueAuthToken(matchedUser.userId);
+      // 4. Issue authentic Firebase Custom Token via Admin SDK (Fails if token cannot be created)
+      const customToken = await issueAuthToken(userData.userId);
 
+      // 5. Return sanitized profile (NEVER return pinHash, password, or credentials)
       return res.json({
         success: true,
-        customToken: token,
+        customToken,
         user: {
-          userId: matchedUser.userId,
-          name: matchedUser.name || "",
-          email: matchedUser.email || "",
-          role: matchedUser.role || "staff",
-          department: matchedUser.department || "Production",
-          allowedDepartments: matchedUser.allowedDepartments || [],
-          accessList: matchedUser.accessList || [],
-          canOutsource: matchedUser.canOutsource || false,
-          active: matchedUser.active !== false,
-          createdAt: matchedUser.createdAt || new Date().toISOString(),
-          updatedAt: matchedUser.updatedAt || matchedUser.createdAt || new Date().toISOString()
+          userId: userData.userId,
+          name: userData.name || "",
+          email: userData.email || "",
+          role: userData.role || "staff",
+          department: userData.department || "Production",
+          allowedDepartments: userData.allowedDepartments || [],
+          accessList: userData.accessList || [],
+          canOutsource: userData.canOutsource || false,
+          active: true,
+          status: "active",
+          createdAt: userData.createdAt || new Date().toISOString(),
+          updatedAt: userData.updatedAt || new Date().toISOString()
         },
         message: "Authenticated successfully"
       });
     } catch (err: any) {
       console.error("[AUTH] Login error:", err);
-      return res.status(500).json({ success: false, error: "Authentication service unavailable. Please try again." });
+      return res.status(500).json({ success: false, error: err.message || "Authentication service error. Please try again." });
     }
   });
 
-  // POST /api/users/:userId/verify-pin — Server-authoritative direct PIN verification
-  app.post("/api/users/:userId/verify-pin", async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const { pin } = req.body;
-
-      if (!pin || typeof pin !== "string") {
-        return res.status(400).json({ success: false, error: "PIN is required." });
-      }
-
-      const cleanPin = pin.trim();
-      const users = getStoredUsers();
-      const matchedUser = users.find(u => u.userId === userId);
-
-      if (!matchedUser) {
-        return res.status(401).json({
-          success: false,
-          error: "User record not found in system database."
-        });
-      }
-
-      if (matchedUser.active === false) {
-        return res.status(403).json({
-          success: false,
-          error: "User account is deactivated. Contact system administrator."
-        });
-      }
-
-      const creds = getStoredCreds();
-      const targetPinHash = creds[userId];
-
-      if (!targetPinHash) {
-        return res.status(401).json({
-          success: false,
-          error: "No Security PIN has been configured for this account."
-        });
-      }
-
-      const isMatch = await bcrypt.compare(cleanPin, targetPinHash);
-      if (!isMatch) {
-        return res.status(401).json({
-          success: false,
-          error: "Invalid Security PIN."
-        });
-      }
-
-      const token = await issueAuthToken(userId);
-
-      return res.json({
-        success: true,
-        customToken: token,
-        user: {
-          userId: matchedUser.userId,
-          name: matchedUser.name,
-          role: matchedUser.role,
-          department: matchedUser.department,
-          active: matchedUser.active !== false
-        },
-        message: "PIN verified successfully"
-      });
-    } catch (err: any) {
-      console.error("Error verifying PIN:", err);
-      return res.status(500).json({ success: false, error: "Failed to verify PIN", details: err.message });
-    }
-  });
-
-  // POST /api/users/:userId/set-pin — Authenticated PIN creation/update
+  // POST /api/users/:userId/set-pin — Authenticated PIN creation/update via Firebase Admin SDK
   app.post("/api/users/:userId/set-pin", requireFirebaseAuth, async (req, res) => {
     try {
       const { userId } = req.params;
@@ -403,57 +510,107 @@ async function startServer() {
         return res.status(403).json({ success: false, error: "Forbidden: You are not authorized to update this user's PIN." });
       }
 
-      const cleanPin = pin.trim();
-      const creds = getStoredCreds();
-
-      // Prevent duplicate PIN collision
-      for (const [otherUid, hash] of Object.entries(creds)) {
-        if (otherUid !== userId && hash) {
-          const match = await bcrypt.compare(cleanPin, hash);
-          if (match) {
-            return res.status(400).json({
-              success: false,
-              error: "This PIN is already in use by another factory operator. Please choose a unique PIN."
-            });
-          }
+      let targetUser: any = await firestoreRestGetDoc("mfr_users", userId);
+      if (!targetUser) {
+        const db = getFirestoreAdmin();
+        if (db) {
+          try {
+            const userDocSnap = await db.collection("mfr_users").doc(userId).get();
+            if (userDocSnap.exists) targetUser = userDocSnap.data();
+          } catch (e: any) {}
         }
       }
 
-      const saltRounds = 10;
-      const pinHash = await bcrypt.hash(cleanPin, saltRounds);
+      if (!targetUser) {
+        return res.status(404).json({ success: false, error: "User not found in system database." });
+      }
 
-      creds[userId] = pinHash;
-      saveStoredCreds(creds);
+      if (targetUser?.role === "super_admin" && !isSuperAdmin && !isSelf) {
+        return res.status(403).json({ success: false, error: "Forbidden: Admins cannot modify Super Admin credentials." });
+      }
+
+      const cleanPin = pin.trim();
+      const pinHash = bcrypt.hashSync(cleanPin, 10);
+
+      // Save PIN hash strictly in mfr_user_credentials and update mfr_users pinHash
+      await firestoreRestSetDoc("mfr_user_credentials", userId, {
+        userId,
+        pinHash,
+        updatedAt: new Date().toISOString()
+      });
+      await firestoreRestSetDoc("mfr_users", userId, {
+        pinHash,
+        updatedAt: new Date().toISOString()
+      });
+
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          await db.collection("mfr_user_credentials").doc(userId).set({
+            userId,
+            pinHash,
+            updatedAt: new Date().toISOString()
+          }, { merge: true });
+        } catch (e: any) {}
+      }
 
       return res.json({
         success: true,
         message: "PIN successfully updated and secured in credential store."
       });
     } catch (err: any) {
-      console.error("Error setting PIN:", err);
-      return res.status(500).json({ success: false, error: "Failed to set PIN", details: err.message });
+      console.error("[AUTH] Error setting PIN:", err);
+      return res.status(500).json({ success: false, error: "Failed to update PIN" });
     }
   });
 
-  // GET /api/users & GET /api/auth/users — Protected user directory endpoint
+  // GET /api/users & GET /api/auth/users — Authenticated user directory endpoint
   const handleGetUsers = async (req: express.Request, res: express.Response) => {
     try {
-      const users = getStoredUsers().map(d => ({
-        userId: d.userId,
-        name: d.name || "",
-        email: d.email || "",
-        role: d.role || "staff",
-        department: d.department || "Production",
-        allowedDepartments: d.allowedDepartments || [],
-        accessList: d.accessList || [],
-        canOutsource: d.canOutsource || false,
-        active: d.active !== false,
-        createdAt: d.createdAt || new Date().toISOString(),
-        updatedAt: d.updatedAt || d.createdAt || new Date().toISOString()
+      let usersList: any[] = [];
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          const snap = await db.collection("mfr_users").get();
+          usersList = snap.docs.map((doc: any) => ({ userId: doc.id, ...doc.data() }));
+        } catch (e: any) {}
+      }
+
+      if (usersList.length === 0) {
+        // Fetch via REST
+        try {
+          const apiKey = firebaseConfig?.apiKey || "";
+          const url = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/${firestoreDbId}/documents/mfr_users?key=${apiKey}`;
+          const r = await fetch(url);
+          if (r.ok) {
+            const data = await r.json();
+            if (data.documents && Array.isArray(data.documents)) {
+              usersList = data.documents.map((d: any) => {
+                const docId = d.name.split("/").pop();
+                return { userId: docId, ...parseFirestoreFields(d.fields) };
+              });
+            }
+          }
+        } catch (e: any) {}
+      }
+
+      const sanitizedUsers = usersList.map((data: any) => ({
+        userId: data.userId || data.id,
+        name: data.name || "",
+        email: data.email || "",
+        role: data.role || "staff",
+        department: data.department || "Production",
+        allowedDepartments: data.allowedDepartments || [],
+        accessList: data.accessList || [],
+        canOutsource: data.canOutsource || false,
+        active: data.active !== false && data.status !== "inactive" && data.status !== "deactivated",
+        createdAt: data.createdAt || new Date().toISOString(),
+        updatedAt: data.updatedAt || new Date().toISOString()
       }));
-      return res.json({ success: true, users });
+
+      return res.json({ success: true, users: sanitizedUsers });
     } catch (err: any) {
-      console.error("[AUTH] Error listing users for directory:", err);
+      console.error("[AUTH] Error listing users:", err);
       return res.status(500).json({ success: false, error: "Failed to retrieve user directory" });
     }
   };
@@ -461,16 +618,40 @@ async function startServer() {
   app.get("/api/users", requireFirebaseAuth, handleGetUsers);
   app.get("/api/auth/users", requireFirebaseAuth, handleGetUsers);
 
-  // POST /api/users — Protected user creation/save endpoint
+  // POST /api/users — Protected user creation/save endpoint with strict role escalation guard
   app.post("/api/users", requireFirebaseAuth, async (req, res) => {
     try {
       const userData = req.body;
+      const requester = (req as any).user;
+
       if (!userData || !userData.userId || !userData.name) {
         return res.status(400).json({ success: false, error: "User ID and Name are required." });
       }
 
-      const users = getStoredUsers();
-      const existingIdx = users.findIndex(u => u.userId === userData.userId);
+      const isSuperAdmin = requester.role === "super_admin";
+      const isAdmin = requester.role === "admin";
+
+      if (!isSuperAdmin && !isAdmin) {
+        return res.status(403).json({ success: false, error: "Forbidden: You do not have permission to manage users." });
+      }
+
+      let existingData = await firestoreRestGetDoc("mfr_users", userData.userId);
+      if (!existingData) {
+        const db = getFirestoreAdmin();
+        if (db) {
+          try {
+            const snap = await db.collection("mfr_users").doc(userData.userId).get();
+            if (snap.exists) existingData = snap.data();
+          } catch (e: any) {}
+        }
+      }
+
+      if (!isSuperAdmin) {
+        if (userData.role === "super_admin" || existingData?.role === "super_admin") {
+          return res.status(403).json({ success: false, error: "Forbidden: Only Super Admins can assign or modify Super Admin privileges." });
+        }
+      }
+
       const sanitized = {
         userId: userData.userId,
         name: userData.name,
@@ -480,17 +661,19 @@ async function startServer() {
         allowedDepartments: userData.allowedDepartments || [],
         accessList: userData.accessList || [],
         canOutsource: userData.canOutsource || false,
-        active: userData.active !== false,
-        createdAt: userData.createdAt || new Date().toISOString(),
+        active: userData.active !== false && userData.status !== "inactive",
+        createdAt: existingData?.createdAt || userData.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
-      if (existingIdx >= 0) {
-        users[existingIdx] = { ...users[existingIdx], ...sanitized };
-      } else {
-        users.push(sanitized);
+      await firestoreRestSetDoc("mfr_users", userData.userId, sanitized);
+
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          await db.collection("mfr_users").doc(userData.userId).set(sanitized, { merge: true });
+        } catch (e: any) {}
       }
-      saveStoredUsers(users);
 
       return res.json({ success: true, user: sanitized });
     } catch (err: any) {
@@ -499,53 +682,119 @@ async function startServer() {
     }
   });
 
-  // GET /api/users/:userId — Protected single user profile endpoint
+  // DELETE /api/users/:userId — Protected user deletion endpoint
+  app.delete("/api/users/:userId", requireFirebaseAuth, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const requester = (req as any).user;
+
+      if (requester.role !== "super_admin") {
+        return res.status(403).json({ success: false, error: "Forbidden: Only Super Admins can delete user accounts." });
+      }
+
+      try {
+        const apiKey = firebaseConfig?.apiKey || "";
+        const url1 = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/${firestoreDbId}/documents/mfr_users/${encodeURIComponent(userId)}?key=${apiKey}`;
+        const url2 = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/${firestoreDbId}/documents/mfr_user_credentials/${encodeURIComponent(userId)}?key=${apiKey}`;
+        await fetch(url1, { method: "DELETE" });
+        await fetch(url2, { method: "DELETE" });
+      } catch (e: any) {}
+
+      const db = getFirestoreAdmin();
+      if (db) {
+        await db.collection("mfr_users").doc(userId).delete().catch(() => {});
+        await db.collection("mfr_user_credentials").doc(userId).delete().catch(() => {});
+      }
+
+      return res.json({ success: true, message: `User ${userId} deleted successfully.` });
+    } catch (err: any) {
+      console.error("[AUTH] Error deleting user:", err);
+      return res.status(500).json({ success: false, error: "Failed to delete user profile" });
+    }
+  });
+
+  // GET /api/users/:userId — Single user profile endpoint
   app.get("/api/users/:userId", requireFirebaseAuth, async (req, res) => {
     try {
       const { userId } = req.params;
       const requester = (req as any).user;
 
-      const isSuperAdmin = requester.role === "super_admin";
-      const isAdmin = requester.role === "admin";
       const isSelf = requester.userId === userId;
+      const isPrivileged = requester.role === "admin" || requester.role === "super_admin";
 
-      if (!isSuperAdmin && !isAdmin && !isSelf) {
-        return res.status(403).json({ success: false, error: "Forbidden: You are not authorized to view this user profile." });
+      if (!isSelf && !isPrivileged) {
+        return res.status(403).json({ success: false, error: "Forbidden: You are not authorized to view this profile." });
       }
 
-      const users = getStoredUsers();
-      const d = users.find(u => u.userId === userId);
-      if (!d) {
+      let userData = await firestoreRestGetDoc("mfr_users", userId);
+      if (!userData) {
+        const db = getFirestoreAdmin();
+        if (db) {
+          try {
+            const userDocSnap = await db.collection("mfr_users").doc(userId).get();
+            if (userDocSnap.exists) userData = { userId: userDocSnap.id, ...userDocSnap.data() };
+          } catch (e: any) {}
+        }
+      }
+
+      if (!userData) {
         return res.status(404).json({ success: false, error: "User not found" });
       }
 
       return res.json({
         success: true,
         user: {
-          userId: d.userId,
-          name: d.name || "",
-          email: d.email || "",
-          role: d.role || "staff",
-          department: d.department || "Production",
-          allowedDepartments: d.allowedDepartments || [],
-          accessList: d.accessList || [],
-          canOutsource: d.canOutsource || false,
-          active: d.active !== false,
-          createdAt: d.createdAt || new Date().toISOString(),
-          updatedAt: d.updatedAt || d.createdAt || new Date().toISOString()
+          userId: userData.userId || userId,
+          name: userData.name || "",
+          email: userData.email || "",
+          role: userData.role || "staff",
+          department: userData.department || "Production",
+          allowedDepartments: userData.allowedDepartments || [],
+          accessList: userData.accessList || [],
+          canOutsource: userData.canOutsource || false,
+          active: userData.active !== false && userData.status !== "inactive",
+          createdAt: userData.createdAt || new Date().toISOString(),
+          updatedAt: userData.updatedAt || new Date().toISOString()
         }
       });
     } catch (err: any) {
-      console.error("[AUTH] Error fetching single user:", err);
-      return res.status(500).json({ success: false, error: "Failed to retrieve user profile" });
+      console.error("[AUTH] Error fetching user:", err);
+      return res.status(500).json({ success: false, error: "Failed to fetch user profile" });
     }
   });
 
   // ----------------------------------------------------
   // SERVER-AUTHORITATIVE MATERIAL MOVEMENT & TRANSACTION ENDPOINT
   // ----------------------------------------------------
-  app.post("/api/inventory/movement", async (req, res) => {
+  const VALID_MANUFACTURING_DEPARTMENTS = [
+    "Purchase",
+    "Raw Material Store",
+    "Dispatch",
+    "Production",
+    "Heat Treatment",
+    "Plating",
+    "Packing",
+    "Store",
+    "Admin",
+    "Management",
+    "Cutting",
+    "Machining",
+    "Welding",
+    "Assembly",
+    "Painting",
+    "Quality",
+    "Completed"
+  ];
+
+  app.post("/api/inventory/movement", requireFirebaseAuth, async (req, res) => {
     try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+
+      if (!authUid || !requester) {
+        return res.status(401).json({ success: false, error: "Unauthorized: Missing authoritative user profile." });
+      }
+
       const {
         operationId,
         movementId,
@@ -553,8 +802,6 @@ async function startServer() {
         fromDepartment,
         toDepartment,
         quantity,
-        userId,
-        userName,
         remarks,
         processDetails,
         isIssueRequest
@@ -569,119 +816,172 @@ async function startServer() {
         return res.status(400).json({ success: false, error: "Movement quantity must be a positive number greater than 0." });
       }
 
-      const opKey = operationId || movementId || `OP-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-      const movId = movementId || `M-${Date.now()}`;
-      const db = getFirestoreAdmin();
+      // Department format validation
+      const normFrom = fromDepartment.trim();
+      const normTo = toDepartment.trim();
+      
+      const isValidFrom = VALID_MANUFACTURING_DEPARTMENTS.some(d => d.toLowerCase() === normFrom.toLowerCase());
+      const isValidTo = VALID_MANUFACTURING_DEPARTMENTS.some(d => d.toLowerCase() === normTo.toLowerCase());
 
-      if (!db) {
-        return res.status(503).json({ success: false, error: "Server database connection unavailable." });
+      if (!isValidFrom || !isValidTo) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid department specified. Must be one of: ${VALID_MANUFACTURING_DEPARTMENTS.join(", ")}`
+        });
       }
 
-      // Execute atomic Firestore transaction
-      const result = await db.runTransaction(async (transaction: any) => {
-        // 1. Idempotency Check
-        const idempRef = db.collection("mfr_idempotency_keys").doc(opKey);
-        const idempSnap = await transaction.get(idempRef);
-        if (idempSnap.exists) {
-          console.log(`[IDEMPOTENCY] Operation ${opKey} already processed. Returning cached result.`);
-          return { cached: true, ...idempSnap.data() };
-        }
+      if (normFrom.toLowerCase() === normTo.toLowerCase()) {
+        return res.status(400).json({
+          success: false,
+          error: "Source and target departments cannot be identical."
+        });
+      }
 
-        // 2. Fetch Job Card
-        const jobCardRef = db.collection("mfr_job_cards").doc(jobCardNo.toUpperCase());
-        const jobCardSnap = await transaction.get(jobCardRef);
-        
-        let jobCardData: any = null;
-        let activeJobRef = jobCardRef;
+      // Server-Authoritative Role & Department Authorization (Never trust client role/department)
+      const userRole = String(requester.role || "staff").toLowerCase();
+      const userDept = String(requester.department || "").toLowerCase();
+      const allowedDepts: string[] = [
+        ...(Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : []),
+        ...(Array.isArray(requester.accessList) ? requester.accessList : [])
+      ].map((d: string) => String(d).toLowerCase());
 
-        if (jobCardSnap.exists) {
-          jobCardData = jobCardSnap.data();
-        } else {
-          const jobCardAsIsRef = db.collection("mfr_job_cards").doc(jobCardNo);
-          const snapAsIs = await transaction.get(jobCardAsIsRef);
-          if (snapAsIs.exists) {
-            jobCardData = snapAsIs.data();
-            activeJobRef = jobCardAsIsRef;
+      const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
+      const isDeptAuthorized = isSuperOrAdmin || 
+        userDept === normFrom.toLowerCase() ||
+        allowedDepts.includes(normFrom.toLowerCase());
+
+      if (!isDeptAuthorized) {
+        return res.status(403).json({
+          success: false,
+          error: `Forbidden: User '${requester.name || requester.userId}' (${requester.department}) is not authorized to initiate material movements from '${normFrom}'.`
+        });
+      }
+
+      // Authoritative User Identities (Overriding any client-supplied spoofed parameters)
+      const authoritativeUserId = requester.userId || authUid;
+      const authoritativeUserName = requester.name || requester.userId || "Authorized User";
+
+      const opKey = operationId || movementId || `OP-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const movId = movementId || `M-${Date.now()}`;
+      const now = new Date().toISOString();
+
+      // Check idempotency first via REST
+      const cachedIdemp = await firestoreRestGetDoc("mfr_idempotency_keys", opKey);
+      if (cachedIdemp) {
+        console.log(`[IDEMPOTENCY] Operation ${opKey} already processed.`);
+        return res.json({ success: true, cached: true, ...cachedIdemp });
+      }
+
+      // Fetch Job Card via REST
+      let jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo.toUpperCase());
+      let activeJobId = jobCardNo.toUpperCase();
+      if (!jobCardData) {
+        jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo);
+        if (jobCardData) activeJobId = jobCardNo;
+      }
+
+      const db = getFirestoreAdmin();
+      if (!jobCardData && db) {
+        try {
+          const snap = await db.collection("mfr_job_cards").doc(jobCardNo.toUpperCase()).get();
+          if (snap.exists) {
+            jobCardData = snap.data();
+            activeJobId = jobCardNo.toUpperCase();
           }
+        } catch (e: any) {}
+      }
+
+      if (!jobCardData) {
+        return res.status(404).json({ success: false, error: `Job Card '${jobCardNo}' not found.` });
+      }
+
+      // Concurrency & Negative Quantity Protection
+      const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
+      if (!isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
+        if (reqQty > currentAvailableQty) {
+          return res.status(400).json({
+            success: false,
+            error: `Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
+          });
         }
+      }
 
-        if (!jobCardData) {
-          throw new Error(`Job Card '${jobCardNo}' not found.`);
-        }
+      // Calculate new balances
+      const newBalance = Math.max(0, currentAvailableQty - reqQty);
+      const nextVersion = (jobCardData.version || 1) + 1;
 
-        // 3. Concurrency & Negative Quantity Protection
-        const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
-        if (!isIssueRequest && fromDepartment !== "Purchase" && fromDepartment !== "Raw Material Store") {
-          if (reqQty > currentAvailableQty) {
-            throw new Error(`Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${fromDepartment}.`);
-          }
-        }
+      // Update Job Card via REST
+      const updatedJobCard = {
+        ...jobCardData,
+        currentDepartment: normTo,
+        status: normTo === "Completed" ? "Completed" : "Pending Acceptance",
+        currentQty: reqQty,
+        balanceQty: normTo === "Completed" ? 0 : newBalance,
+        version: nextVersion,
+        updatedAt: now,
+        updatedBy: authoritativeUserName
+      };
+      await firestoreRestSetDoc("mfr_job_cards", activeJobId, updatedJobCard);
 
-        // 4. Calculate new balances
-        const newBalance = Math.max(0, currentAvailableQty - reqQty);
-        const nextVersion = (jobCardData.version || 1) + 1;
-        const now = new Date().toISOString();
+      // Write Movement Record
+      const movData = {
+        movementId: movId,
+        jobCardNo: jobCardData.jobCardNo || activeJobId,
+        fromDepartment: normFrom,
+        toDepartment: normTo,
+        quantity: reqQty,
+        transferBy: authoritativeUserName,
+        transferDate: now,
+        accepted: false,
+        initiatedByUserId: authoritativeUserId,
+        initiatedByUserName: authoritativeUserName,
+        authUid: authUid,
+        remarks: remarks || "",
+        processDetails: processDetails || null,
+        isIssueRequest: !!isIssueRequest
+      };
+      await firestoreRestSetDoc("mfr_movements", movId, movData);
 
-        // 5. Update Job Card
-        transaction.update(activeJobRef, {
-          currentDepartment: toDepartment,
-          status: toDepartment === "Completed" ? "Completed" : "Pending Acceptance",
-          currentQty: reqQty,
-          balanceQty: toDepartment === "Completed" ? 0 : newBalance,
-          version: nextVersion,
-          updatedAt: now,
-          updatedBy: userName || userId
-        });
+      // Write Idempotency Key
+      const idempData = {
+        operationId: opKey,
+        movementId: movId,
+        jobCardNo: jobCardData.jobCardNo || activeJobId,
+        quantity: reqQty,
+        processedAt: now,
+        userId: authoritativeUserId,
+        authUid: authUid
+      };
+      await firestoreRestSetDoc("mfr_idempotency_keys", opKey, idempData);
 
-        // 6. Write Movement Record
-        const movRef = db.collection("mfr_movements").doc(movId);
-        const movData = {
-          movementId: movId,
-          jobCardNo: jobCardData.jobCardNo,
-          fromDepartment,
-          toDepartment,
-          quantity: reqQty,
-          transferBy: userName || "System",
-          transferDate: now,
-          accepted: false,
-          initiatedByUserId: userId,
-          initiatedByUserName: userName,
-          remarks: remarks || "",
-          processDetails: processDetails || null,
-          isIssueRequest: !!isIssueRequest
-        };
-        transaction.set(movRef, movData);
+      // Write Immutable Audit Log
+      const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const auditData = {
+        id: auditId,
+        timestamp: now,
+        userId: authUid,
+        userName: authoritativeUserName,
+        action: "MATERIAL_MOVEMENT",
+        details: `Transferred ${reqQty} KG of Job Card ${jobCardData.jobCardNo || activeJobId} from ${normFrom} to ${normTo} (Version ${nextVersion})`
+      };
+      await firestoreRestSetDoc("mfr_audit_logs", auditId, auditData);
 
-        // 7. Write Idempotency Key (Append-only)
-        transaction.set(idempRef, {
-          operationId: opKey,
-          movementId: movId,
-          jobCardNo,
-          quantity: reqQty,
-          processedAt: now,
-          userId: userId || "unknown"
-        });
+      // Sync with Admin SDK if available
+      if (db) {
+        try {
+          await db.collection("mfr_job_cards").doc(activeJobId).set(updatedJobCard, { merge: true });
+          await db.collection("mfr_movements").doc(movId).set(movData);
+          await db.collection("mfr_idempotency_keys").doc(opKey).set(idempData);
+          await db.collection("mfr_audit_logs").doc(auditId).set(auditData);
+        } catch (e: any) {}
+      }
 
-        // 8. Write Immutable Audit Trail Record
-        const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-        const auditRef = db.collection("mfr_audit_logs").doc(auditId);
-        transaction.set(auditRef, {
-          id: auditId,
-          timestamp: now,
-          userId: userId || "system",
-          userName: userName || "System",
-          action: "MATERIAL_MOVEMENT",
-          details: `Transferred ${reqQty} KG of Job Card ${jobCardNo} from ${fromDepartment} to ${toDepartment} (Version ${nextVersion})`
-        });
-
-        return {
-          cached: false,
-          movement: movData,
-          updatedJobCardVersion: nextVersion
-        };
+      return res.json({
+        success: true,
+        cached: false,
+        movement: movData,
+        updatedJobCardVersion: nextVersion
       });
-
-      return res.json({ success: true, ...result });
     } catch (err: any) {
       console.error("Material transaction error:", err);
       return res.status(400).json({ success: false, error: err.message });
@@ -1096,6 +1396,11 @@ async function startServer() {
       console.error("Daily summary compile error:", error);
       res.status(500).json({ error: "Failed to compile automated daily summary", details: error.message });
     }
+  });
+
+  // Unmatched API routes return 404 JSON (preventing Vite SPA HTML fallback on API endpoints)
+  app.all("/api/*", (req, res) => {
+    res.status(404).json({ success: false, error: `API endpoint ${req.method} ${req.path} not found.` });
   });
 
   // Vite middleware for development

@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, signInWithCustomToken, signInAnonymously, signOut, onAuthStateChanged, GoogleAuthProvider } from 'firebase/auth';
+import { getAuth, signInWithCustomToken, signOut, onAuthStateChanged, GoogleAuthProvider } from 'firebase/auth';
 import { 
   getFirestore, 
   initializeFirestore,
@@ -155,32 +155,22 @@ if (!isPlaceholder) {
     const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
     const databaseId = (firebaseConfig as any).firestoreDatabaseId;
     
-    // Standard Firestore initialization matching official Firebase SDK guidelines
-    try {
-      dbInstance = initializeFirestore(app, {
-        localCache: persistentLocalCache({
-          tabManager: persistentMultipleTabManager()
-        })
-      }, databaseId);
-    } catch {
-      dbInstance = getFirestore(app, databaseId);
-    }
-
+    // Initialize Firestore with databaseId as required by Firebase skill
+    dbInstance = getFirestore(app, databaseId);
     authInstance = getAuth(app);
     useRealFirebase = true;
-    console.log(`Real Firebase and Firestore initialized successfully for database: ${databaseId || '(default)'}!`);
 
-    // Test connection asynchronously in background per guidelines
-    getDocFromServer(doc(dbInstance, 'test', 'connection'))
-      .then(() => {
-        setFirestoreOffline(false);
-      })
-      .catch((testErr) => {
-        if (testErr instanceof Error && (testErr.message.includes('the client is offline') || testErr.message.includes('offline') || testErr.message.includes('unavailable'))) {
-          console.info("[Offline/Preview Mode] Device operating in local persistence cache mode.");
+    // Test connection asynchronously per Firebase guidelines with graceful fallback
+    if (dbInstance) {
+      withTimeout(getDocFromServer(doc(dbInstance, 'test', 'connection')), 2500)
+        .then(() => {
+          setFirestoreOffline(false);
+        })
+        .catch((testErr) => {
+          // Gracefully operate in local offline cache mode if Cloud Firestore backend is temporarily unreachable
           setFirestoreOffline(true);
-        }
-      });
+        });
+    }
   } catch (error) {
     console.error("Failed to initialize real Firebase:", error);
   }
@@ -188,16 +178,13 @@ if (!isPlaceholder) {
   console.log("Starting app in HIGH-FIDELITY LOCAL STORAGE EMULATION mode (Real Firebase disabled).");
 }
 
-export { useRealFirebase, signInWithCustomToken, signInAnonymously, signOut, onAuthStateChanged };
+export { useRealFirebase, signInWithCustomToken, signOut, onAuthStateChanged };
 export const db = dbInstance;
 export const auth = authInstance;
 
 // ============================================
 // MOCK STATE AND REALTIME STREAM DATABASE
 // ============================================
-
-// Empty initial user seed — user credentials and accounts are provisioned via authoritative authentication
-const defaultUsers: UserProfile[] = [];
 
 const defaultSavedItems: SavedItem[] = [
   {
@@ -603,7 +590,7 @@ export class DBService {
     }
 
     // Fall back to local storage offline cache
-    usersList = getLocalStorageItem<UserProfile[]>('mfr_users', defaultUsers);
+    usersList = getLocalStorageItem<UserProfile[]>('mfr_users', []);
     return usersList.map((u: any) => ({
       userId: u.userId,
       name: u.name || '',

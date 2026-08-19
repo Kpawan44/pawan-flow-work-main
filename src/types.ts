@@ -28,9 +28,9 @@ export interface UserProfile {
   status?: 'active' | 'inactive';
   createdAt: string;
   lastLogin?: string;
+  pin?: string;
+  pinHash?: string;
   canOutsource?: boolean; // Authorized Outsourcing Assignee
-  pin?: string; // Legacy plaintext PIN (deprecated — use pinHash)
-  pinHash?: string; // bcrypt hash of the user's 4-digit PIN
 }
 
 export interface AssemblyComponent {

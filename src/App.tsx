@@ -48,7 +48,7 @@ import {
   Info,
   RotateCcw
 } from 'lucide-react';
-import { DBService, auth, signInWithCustomToken, signInAnonymously, signOut, onAuthStateChanged } from './lib/firebase';
+import { DBService, auth, signInWithCustomToken, signOut, onAuthStateChanged } from './lib/firebase';
 import { runDailyAutoBackupIfNeeded } from './lib/backup';
 import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SyncQueueItem } from './types';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
@@ -647,37 +647,51 @@ export default function App() {
   useEffect(() => {
     refreshUsers();
 
+    // Check if session storage already has an active user profile
+    const storedProfileStr = sessionStorage.getItem('mfr_active_user_profile');
+    const storedUid = sessionStorage.getItem('mfr_active_user_uid');
+    if (storedProfileStr) {
+      try {
+        const parsed = JSON.parse(storedProfileStr);
+        if (parsed && parsed.userId && parsed.active !== false) {
+          setCurrentUser(parsed);
+        }
+      } catch (e) {
+        console.warn("Could not parse stored profile:", e);
+      }
+    } else if (storedUid) {
+      DBService.getUserProfile(storedUid).then(profile => {
+        if (profile && profile.active !== false) {
+          setCurrentUser(profile);
+          sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(profile));
+        }
+      }).catch(err => console.warn("Failed to load stored user profile:", err));
+    }
+
     let unsubAuth = () => {};
     if (auth) {
       unsubAuth = onAuthStateChanged(auth, async (firebaseUser) => {
         if (firebaseUser) {
+          const activeUid = sessionStorage.getItem('mfr_active_user_uid') || firebaseUser.uid;
           try {
-            const userProfile = await DBService.getUserProfile(firebaseUser.uid);
+            const userProfile = await DBService.getUserProfile(activeUid);
             if (userProfile) {
               if (userProfile.active === false) {
                 // Inactive user, enforce logout
                 if (auth) await signOut(auth);
                 setCurrentUser(null);
                 sessionStorage.removeItem('mfr_active_user_uid');
+                sessionStorage.removeItem('mfr_active_user_profile');
                 setAuthError('Your account has been deactivated. Please contact an administrator.');
               } else {
                 setCurrentUser(userProfile);
                 sessionStorage.setItem('mfr_active_user_uid', userProfile.userId);
+                sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(userProfile));
               }
-            } else {
-              // User document deleted or not found
-              if (auth) await signOut(auth);
-              setCurrentUser(null);
-              sessionStorage.removeItem('mfr_active_user_uid');
-              setAuthError('User profile record not found. Please contact an administrator.');
             }
           } catch (err) {
             console.error("Auth state synchronization error:", err);
           }
-        } else {
-          // Unauthenticated or signed out
-          setCurrentUser(null);
-          sessionStorage.removeItem('mfr_active_user_uid');
         }
       });
     }
@@ -898,11 +912,11 @@ export default function App() {
     setAuthError('');
     setRegSuccess('');
 
-    const nameToMatch = loginName.trim().toLowerCase();
+    const nameToMatch = loginName.trim();
     const pinToMatch = loginPin.trim();
 
     if (!nameToMatch) {
-      setAuthError('Please enter your Registered Full Name.');
+      setAuthError('Please enter your Registered Full Name or select an account.');
       return;
     }
 
@@ -911,25 +925,12 @@ export default function App() {
       return;
     }
 
-    const matchedUser = users.find(u => u.name.trim().toLowerCase() === nameToMatch);
-
-    if (!matchedUser) {
-      setAuthError('Invalid credentials. Please verify your Registered Full Name and Security PIN.');
-      return;
-    }
-
-    if (!matchedUser.active) {
-      setAuthError(`Your profile (${matchedUser.name}) is currently inactive. Please contact your manager.`);
-      setLoginPin('');
-      return;
-    }
-
     setIsVerifyingPin(true);
     try {
       let pinVerified = false;
 
       if (matchedUser.pinHash) {
-        // Client-side bcrypt — works on web, Android, and Electron without a server
+        // Client-side bcrypt — works on web, Android (Capacitor), and Electron
         pinVerified = await bcrypt.compare(pinToMatch, matchedUser.pinHash);
       } else {
         // No hash yet — try server upgrade (Electron/local dev only)

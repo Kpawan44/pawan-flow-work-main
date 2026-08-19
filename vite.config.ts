@@ -5,7 +5,6 @@ import { defineConfig } from 'vite';
 
 export default defineConfig(() => {
   const isElectron = process.env.BUILD_TARGET === 'electron';
-
   return {
     base: isElectron ? './' : '/',
     plugins: [react(), tailwindcss()],
