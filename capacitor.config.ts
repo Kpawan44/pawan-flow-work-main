@@ -4,10 +4,8 @@ const config: CapacitorConfig = {
   appId: 'com.pmw.tracker',
   appName: 'PMW Tracker',
   webDir: 'dist',
-  server: {
-    androidScheme: 'https',
-    url: 'https://my-project-9ca72.web.app',
-    cleartext: false
+  android: {
+    allowMixedContent: false
   }
 };
 
