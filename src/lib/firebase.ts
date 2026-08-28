@@ -3112,6 +3112,44 @@ export class DBService {
     });
   }
 
+  static getDepartmentIncomingTransfers(department: Department, movementsList?: MaterialMovement[]): MaterialMovement[] {
+    const list = movementsList || getLocalStorageItem<MaterialMovement[]>('mfr_movements', []);
+    return list.filter(m => {
+      // 1. Exclude tombstoned/deleted movements
+      if (m.deletedDate) return false;
+
+      // 2. Special Issue Request from Raw Material Store to Production
+      if (m.isIssueRequest && m.fromDepartment === 'Raw Material Store' && m.toDepartment === 'Production') {
+        return department === 'Production' && !m.accepted && m.issueStatus === 'Issued';
+      }
+
+      // 3. Other pending issue requests belong to Issue Requests tab, not standard Ingress
+      if (m.isIssueRequest) {
+        return false;
+      }
+
+      // 4. Standard Department Incoming Transfer (Authoritative Department Inbox)
+      return m.toDepartment === department && !m.accepted;
+    });
+  }
+
+  static subscribeDepartmentIncomingTransfers(
+    department: Department,
+    onUpdate: (transfers: MaterialMovement[]) => void
+  ): () => void {
+    const computeAndNotify = (allMovements: MaterialMovement[]) => {
+      const incoming = this.getDepartmentIncomingTransfers(department, allMovements);
+      onUpdate(incoming);
+    };
+
+    return this.subscribeMovementsIncremental(
+      (allMovements) => computeAndNotify(allMovements),
+      (_changes) => {
+        this.getMovements().then(all => computeAndNotify(all));
+      }
+    );
+  }
+
   static subscribeAuditLogsIncremental(
     onInitial: (logs: AuditLog[]) => void,
     onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => void

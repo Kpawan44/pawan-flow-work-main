@@ -1635,16 +1635,11 @@ Please adjust the quantity or request additional raw material issue.`);
   };
 
   // --- FILTERED LISTS ---
-  // A. Incoming Transfers waiting for acceptance inside this active department
-  const incomingTransfers = movements.filter(m => {
-    if (m.isIssueRequest && m.fromDepartment === 'Raw Material Store' && m.toDepartment === 'Production') {
-      return activeDept === 'Production' && !m.accepted && m.issueStatus === 'Issued';
-    }
-    if (m.isIssueRequest) {
-      return false;
-    }
-    return m.toDepartment === activeDept && !m.accepted;
-  });
+  // A. Department Inbox Architecture: Authoritative Incoming Transfers waiting for acceptance
+  const departmentIncomingTransfers = useMemo(() => {
+    return DBService.getDepartmentIncomingTransfers(activeDept, movements);
+  }, [activeDept, movements]);
+  const incomingTransfers = departmentIncomingTransfers;
 
   const pendingIssueRequests = movements.filter(m => {
     return m.isIssueRequest && m.fromDepartment === 'Store' && !m.accepted;
@@ -2138,7 +2133,7 @@ Please adjust the quantity or request additional raw material issue.`);
                   activeSubView === 'incoming' ? 'bg-slate-800 text-white shadow' : 'hover:text-white text-slate-400'
                 }`}
               >
-                <span>Incoming Ingress</span>
+                <span>Incoming Ingress ({incomingTransfers.length})</span>
                 {incomingTransfers.length > 0 && (
                   <span className="bg-red-500 text-white text-[9.5px] font-bold h-4.5 w-4.5 rounded-full flex items-center justify-center animate-bounce shrink-0">
                     {incomingTransfers.length}

@@ -1,9 +1,9 @@
 import { AuditLog, JobCard, MaterialMovement } from '../types';
 
 let cachedToken: string | null = null;
-let spreadsheetId: string | null = localStorage.getItem('mfr_sheets_spreadsheet_id');
-let spreadsheetUrl: string | null = localStorage.getItem('mfr_sheets_spreadsheet_url');
-let spreadsheetName: string | null = localStorage.getItem('mfr_sheets_spreadsheet_name') || 'Factory Material Flow Ledger';
+let spreadsheetId: string | null = typeof localStorage !== 'undefined' ? localStorage.getItem('mfr_sheets_spreadsheet_id') : null;
+let spreadsheetUrl: string | null = typeof localStorage !== 'undefined' ? localStorage.getItem('mfr_sheets_spreadsheet_url') : null;
+let spreadsheetName: string | null = (typeof localStorage !== 'undefined' ? localStorage.getItem('mfr_sheets_spreadsheet_name') : null) || 'Factory Material Flow Ledger';
 
 export function setGoogleAccessToken(token: string | null) {
   cachedToken = token;
