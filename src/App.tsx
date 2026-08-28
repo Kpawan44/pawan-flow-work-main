@@ -553,10 +553,27 @@ export default function App() {
   };
 
   // --- PER-COLLECTION REFRESH & INCREMENTAL SYNC ---
-  const refreshUsers = async (forceFresh = true) => {
+  const refreshUsers = async (forceFresh = true, source = 'refreshUsers') => {
     try {
       const u = await DBService.getUsers(forceFresh);
-      setUsers(u);
+      const localGen = localStorage.getItem('mfr_system_generation') || 'none';
+      const isFirstRun = localStorage.getItem('mfr_is_first_run') === 'true' || sessionStorage.getItem('mfr_is_first_run') === 'true';
+
+      setUsers(prev => {
+        const prevCount = prev.length;
+        const prevIds = prev.map(p => p.userId).join(',');
+        const newCount = u.length;
+        const newIds = u.map(n => n.userId).join(',');
+
+        console.log(`[USER_STATE_UPDATE] timestamp=${new Date().toISOString()} source=${source} previous=${prevCount} (${prevIds}) new=${newCount} (${newIds}) generation=${localGen}`);
+
+        // Prevent transient empty overwrites when existing users are present unless system is explicitly in firstRun/reset
+        if (newCount === 0 && prevCount > 0 && !isFirstRun) {
+          console.warn(`[USER_STATE_GUARD] Suppressed transient 0-user overwrite from source=${source}`);
+          return prev;
+        }
+        return u;
+      });
     } catch (err) {
       console.error("Failed to refresh users", err);
     }
@@ -659,7 +676,20 @@ export default function App() {
         DBService.getCompanyConfig()
       ]);
 
-      setUsers(u);
+      const localGen = localStorage.getItem('mfr_system_generation') || 'none';
+      const isFirstRun = localStorage.getItem('mfr_is_first_run') === 'true' || sessionStorage.getItem('mfr_is_first_run') === 'true';
+
+      setUsers(prev => {
+        const prevCount = prev.length;
+        const newCount = u.length;
+        console.log(`[USER_STATE_UPDATE] timestamp=${new Date().toISOString()} source=refreshAllStates previous=${prevCount} new=${newCount} generation=${localGen}`);
+        if (newCount === 0 && prevCount > 0 && !isFirstRun) {
+          console.warn(`[USER_STATE_GUARD] Suppressed transient 0-user overwrite in refreshAllStates`);
+          return prev;
+        }
+        return u;
+      });
+
       setJobCards(jc);
       setMovements(mov);
       setProcessTransfers(trans);
@@ -869,7 +899,7 @@ export default function App() {
     };
 
     // Attach targeted per-collection real-time listeners and incremental sync streams
-    const unsubUsers = DBService.subscribeToUpdates('mfr_users', makeDebounced('mfr_users', refreshUsers));
+    const unsubUsers = DBService.subscribeToUpdates('mfr_users', makeDebounced('mfr_users', () => refreshUsers(true, 'firestore_snapshot')));
     const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', makeDebounced('mfr_job_cards', refreshJobCards));
     const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', makeDebounced('mfr_notifications', refreshNotifications));
     const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', makeDebounced('mfr_company_config', refreshCompanyConfig));
@@ -881,7 +911,7 @@ export default function App() {
     const unsubSSE = DBService.subscribeToRealtimeEvents((event) => {
       if (event.type === 'USER_UPDATED') {
         DBService.invalidateCache('mfr_users');
-        refreshUsers();
+        refreshUsers(true, 'sse_event');
       } else if (event.type === 'MOVEMENT_UPDATED' || event.type === 'DATA_SYNCED') {
         DBService.invalidateCache('mfr_movements');
         refreshAllStates();

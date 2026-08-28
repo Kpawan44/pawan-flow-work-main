@@ -224,15 +224,10 @@ function getLocalStorageItem<T>(key: string, defaultValue: T): T {
 }
 
 function setLocalStorageItem<T>(key: string, value: T) {
-  localStorage.setItem(key, JSON.stringify(value));
-  // Emit state change event for active onSnapshot listeners
-  window.dispatchEvent(new CustomEvent('mock-db-update', { detail: { collection: key } }));
-  if (typeof window !== 'undefined') {
-    if (key === 'mfr_movements') DBService.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
-    else if (key === 'mfr_job_cards') DBService.broadcastEvent('JOB_UPDATED').catch(() => {});
-    else if (key === 'mfr_users') DBService.broadcastEvent('USER_UPDATED').catch(() => {});
-    else if (key === 'mfr_notifications') DBService.broadcastEvent('NOTIFICATION_UPDATED').catch(() => {});
-    else if (key === 'mfr_process_transfers') DBService.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    console.warn(`[CACHE] Failed to write key ${key} to localStorage:`, e);
   }
 }
 
@@ -446,10 +441,10 @@ export class DBService {
     }
     let usersList: UserProfile[] = [];
 
-    // 1. Try server-authoritative API (works on web and mobile)
+    // 1. Authoritative API Fetch
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2500);
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
       const headers = await this.getAuthHeaders();
       const res = await fetch(`${getApiBaseUrl()}/api/users`, { headers, signal: controller.signal });
       clearTimeout(timeoutId);
@@ -492,19 +487,15 @@ export class DBService {
         }
       }
     } catch (apiErr) {
-      // Fall through to direct Firestore
+      // API unavailable or network timeout; fall through to direct Firestore or cache
     }
 
-    // 2. Direct Firestore Fast Fetch
+    // 2. Direct Firestore Fast Fetch (Read only without overwriting cache on empty)
     if (useRealFirebase && db) {
       try {
         const snapshot = await getDocs(collection(db, 'mfr_users'));
-        if (snapshot.empty) {
-          setLocalStorageItem('mfr_users', []);
-          this.setMemCache('mfr_users', []);
-          return [];
-        }
-        let foundSuperAdmin = false;
+        if (!snapshot.empty) {
+          let foundSuperAdmin = false;
           usersList = snapshot.docs
             .map(d => {
               const data = d.data();
@@ -535,19 +526,22 @@ export class DBService {
                 updatedAt: data.updatedAt || data.createdAt || new Date().toISOString()
               };
             });
-          setLocalStorageItem('mfr_users', usersList);
-          this.setMemCache('mfr_users', usersList);
-          return usersList;
+          if (usersList.length > 0) {
+            setLocalStorageItem('mfr_users', usersList);
+            this.setMemCache('mfr_users', usersList);
+            return usersList;
+          }
+        }
       } catch (dbErr) {
-        console.warn("Direct Firestore getUsers fallback error:", dbErr);
+        // Direct Firestore fallback failed; fall back to local storage cache
       }
     }
 
     // 3. Fall back to local storage offline cache
     const LEGACY_PURGE_IDS = new Set(['u-1', 'u-2', 'u-3', 'u-4', 'u-5', 'u-6', 'u-7', 'u-8', 'u-2301', 'u-7857']);
     let foundSuperAdminCache = false;
-    usersList = getLocalStorageItem<UserProfile[]>('mfr_users', []);
-    const cleanList = usersList
+    const cachedUsers = getLocalStorageItem<UserProfile[]>('mfr_users', []);
+    const cleanList = cachedUsers
       .filter(u => u && u.userId && !LEGACY_PURGE_IDS.has(String(u.userId).toLowerCase().trim()) && u.active !== false && (u as any).status !== 'deleted' && !(u as any).deletedAt)
       .map((u: any) => {
         let r = u.role || 'staff';
@@ -573,8 +567,9 @@ export class DBService {
           updatedAt: u.updatedAt || u.createdAt || new Date().toISOString()
         };
       });
-    setLocalStorageItem('mfr_users', cleanList);
-    this.setMemCache('mfr_users', cleanList);
+    if (cleanList.length > 0) {
+      this.setMemCache('mfr_users', cleanList);
+    }
     return cleanList;
   }
 
