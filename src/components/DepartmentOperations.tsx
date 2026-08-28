@@ -1688,7 +1688,7 @@ Please adjust the quantity or request additional raw material issue.`);
         .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
         .reduce((sum, m) => sum + m.quantity, 0);
       const pendingProdQty = c.orderQty - totalMovedFromProd;
-      return (c.processType === 'Manufacturing' && (c.currentDepartment === 'Production' || pendingProdQty > 0));
+      return (c.processType !== 'Purchase' && (c.currentDepartment === 'Production' || pendingProdQty > 0));
     }
     if (activeDept === 'Heat Treatment') {
       const totalReceivedAtHT = movements
@@ -5589,6 +5589,33 @@ Please adjust the quantity or request additional raw material issue.`);
           {/* B. OPERATIONS PANEL SUBVIEW (ACTIVE PRODUCTION STEPS AND FIELDS UPDATES) */}
           {activeSubView === 'operations' && (
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
+              {incomingTransfers.length > 0 && (
+                <div 
+                  onClick={() => setActiveSubView('incoming')}
+                  className="mb-4 p-3.5 bg-gradient-to-r from-red-500/15 via-amber-500/10 to-transparent border border-red-500/30 rounded-xl flex items-center justify-between gap-3 cursor-pointer hover:border-red-500/60 transition shadow-xs group"
+                >
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="text-xl animate-bounce">📥</span>
+                    <div>
+                      <p className="text-xs font-bold text-red-600 dark:text-red-400 font-sans flex items-center gap-1.5">
+                        <span>{incomingTransfers.length} Incoming Material Transfer{incomingTransfers.length > 1 ? 's' : ''} Waiting for Inward Acceptance</span>
+                        <span className="bg-red-500 text-white text-[9.5px] px-1.5 py-0.2 rounded-full font-bold">Action Needed</span>
+                      </p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono mt-0.5">
+                        Transferred from {Array.from(new Set(incomingTransfers.map(m => m.fromDepartment))).join(', ')}. Click here to accept cargo and start processing.
+                      </p>
+                    </div>
+                  </div>
+                  <button 
+                    type="button" 
+                    className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-lg shadow-sm group-hover:scale-105 transition shrink-0 cursor-pointer flex items-center gap-1"
+                  >
+                    <span>View & Accept</span>
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 border-b border-slate-100 dark:border-slate-800 pb-3">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2">
                   <span>⚙️ In-Process Shop Floor Queue</span>
