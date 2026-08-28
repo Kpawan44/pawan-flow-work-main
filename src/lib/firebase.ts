@@ -1044,8 +1044,9 @@ export class DBService {
 
     const newJob: JobCard = {
       ...job,
-      status: job.status || 'Pending Acceptance',
+      status: job.status || (job.currentDepartment === 'Production' ? 'Pending' : 'Pending Acceptance'),
       createdBy: creatorName,
+      createdByUserId: creatorId,
       jobCardNo,
       orderNo,
       balanceQty: job.orderQty, // initially complete orderQty
@@ -1062,6 +1063,7 @@ export class DBService {
     const newMovementId = `M-${2000 + movements.length + 1}`;
     
     const unitLabel = job.unit || 'KG';
+    const isDirectProductionReady = newJob.status === 'Pending' || newJob.status === 'In Process';
     const defaultMovement: MaterialMovement = isPurchase ? {
       movementId: newMovementId,
       jobCardNo,
@@ -1080,7 +1082,9 @@ export class DBService {
       quantity: job.orderQty,
       transferBy: creatorName,
       transferDate: new Date().toISOString(),
-      accepted: false,
+      accepted: isDirectProductionReady,
+      acceptedBy: isDirectProductionReady ? creatorName : undefined,
+      acceptedDate: isDirectProductionReady ? new Date().toISOString() : undefined,
       remarks: 'Order registered. Dispatching raw material and job ticket to Production.'
     };
 
@@ -2966,6 +2970,74 @@ export class DBService {
       const customEvent = e as CustomEvent;
       if (customEvent.detail && customEvent.detail.collection === collectionName) {
         callback();
+      }
+    };
+    window.addEventListener('mock-db-update', handler);
+    return this.registerUnsubscriber(() => {
+      window.removeEventListener('mock-db-update', handler);
+    });
+  }
+
+  static subscribeJobCardsIncremental(
+    onInitial: (jobCards: JobCard[]) => void,
+    onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: JobCard }[]) => void
+  ): () => void {
+    if (useRealFirebase && db) {
+      try {
+        let isInitial = true;
+        const unsub = onSnapshot(collection(db, 'mfr_job_cards'), (snapshot) => {
+          const localTombs = new Set(getLocalStorageItem<string[]>('mfr_deleted_job_cards', []).map(t => t.toLowerCase().trim()));
+          if (isInitial) {
+            isInitial = false;
+            const all: JobCard[] = [];
+            snapshot.forEach(d => {
+              const data = d.data() as JobCard;
+              if (data && data.jobCardNo) {
+                const jcNo = String(data.jobCardNo).toLowerCase().trim();
+                if (!localTombs.has(jcNo) && (data as any).active !== false && (data as any).status !== 'deleted' && !(data as any).deletedAt) {
+                  all.push(data);
+                }
+              }
+            });
+            const sorted = all.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+            onInitial(sorted);
+          } else {
+            const changes = snapshot.docChanges().map(change => {
+              const docData = change.doc.data() as JobCard;
+              return {
+                type: change.type as 'added' | 'modified' | 'removed',
+                doc: docData
+              };
+            }).filter(c => {
+              if (!c.doc || !c.doc.jobCardNo) return false;
+              const jcNo = String(c.doc.jobCardNo).toLowerCase().trim();
+              if (localTombs.has(jcNo)) return false;
+              if ((c.doc as any).active === false || (c.doc as any).status === 'deleted' || (c.doc as any).deletedAt) {
+                return false;
+              }
+              return true;
+            });
+            if (changes.length > 0) {
+              onChanges(changes);
+            }
+          }
+        }, (err) => {
+          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
+          console.error("Firestore watch failed for job cards:", err);
+          try {
+            handleFirestoreError(err, OperationType.GET, 'mfr_job_cards');
+          } catch (e) {}
+        });
+        return this.registerUnsubscriber(unsub);
+      } catch (err) {
+        console.error("Failed to register job cards incremental listener:", err);
+      }
+    }
+
+    const handler = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail && customEvent.detail.collection === 'mfr_job_cards') {
+        this.getJobCards().then(onInitial);
       }
     };
     window.addEventListener('mock-db-update', handler);

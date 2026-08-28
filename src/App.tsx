@@ -625,6 +625,34 @@ export default function App() {
     });
   };
 
+  const applyJobCardChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: JobCard }[]) => {
+    setJobCards(prev => {
+      const map = new Map<string, JobCard>(prev.map(c => [c.jobCardNo.toLowerCase(), c]));
+      let localTombs = new Set<string>();
+      try {
+        const rawTombs = JSON.parse(localStorage.getItem('mfr_deleted_job_cards') || '[]');
+        if (Array.isArray(rawTombs)) {
+          localTombs = new Set(rawTombs.map((t: any) => String(t).toLowerCase().trim()));
+        }
+      } catch (_) {}
+      for (const change of changes) {
+        const jcNo = change.doc.jobCardNo.toLowerCase();
+        if (localTombs.has(jcNo) || change.type === 'removed') {
+          map.delete(jcNo);
+        } else {
+          map.set(jcNo, change.doc);
+        }
+      }
+      const updated = Array.from(map.values()).sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      setSelectedJob(prevSelected => {
+        if (!prevSelected) return null;
+        const fresh = map.get(prevSelected.jobCardNo.toLowerCase());
+        return fresh || prevSelected;
+      });
+      return updated;
+    });
+  };
+
   const applyAuditLogChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => {
     setAuditLogs(prev => {
       const map = new Map<string, AuditLog>(prev.map(l => [l.id, l]));
@@ -900,7 +928,7 @@ export default function App() {
 
     // Attach targeted per-collection real-time listeners and incremental sync streams
     const unsubUsers = DBService.subscribeToUpdates('mfr_users', makeDebounced('mfr_users', () => refreshUsers(true, 'firestore_snapshot')));
-    const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', makeDebounced('mfr_job_cards', refreshJobCards));
+    const unsubJobs = DBService.subscribeJobCardsIncremental(setJobCards, applyJobCardChanges);
     const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', makeDebounced('mfr_notifications', refreshNotifications));
     const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', makeDebounced('mfr_company_config', refreshCompanyConfig));
     const unsubMoves = DBService.subscribeMovementsIncremental(setMovements, applyMovementChanges);
