@@ -10,6 +10,7 @@ import bcrypt from "bcryptjs";
 import { initializeApp, getApps, getApp } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
+import { GoogleAuth } from "google-auth-library";
 
 // Read Firebase applet configuration for Admin SDK
 let firebaseConfig: any = null;
@@ -133,13 +134,33 @@ async function startServer() {
     return fields;
   }
 
+  let gcpAuthClient: GoogleAuth | null = null;
+  async function getGcpAccessToken(): Promise<string | null> {
+    try {
+      if (!gcpAuthClient) {
+        gcpAuthClient = new GoogleAuth({
+          scopes: ["https://www.googleapis.com/auth/datastore", "https://www.googleapis.com/auth/cloud-platform"]
+        });
+      }
+      const client = await gcpAuthClient.getClient();
+      const tokenRes = await client.getAccessToken();
+      return tokenRes?.token || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function firestoreRestGetDoc(collectionName: string, docId: string): Promise<any> {
     try {
       const apiKey = firebaseConfig?.apiKey || "";
       const projId = firebaseProjectId;
       const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}?key=${apiKey}`;
-      const res = await fetch(url);
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
+      const gcpToken = await getGcpAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+
+      const res = await fetch(url, { headers });
       if (res.status === 404) return null;
       if (!res.ok) {
         console.warn(`[Firestore REST] GET ${collectionName}/${docId} returned status ${res.status}`);
@@ -160,7 +181,7 @@ async function startServer() {
       const apiKey = firebaseConfig?.apiKey || "";
       const projId = firebaseProjectId;
       const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery?key=${apiKey}`;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery${apiKey ? `?key=${apiKey}` : ""}`;
       const queryBody = {
         structuredQuery: {
           from: [{ collectionId: collectionName }],
@@ -174,9 +195,13 @@ async function startServer() {
           limit: 1
         }
       };
+      const gcpToken = await getGcpAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(queryBody)
       });
       if (!res.ok) return null;
@@ -199,15 +224,19 @@ async function startServer() {
       const apiKey = firebaseConfig?.apiKey || "";
       const projId = firebaseProjectId;
       const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery?key=${apiKey}`;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery${apiKey ? `?key=${apiKey}` : ""}`;
       const queryBody = {
         structuredQuery: {
           from: [{ collectionId: collectionName }]
         }
       };
+      const gcpToken = await getGcpAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+
       const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(queryBody)
       });
       if (!res.ok) return [];
@@ -237,11 +266,15 @@ async function startServer() {
       const apiKey = firebaseConfig?.apiKey || "";
       const projId = firebaseProjectId;
       const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}?key=${apiKey}`;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
       const encodedFields = encodeFirestoreFields(data);
+      const gcpToken = await getGcpAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+
       const res = await fetch(url, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ fields: encodedFields })
       });
       return res.ok;
@@ -256,9 +289,14 @@ async function startServer() {
       const apiKey = firebaseConfig?.apiKey || "";
       const projId = firebaseProjectId;
       const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}?key=${apiKey}`;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
+      const gcpToken = await getGcpAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+
       const res = await fetch(url, {
-        method: "DELETE"
+        method: "DELETE",
+        headers
       });
       return res.ok;
     } catch (err: any) {
@@ -595,11 +633,35 @@ async function startServer() {
   // GET /api/system/state - Public/Client state inspection (reset generation & user count)
   app.get("/api/system/state", async (req, res) => {
     try {
-      const activeUsers = Object.values(customUsersStore).filter((u: any) => u && u.active !== false && u.status !== 'deleted');
+      let activeCount = 0;
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const snap = await db.collection("mfr_users").get();
+            const activeDocs = snap.docs.filter((d: any) => {
+              const data = d.data();
+              const docUid = (data?.userId || d.id || "").toLowerCase().trim();
+              if (deletedUserIds.has(docUid)) return false;
+              return data && data.active !== false && data.status !== 'deleted' && !data.deletedAt;
+            });
+            activeCount = activeDocs.length;
+          }
+        } catch (_) {}
+      }
+      if (activeCount === 0 && adminSdkHasPermission === false) {
+        const restUsers = await firestoreRestQueryAll("mfr_users");
+        const activeDocs = restUsers.filter((u: any) => {
+          const docUid = (u?.userId || u?.id || "").toLowerCase().trim();
+          if (deletedUserIds.has(docUid)) return false;
+          return u && u.active !== false && u.status !== 'deleted' && !u.deletedAt;
+        });
+        activeCount = activeDocs.length;
+      }
       return res.json({
         success: true,
         factoryResetGeneration: currentResetGeneration,
-        activeUsersCount: activeUsers.length,
+        activeUsersCount: activeCount,
         timestamp: new Date().toISOString()
       });
     } catch (err: any) {
@@ -700,10 +762,29 @@ async function startServer() {
 
           // Query by exact name
           if (!user) {
-            const qSnap = await db.collection("mfr_users").where("name", "==", cleanKey).limit(1).get();
+            const qSnap = await db.collection("mfr_users").where("name", "==", cleanKey).get();
             if (!qSnap.empty) {
-              user = qSnap.docs[0].data();
-              uid = qSnap.docs[0].id;
+              for (const d of qSnap.docs) {
+                const candUser = d.data();
+                const candUid = candUser.userId || d.id;
+                const cSnap = await db.collection("mfr_user_credentials").doc(candUid).get();
+                if (cSnap.exists && cSnap.data()?.pinHash) {
+                  user = candUser;
+                  uid = candUid;
+                  pinHash = cSnap.data()?.pinHash;
+                  break;
+                }
+                if (candUser.pinHash) {
+                  user = candUser;
+                  uid = candUid;
+                  pinHash = candUser.pinHash;
+                  break;
+                }
+              }
+              if (!user) {
+                user = qSnap.docs[0].data();
+                uid = user.userId || qSnap.docs[0].id;
+              }
             }
           }
 
@@ -712,7 +793,7 @@ async function startServer() {
             const qSnap = await db.collection("mfr_users").where("email", "==", cleanKey).limit(1).get();
             if (!qSnap.empty) {
               user = qSnap.docs[0].data();
-              uid = qSnap.docs[0].id;
+              uid = user.userId || qSnap.docs[0].id;
             }
           }
 
@@ -725,13 +806,31 @@ async function startServer() {
               return data && typeof data.name === "string" && String(data.name).trim().toLowerCase() === targetLower;
             });
 
-            if (matches.length === 1) {
+            for (const m of matches) {
+              const mData = m.data();
+              const mUid = mData.userId || m.id;
+              const cSnap = await db.collection("mfr_user_credentials").doc(mUid).get();
+              if (cSnap.exists && cSnap.data()?.pinHash) {
+                user = mData;
+                uid = mUid;
+                pinHash = cSnap.data()?.pinHash;
+                break;
+              }
+              if (mData.pinHash) {
+                user = mData;
+                uid = mUid;
+                pinHash = mData.pinHash;
+                break;
+              }
+            }
+
+            if (!user && matches.length > 0) {
               user = matches[0].data();
-              uid = matches[0].id;
+              uid = user.userId || matches[0].id;
             }
           }
 
-          if (user && uid) {
+          if (user && uid && !pinHash) {
             const credSnap = await db.collection("mfr_user_credentials").doc(uid).get();
             if (credSnap.exists) {
               pinHash = credSnap.data()?.pinHash || "";
@@ -1653,8 +1752,12 @@ async function startServer() {
       let pagePass = 0;
       while (pagePass < 10) {
         pagePass++;
+        const gcpToken = await getGcpAccessToken();
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+
         const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}?pageSize=300${apiKey ? `&key=${apiKey}` : ""}`;
-        const qRes = await fetch(url);
+        const qRes = await fetch(url, { headers });
         if (!qRes.ok) {
           if (qRes.status === 404) break;
           break;
@@ -1674,8 +1777,12 @@ async function startServer() {
       // 3. Multi-attempt Verification Check with clean retry
       for (let vPass = 0; vPass < 5; vPass++) {
         if (vPass > 0) await new Promise(r => setTimeout(r, 500));
+        const gcpToken = await getGcpAccessToken();
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+
         const verifyUrl = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}?pageSize=10${apiKey ? `&key=${apiKey}` : ""}`;
-        const vRes = await fetch(verifyUrl);
+        const vRes = await fetch(verifyUrl, { headers });
         if (vRes.ok) {
           const vData = await vRes.json().catch(() => ({}));
           if (Array.isArray(vData.documents) && vData.documents.length > 0) {
@@ -3055,98 +3162,11 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  async function ensurePawanSuperAdmin() {
-    try {
-      console.log("[AUTH] Ensuring Pawan Kumar is configured as sole Super Admin with PIN 1234...");
-      const pinHash = await bcrypt.hash("1234", 10);
-      const allDepartments = [
-        "Dispatch",
-        "Purchase",
-        "Raw Material Store",
-        "Production",
-        "Heat Treatment",
-        "Plating",
-        "Packing",
-        "Store",
-        "Verification",
-        "Admin"
-      ];
+  // Initialize system state (load active reset generation) before accepting requests
+  await initSystemState().catch(e => console.warn("[SYSTEM] Startup system state init error:", e));
 
-      const pawanProfile = {
-        userId: "pawan-001",
-        name: "Pawan Kumar",
-        email: "pawan.kummar16@gmail.com",
-        role: "super_admin",
-        department: "Admin",
-        allowedDepartments: allDepartments,
-        accessList: allDepartments,
-        canOutsource: true,
-        active: true,
-        createdAt: "2026-01-01T00:00:00.000Z",
-        updatedAt: new Date().toISOString()
-      };
-
-      const credPayload = {
-        userId: "pawan-001",
-        pinHash,
-        updatedAt: new Date().toISOString()
-      };
-
-      // Set Super Admin in local in-memory stores strictly by userId
-      customUsersStore["pawan-001"] = pawanProfile;
-      delete customUsersStore["pawan"];
-      delete customUsersStore["Pawan Kumar"];
-      saveUsersStore();
-
-      customCredsStore["pawan-001"] = pinHash;
-      delete customCredsStore["pawan"];
-      delete customCredsStore["Pawan Kumar"];
-      saveCredsStore();
-
-      // Clean legacy mock IDs
-      const legacyMockIds = ['u-1', 'u-2', 'u-3', 'u-4', 'u-5', 'u-6', 'u-7', 'u-8', 'u-2301', 'u-7857'];
-      for (const legId of legacyMockIds) {
-        delete customUsersStore[legId];
-        delete customCredsStore[legId];
-        deletedUserIds.add(legId.toLowerCase());
-        firestoreRestDeleteDoc("mfr_users", legId).catch(() => {});
-        firestoreRestDeleteDoc("mfr_user_credentials", legId).catch(() => {});
-      }
-
-      deletedUserIds.delete('pawan-001');
-      deletedUserIds.delete('pawan');
-      deletedUserIds.delete('pawan kumar');
-      saveDeletedUsers();
-
-      // Mirror to Firestore
-      if (adminSdkHasPermission !== false) {
-        try {
-          const db = getFirestoreAdmin();
-          if (db) {
-            for (const legId of legacyMockIds) {
-              await db.collection("mfr_users").doc(legId).delete().catch(() => {});
-              await db.collection("mfr_user_credentials").doc(legId).delete().catch(() => {});
-            }
-            await db.collection("mfr_users").doc("pawan-001").set(pawanProfile, { merge: true });
-            await db.collection("mfr_user_credentials").doc("pawan-001").set(credPayload, { merge: true });
-          }
-        } catch (e) {
-          adminSdkHasPermission = false;
-        }
-      }
-
-      await firestoreRestSetDoc("mfr_users", "pawan-001", pawanProfile).catch(() => {});
-      await firestoreRestSetDoc("mfr_user_credentials", "pawan-001", credPayload).catch(() => {});
-
-      console.log("[AUTH] Pawan Kumar configured as Super Admin (PIN: 1234). Legacy mock users purged.");
-    } catch (err) {
-      console.warn("[AUTH] Warning configuring Pawan Kumar super admin:", err);
-    }
-  }
-
-  app.listen(PORT, "0.0.0.0", async () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
-    await initSystemState().catch(e => console.warn("Background system state init error:", e));
   });
 }
 
