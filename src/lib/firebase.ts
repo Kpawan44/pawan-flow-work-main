@@ -1697,6 +1697,10 @@ export class DBService {
       `User ${userName} (ID: ${userId}) initiated material movement ${newId}: Transferred ${movement.quantity} KG of Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment}.`
     );
     
+    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
+    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: newId, jobCardNo: movement.jobCardNo }).catch(() => {});
+    await this.broadcastEvent('JOB_UPDATED', { jobCardNo: movement.jobCardNo }).catch(() => {});
+
     // Log to Google Sheets
     logMaterialMovementToSheets(newMov).catch(err => console.warn('Google Sheets movement log failed:', err));
 
@@ -1922,6 +1926,10 @@ export class DBService {
       `User ${acceptedByName} (ID: ${acceptedByUserId}) accepted/modified material movement ${movementId}: Confirmed transfer of ${mov.quantity} KG for ${mov.jobCardNo} at ${mov.toDepartment}.`
     );
     
+    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
+    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId, jobCardNo: mov.jobCardNo }).catch(() => {});
+    await this.broadcastEvent('JOB_UPDATED', { jobCardNo: mov.jobCardNo }).catch(() => {});
+
     // Log to Google Sheets
     logMaterialMovementToSheets(mov).catch(err => console.warn('Google Sheets movement log failed:', err));
   }
@@ -1999,6 +2007,10 @@ export class DBService {
       'REJECT_MATERIAL', 
       `User ${rejectedByName} (ID: ${rejectedByUserId}) rejected/deleted material movement ${movementId}: Sent ${mov.quantity} KG of Job Card ${mov.jobCardNo} back to ${mov.fromDepartment} from ${mov.toDepartment}. Reason: "${remarks}"`
     );
+    
+    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
+    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId, jobCardNo: mov.jobCardNo }).catch(() => {});
+    await this.broadcastEvent('JOB_UPDATED', { jobCardNo: mov.jobCardNo }).catch(() => {});
     
     // Log to Google Sheets
     logMaterialMovementToSheets({

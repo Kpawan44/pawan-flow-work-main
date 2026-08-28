@@ -1640,6 +1640,9 @@ Please adjust the quantity or request additional raw material issue.`);
     if (m.isIssueRequest && m.fromDepartment === 'Raw Material Store' && m.toDepartment === 'Production') {
       return activeDept === 'Production' && !m.accepted && m.issueStatus === 'Issued';
     }
+    if (m.isIssueRequest) {
+      return false;
+    }
     return m.toDepartment === activeDept && !m.accepted;
   });
 
