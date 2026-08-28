@@ -17,18 +17,19 @@ import {
   Inbox,
   AlertCircle,
   ExternalLink,
-  RefreshCw
+  RefreshCw,
+  RotateCcw
 } from 'lucide-react';
-import { JobCard, MaterialMovement, Department, UserProfile } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile, ProcessTransfer } from '../types';
 import { getJobCardProcessMetrics, getJobCardDepartmentPending, getWireScrapQty } from '../lib/metrics';
 import PendingBreakdownModal from './PendingBreakdownModal';
 import RawMaterialReportView from './RawMaterialReportView';
 import { INVENTORY_RAW_MATERIALS } from './RawMaterialRequestModal';
-import { exportComprehensiveExcelBackup, exportSingleReportExcel } from '../lib/excelExport';
 
 interface ReportViewProps {
   jobCards: JobCard[];
   movements: MaterialMovement[];
+  processTransfers?: ProcessTransfer[];
   onCreateMovement?: (mov: any) => Promise<void>;
   currentUser?: UserProfile | null;
 }
@@ -40,6 +41,7 @@ type ReportType =
   | 'packing'
   | 'incoming_store'
   | 'store'
+  | 'process_transfers'
   | 'raw_material_store'
   | 'raw_material_summary'
   | 'stock_summary'
@@ -52,7 +54,7 @@ type ReportType =
   | 'rejection_by_dept'
   | 'email_triggers';
 
-export default function ReportView({ jobCards, movements, onCreateMovement, currentUser }: ReportViewProps) {
+export default function ReportView({ jobCards, movements, processTransfers = [], onCreateMovement, currentUser }: ReportViewProps) {
   const [activeReport, setActiveReport] = useState<ReportType>('production');
   const [searchTerm, setSearchTerm] = useState('');
   const [startDate, setStartDate] = useState('');
@@ -144,6 +146,7 @@ export default function ReportView({ jobCards, movements, onCreateMovement, curr
     { id: 'packing', label: 'Packaging Weights Report', desc: "Box specifications and total count packed" },
     { id: 'incoming_store', label: 'Incoming Store Report', desc: "Goods received into purchase and incoming store buffer before release to production floors" },
     { id: 'store', label: 'Store / Warehousing Report', desc: "Verified inventory placement and bin location storage" },
+    { id: 'process_transfers', label: 'Store Process Transfers (Repacking & Replating)', desc: "Full traceability ledger of Store material sent to Repacking and Replating processes, including return quantities, bins, and rejections" },
     { id: 'raw_material_store', label: 'Raw Material Store Ledger', desc: "Production raw material requests, issued weights, and rejected requests log" },
     { id: 'raw_material_summary', label: 'Raw Material Stock & Demand', desc: "Comprehensive audit of raw material stock levels, consumption trends, and pending requests (PDF friendly)" },
     { id: 'stock_summary', label: 'Stock Summary (Item-wise)', desc: "Aggregate current in-stock weights, pieces count and box count grouped by item name" },
@@ -339,6 +342,33 @@ export default function ReportView({ jobCards, movements, onCreateMovement, curr
             date: c.createdAt
           };
         });
+        break;
+      case 'process_transfers':
+        baseData = (processTransfers || []).map(t => ({
+          transferNo: t.transferNo,
+          jobCardNo: t.jobCardNo,
+          poNumber: t.poNumber || '-',
+          customer: t.customer,
+          itemName: t.itemName,
+          itemCode: t.itemCode || '-',
+          material: t.material || '-',
+          toProcess: t.toProcess,
+          quantity: `${t.quantity.toLocaleString()} ${t.unit}`,
+          status: t.status,
+          fromLocation: t.fromLocation,
+          binOrRack: t.currentLocation || '-',
+          transferDate: `${t.transferDate} ${t.transferTime}`,
+          sentBy: t.createdBy,
+          receivedBy: t.receivedBy || '-',
+          completedBy: t.completedBy || '-',
+          completedQty: t.completedQty !== undefined ? `${t.completedQty.toLocaleString()} ${t.unit}` : '-',
+          rejectionQty: t.rejectionQty ? `${t.rejectionQty.toLocaleString()} ${t.unit}` : '-',
+          rejectionReason: t.rejectionReason || '-',
+          returnBin: t.returnLocationBin || '-',
+          returnRack: t.returnRackNo || '-',
+          remarks: t.remarks || '-',
+          date: t.createdAt
+        }));
         break;
       case 'stock_summary': {
         let cardList = [...jobCards];
@@ -738,15 +768,17 @@ export default function ReportView({ jobCards, movements, onCreateMovement, curr
   const deptRejectionStats = getRejectionStatsByDept(filteredCardsForDept);
 
   // Export active report to native Excel (.xlsx) file
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     if (filteredData.length === 0) return;
     const currentReportObj = reportOptions.find(r => r.id === activeReport);
     const title = currentReportObj ? currentReportObj.label : activeReport;
+    const { exportSingleReportExcel } = await import('../lib/excelExport');
     exportSingleReportExcel(title, filteredData);
   };
 
   // Export full multi-sheet workbook where EVERY report has its own worksheet
-  const handleExportFullExcelBackup = () => {
+  const handleExportFullExcelBackup = async () => {
+    const { exportComprehensiveExcelBackup } = await import('../lib/excelExport');
     exportComprehensiveExcelBackup(jobCards, movements);
   };
 

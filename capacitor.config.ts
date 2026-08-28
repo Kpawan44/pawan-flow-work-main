@@ -4,8 +4,14 @@ const config: CapacitorConfig = {
   appId: 'com.pmw.tracker',
   appName: 'PMW Tracker',
   webDir: 'dist',
-  android: {
-    allowMixedContent: false
+  server: {
+    androidScheme: 'https',
+    cleartext: false,
+    allowNavigation: [
+      'https://pmw-tracker-928410476586.asia-south1.run.app',
+      '*.googleapis.com',
+      '*.firebaseio.com'
+    ]
   }
 };
 

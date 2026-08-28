@@ -1,9 +1,16 @@
-import { JobCard, MaterialMovement } from '../types';
+import { JobCard, MaterialMovement, ProcessTransfer } from '../types';
 
-export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMovement[]) {
+export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMovement[], processTransfersList: ProcessTransfer[] = []) {
   // Filter movements for this job card
   const cardMovements = movementsList.filter(m => m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase());
   const acceptedMovements = cardMovements.filter(m => m.accepted);
+
+  // Process Transfers for this job card (Store -> Repacking / Replating)
+  const cardTransfers = processTransfersList.filter(t => t.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase());
+  const activeProcessTransfers = cardTransfers.filter(t => t.status !== 'Returned to Store');
+  const qtyInProcessTransfers = activeProcessTransfers.reduce((sum, t) => sum + (t.quantity || 0), 0);
+  const returnedTransfers = cardTransfers.filter(t => t.status === 'Returned to Store');
+  const qtyReturnedFromProcess = returnedTransfers.reduce((sum, t) => sum + (t.returnedQty !== undefined ? t.returnedQty : t.quantity), 0);
 
   if (j.processType === 'Purchase') {
     const purchaseMovements = cardMovements.filter(m => m.fromDepartment === 'Purchase');
@@ -70,7 +77,7 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
           : (j.currentDepartment === 'Store' ? qtyReceivedFromPurchase : 0));
 
     const qtyDispatched = j.dispatchDetails?.dispatchQty || (j.completed ? j.currentQty : 0);
-    const qtyRemainingInStock = Math.max(0, qtyReceivedAtStore - qtyDispatched);
+    const qtyRemainingInStock = Math.max(0, qtyReceivedAtStore - qtyDispatched - qtyInProcessTransfers);
 
     const qtyReceivedAtRawStore = acceptedMovements
       .filter(m => m.toDepartment === 'Raw Material Store')
@@ -94,6 +101,8 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
 
       qtyReceivedAtStore,
       qtyDispatched,
+      qtyInProcessTransfers,
+      qtyReturnedFromProcess,
       qtyRemainingInStock,
       qtyReceivedAtRawStore
     };
@@ -180,8 +189,8 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
   // How much dispatch (shipped out)
   const qtyDispatched = j.dispatchDetails?.dispatchQty || (j.completed ? j.currentQty : 0);
 
-  // How much remain in stock
-  const qtyRemainingInStock = Math.max(0, qtyReceivedAtStore - qtyDispatched);
+  // How much remain in stock (available minus active process transfers)
+  const qtyRemainingInStock = Math.max(0, qtyReceivedAtStore - qtyDispatched - qtyInProcessTransfers);
 
   return {
     // Prod/HT
@@ -205,6 +214,8 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
     // Store
     qtyReceivedAtStore,
     qtyDispatched,
+    qtyInProcessTransfers,
+    qtyReturnedFromProcess,
     qtyRemainingInStock,
     qtyReceivedAtRawStore: acceptedMovements
       .filter(m => m.toDepartment === 'Raw Material Store')

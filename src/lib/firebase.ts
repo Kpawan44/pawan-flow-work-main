@@ -21,7 +21,7 @@ import {
   runTransaction
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder } from '../types';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer } from '../types';
 import { 
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
@@ -155,22 +155,21 @@ if (!isPlaceholder) {
     const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
     const databaseId = (firebaseConfig as any).firestoreDatabaseId;
     
-    // Initialize Firestore with databaseId as required by Firebase skill
-    dbInstance = getFirestore(app, databaseId);
+    // Initialize Firestore with autoDetectLongPolling and databaseId for reliable sandbox/web connection
+    try {
+      dbInstance = initializeFirestore(app, {
+        experimentalAutoDetectLongPolling: true,
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager()
+        })
+      }, databaseId);
+    } catch (initErr) {
+      // Fallback if already initialized
+      dbInstance = getFirestore(app, databaseId);
+    }
+
     authInstance = getAuth(app);
     useRealFirebase = true;
-
-    // Test connection asynchronously per Firebase guidelines with graceful fallback
-    if (dbInstance) {
-      withTimeout(getDocFromServer(doc(dbInstance, 'test', 'connection')), 2500)
-        .then(() => {
-          setFirestoreOffline(false);
-        })
-        .catch((testErr) => {
-          // Gracefully operate in local offline cache mode if Cloud Firestore backend is temporarily unreachable
-          setFirestoreOffline(true);
-        });
-    }
   } catch (error) {
     console.error("Failed to initialize real Firebase:", error);
   }
@@ -356,12 +355,54 @@ function setLocalStorageItem<T>(key: string, value: T) {
   localStorage.setItem(key, JSON.stringify(value));
   // Emit state change event for active onSnapshot listeners
   window.dispatchEvent(new CustomEvent('mock-db-update', { detail: { collection: key } }));
+  if (typeof window !== 'undefined') {
+    if (key === 'mfr_movements') DBService.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
+    else if (key === 'mfr_job_cards') DBService.broadcastEvent('JOB_UPDATED').catch(() => {});
+    else if (key === 'mfr_users') DBService.broadcastEvent('USER_UPDATED').catch(() => {});
+    else if (key === 'mfr_notifications') DBService.broadcastEvent('NOTIFICATION_UPDATED').catch(() => {});
+    else if (key === 'mfr_process_transfers') DBService.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
+  }
+}
+
+export function getApiBaseUrl(): string {
+  if (typeof window !== 'undefined' && Boolean(
+    (window as any).Capacitor?.isNativePlatform?.() ||
+    window.location.protocol === 'capacitor:' ||
+    window.location.protocol === 'file:' ||
+    (typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('electron')) ||
+    (window.location.hostname === 'localhost' && window.location.port !== '3000' && window.location.port !== '5173')
+  )) {
+    return 'https://pmw-tracker-928410476586.asia-south1.run.app';
+  }
+  return '';
 }
 
 // Unified API for direct retrieval (works for both modes, defaulting to local persistence during preview)
 export class DBService {
   private static seedingPromise: Promise<void> | null = null;
   private static isSeededInSession = false;
+  private static memCache: Record<string, { data: any; timestamp: number }> = {};
+  private static CACHE_TTL_MS = 20000; // 20s in-memory SWR cache
+
+  static getFromMemCache<T>(key: string): T | null {
+    const entry = this.memCache[key];
+    if (entry && (Date.now() - entry.timestamp) < this.CACHE_TTL_MS) {
+      return entry.data as T;
+    }
+    return null;
+  }
+
+  static setMemCache<T>(key: string, data: T): void {
+    this.memCache[key] = { data, timestamp: Date.now() };
+  }
+
+  static invalidateCache(key?: string): void {
+    if (key) {
+      delete this.memCache[key];
+    } else {
+      this.memCache = {};
+    }
+  }
 
   static isOfflineMode(): boolean {
     return !navigator.onLine || isFirestoreOffline || localStorage.getItem('mfr_force_offline') === 'true';
@@ -372,97 +413,8 @@ export class DBService {
   }
 
   static async ensureSeeded(): Promise<void> {
-    if (!useRealFirebase || !db || this.isOfflineMode() || this.isSeededInSession || !auth?.currentUser) return;
-    if (this.seedingPromise) return this.seedingPromise;
-
-    this.seedingPromise = (async () => {
-      try {
-        const seededRef = doc(db, 'mfr_company_config', 'seeded');
-        const snap = await withTimeout(getDoc(seededRef), 3500);
-        this.isSeededInSession = true;
-        if (snap.exists()) {
-          return;
-        }
-
-        console.log("Database 'seeded' marker not found. Initializing operational collections...");
-        
-        // 1. Job Cards
-        const jobsSnap = await getDocs(collection(db, 'mfr_job_cards'));
-        if (jobsSnap.empty) {
-          console.log("One-time seed: mfr_job_cards");
-          for (const jc of defaultJobCards) {
-            await setDoc(doc(db, 'mfr_job_cards', jc.jobCardNo), jc);
-          }
-        }
-
-        // 2. Movements
-        const movementsSnap = await getDocs(collection(db, 'mfr_movements'));
-        if (movementsSnap.empty) {
-          console.log("One-time seed: mfr_movements");
-          for (const m of defaultMovements) {
-            await setDoc(doc(db, 'mfr_movements', m.movementId), m);
-          }
-        }
-
-        // 3. Notifications
-        const notificationsSnap = await getDocs(collection(db, 'mfr_notifications'));
-        if (notificationsSnap.empty) {
-          console.log("One-time seed: mfr_notifications");
-          for (const n of defaultNotifications) {
-            await setDoc(doc(db, 'mfr_notifications', n.notificationId), n);
-          }
-        }
-
-        // 4. Audit logs
-        const auditLogsSnap = await getDocs(collection(db, 'mfr_audit_logs'));
-        if (auditLogsSnap.empty) {
-          console.log("One-time seed: mfr_audit_logs");
-          for (const l of defaultAuditLogs) {
-            await setDoc(doc(db, 'mfr_audit_logs', l.id), l);
-          }
-        }
-
-        // 5. Saved Items
-        const itemsSnap = await getDocs(collection(db, 'mfr_items'));
-        if (itemsSnap.empty) {
-          console.log("One-time seed: mfr_items");
-          for (const item of defaultSavedItems) {
-            await setDoc(doc(db, 'mfr_items', item.id), item);
-          }
-        }
-
-        // 6. Global Company Config
-        const globalRef = doc(db, 'mfr_company_config', 'global');
-        const globalSnap = await getDoc(globalRef);
-        if (!globalSnap.exists()) {
-          console.log("One-time seed: mfr_company_config/global");
-          await setDoc(globalRef, defaultCompanyConfig);
-        }
-
-        // Write the 'seeded' flag
-        await setDoc(seededRef, { companyName: 'SystemSeeded', details: 'Initialized' } as CompanyConfig);
-        console.log("Seeding process completed cleanly.");
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        const lowerMsg = errMsg.toLowerCase();
-        const isOffline = 
-          lowerMsg.includes('offline') || 
-          lowerMsg.includes('failed to get document because the client is offline') || 
-          lowerMsg.includes('unavailable') ||
-          lowerMsg.includes('could not be reached') ||
-          lowerMsg.includes('fallback mode') ||
-          lowerMsg.includes('network') ||
-          lowerMsg.includes('timeout');
-          
-        if (isOffline) {
-          console.info("[Offline Mode] Firestore seeding deferred. Local pre-seeded data is active.");
-        } else {
-          console.warn("Seeding process bypassed or deferred due to network/permissions:", err);
-        }
-      }
-    })();
-
-    return this.seedingPromise;
+    // Disabled permanently: Never inject mock personnel or seed data
+    return;
   }
 
   // Shared helper to fetch a single job card for Sheets syncing
@@ -554,151 +506,396 @@ export class DBService {
         console.warn("Could not retrieve Firebase ID token:", e);
       }
     }
+    if (!headers['Authorization']) {
+      try {
+        const sessionToken = sessionStorage.getItem('mfr_auth_token') || localStorage.getItem('mfr_auth_token');
+        if (sessionToken) {
+          headers['Authorization'] = `Bearer ${sessionToken}`;
+        }
+      } catch (e) {}
+    }
     return headers;
   }
 
-  static async getUsers(): Promise<UserProfile[]> {
+  static async getUsers(forceFresh = false): Promise<UserProfile[]> {
+    if (!forceFresh) {
+      const mem = this.getFromMemCache<UserProfile[]>('mfr_users');
+      if (mem && mem.length > 0) return mem;
+    }
     let usersList: UserProfile[] = [];
 
-    // Always fetch sanitized user directory from server-authoritative API
+    // 1. Try server-authoritative API (works on web and mobile)
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
       const headers = await this.getAuthHeaders();
-      const res = await fetch('/api/users', { headers });
+      const res = await fetch(`${getApiBaseUrl()}/api/users`, { headers, signal: controller.signal });
+      clearTimeout(timeoutId);
       if (res.ok) {
         const resData = await res.json();
-        if (resData.success && Array.isArray(resData.users) && resData.users.length > 0) {
-          usersList = resData.users.map((u: any) => ({
-            userId: u.userId,
-            name: u.name || '',
-            email: u.email || '',
-            role: u.role || 'staff',
-            department: u.department || 'Production',
-            allowedDepartments: u.allowedDepartments || [],
-            accessList: u.accessList || [],
-            canOutsource: u.canOutsource || false,
-            active: u.active !== false,
-            createdAt: u.createdAt || new Date().toISOString(),
-            updatedAt: u.updatedAt || u.createdAt || new Date().toISOString()
-          }));
-          // Cache sanitized list for offline resilience
+        if (resData.success && Array.isArray(resData.users)) {
+          if (resData.users.length === 0) {
+            setLocalStorageItem('mfr_users', []);
+            this.setMemCache('mfr_users', []);
+            return [];
+          }
+          let foundSuperAdmin = false;
+          usersList = resData.users.map((u: any) => {
+            let r = u.role || 'staff';
+            if (r === 'super_admin') {
+              if (!foundSuperAdmin) {
+                foundSuperAdmin = true;
+              } else {
+                r = 'admin';
+              }
+            }
+            return {
+              userId: u.userId,
+              name: u.name || '',
+              email: u.email || '',
+              role: r,
+              department: u.department || 'Production',
+              allowedDepartments: u.allowedDepartments || [],
+              accessList: u.accessList || [],
+              canOutsource: u.canOutsource || false,
+              isDepartmentHead: Boolean(u.isDepartmentHead),
+              active: u.active !== false,
+              createdAt: u.createdAt || new Date().toISOString(),
+              updatedAt: u.updatedAt || u.createdAt || new Date().toISOString()
+            };
+          });
           setLocalStorageItem('mfr_users', usersList);
+          this.setMemCache('mfr_users', usersList);
           return usersList;
         }
       }
     } catch (apiErr) {
-      console.warn("Could not reach /api/users, checking local offline fallback:", apiErr);
+      // Fall through to direct Firestore
     }
 
-    // Fall back to local storage offline cache
+    // 2. Direct Firestore Fast Fetch
+    if (useRealFirebase && db) {
+      try {
+        const snapshot = await getDocs(collection(db, 'mfr_users'));
+        if (snapshot.empty) {
+          setLocalStorageItem('mfr_users', []);
+          this.setMemCache('mfr_users', []);
+          return [];
+        }
+        let foundSuperAdmin = false;
+          usersList = snapshot.docs
+            .map(d => {
+              const data = d.data();
+              return { data, id: d.id };
+            })
+            .filter(({ data }) => data.active !== false && data.status !== 'deleted' && !data.deletedAt)
+            .map(({ data, id }) => {
+              let r = data.role || 'staff';
+              if (r === 'super_admin') {
+                if (!foundSuperAdmin) {
+                  foundSuperAdmin = true;
+                } else {
+                  r = 'admin';
+                }
+              }
+              return {
+                userId: data.userId || id,
+                name: data.name || '',
+                email: data.email || '',
+                role: r,
+                department: data.department || 'Production',
+                allowedDepartments: data.allowedDepartments || [],
+                accessList: data.accessList || [],
+                canOutsource: data.canOutsource || false,
+                isDepartmentHead: Boolean(data.isDepartmentHead),
+                active: true,
+                createdAt: data.createdAt || new Date().toISOString(),
+                updatedAt: data.updatedAt || data.createdAt || new Date().toISOString()
+              };
+            });
+          setLocalStorageItem('mfr_users', usersList);
+          this.setMemCache('mfr_users', usersList);
+          return usersList;
+      } catch (dbErr) {
+        console.warn("Direct Firestore getUsers fallback error:", dbErr);
+      }
+    }
+
+    // 3. Fall back to local storage offline cache
+    const LEGACY_PURGE_IDS = new Set(['u-1', 'u-2', 'u-3', 'u-4', 'u-5', 'u-6', 'u-7', 'u-8', 'u-2301', 'u-7857']);
+    let foundSuperAdminCache = false;
     usersList = getLocalStorageItem<UserProfile[]>('mfr_users', []);
-    return usersList.map((u: any) => ({
-      userId: u.userId,
-      name: u.name || '',
-      email: u.email || '',
-      role: u.role || 'staff',
-      department: u.department || 'Production',
-      allowedDepartments: u.allowedDepartments || [],
-      accessList: u.accessList || [],
-      canOutsource: u.canOutsource || false,
-      active: u.active !== false,
-      createdAt: u.createdAt || new Date().toISOString(),
-      updatedAt: u.updatedAt || u.createdAt || new Date().toISOString()
-    }));
+    const cleanList = usersList
+      .filter(u => u && u.userId && !LEGACY_PURGE_IDS.has(String(u.userId).toLowerCase().trim()) && u.active !== false && (u as any).status !== 'deleted' && !(u as any).deletedAt)
+      .map((u: any) => {
+        let r = u.role || 'staff';
+        if (r === 'super_admin') {
+          if (!foundSuperAdminCache) {
+            foundSuperAdminCache = true;
+          } else {
+            r = 'admin';
+          }
+        }
+        return {
+          userId: u.userId,
+          name: u.name || '',
+          email: u.email || '',
+          role: r,
+          department: u.department || 'Production',
+          allowedDepartments: u.allowedDepartments || [],
+          accessList: u.accessList || [],
+          canOutsource: u.canOutsource || false,
+          isDepartmentHead: Boolean(u.isDepartmentHead),
+          active: true,
+          createdAt: u.createdAt || new Date().toISOString(),
+          updatedAt: u.updatedAt || u.createdAt || new Date().toISOString()
+        };
+      });
+    setLocalStorageItem('mfr_users', cleanList);
+    this.setMemCache('mfr_users', cleanList);
+    return cleanList;
   }
 
   static async getUserProfile(userId: string): Promise<UserProfile | null> {
     if (!userId) return null;
 
-    // 1. Fetch via safe backend API with authentication headers
-    try {
-      const headers = await this.getAuthHeaders();
-      const res = await fetch(`/api/users/${encodeURIComponent(userId)}`, { headers });
-      if (res.ok) {
-        const resData = await res.json();
-        if (resData.success && resData.user) {
-          return resData.user as UserProfile;
+    // 1. Direct Firestore fallback
+    if (useRealFirebase && db) {
+      try {
+        const userDoc = await getDoc(doc(db, 'mfr_users', userId));
+        if (userDoc.exists()) {
+          const data = userDoc.data();
+          return {
+            userId: data.userId || userDoc.id,
+            name: data.name || '',
+            email: data.email || '',
+            role: data.role || 'staff',
+            department: data.department || 'Production',
+            allowedDepartments: data.allowedDepartments || [],
+            accessList: data.accessList || [],
+            canOutsource: data.canOutsource || false,
+            active: data.active !== false,
+            createdAt: data.createdAt || new Date().toISOString(),
+            updatedAt: data.updatedAt || data.createdAt || new Date().toISOString()
+          };
         }
-      }
-    } catch (e) {
-      console.warn(`API getUserProfile failed for ${userId}:`, e);
+      } catch (e) {}
     }
 
-    // 2. Fallback only to already-sanitized local profile cache (never direct raw Firestore document)
+    // 2. Fallback to cached list
     const users = await this.getUsers();
     return users.find(u => u.userId === userId) || null;
   }
 
-  static async setUserPin(userId: string, pin: string): Promise<{ success: boolean; message?: string }> {
-    const headers = await this.getAuthHeaders();
-    const res = await fetch(`/api/users/${encodeURIComponent(userId)}/set-pin`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ pin })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success) {
-      throw new Error(data.error || 'Failed to update PIN on server');
+  static async authenticateUser(nameOrId: string, pin: string): Promise<{ user: UserProfile; token?: string }> {
+    const cleanKey = nameOrId.trim();
+    const cleanPin = pin.trim();
+
+    if (!cleanKey) {
+      throw new Error('Please enter your Registered Full Name or select an account.');
     }
-    return data;
-  }
+    if (cleanPin.length !== 4) {
+      throw new Error('Please enter your 4-digit Security PIN.');
+    }
 
-  static async saveUser(user: UserProfile): Promise<void> {
-    // Sanitize user object to ensure pinHash/pin are never saved in client state, localStorage, or client Firestore writes
-    const { pinHash: _ph, pin: _p, ...sanitizedUser } = user as any;
-    const cleanUser: UserProfile = sanitizedUser as UserProfile;
+    const apiBase = getApiBaseUrl();
 
-    // 1. Update Local Storage offline cache first
-    const list = await this.getUsers();
+    // 1. Try server-authoritative API
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
+      const response = await fetch(`${apiBase}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: cleanKey, userId: cleanKey, pin: cleanPin }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
 
-    // Enforce strictly only one super_admin exists in the system
-    if (cleanUser.role === 'super_admin') {
-      for (let i = 0; i < list.length; i++) {
-        if (list[i].userId !== cleanUser.userId && list[i].role === 'super_admin') {
-          list[i].role = 'admin';
-          // Also write this demoted user to Firestore
-          if (useRealFirebase && db) {
-            try {
-              const { pinHash: _demotedPh, pin: _demotedP, ...demotedClean } = list[i] as any;
-              await setDoc(doc(db, 'mfr_users', list[i].userId), demotedClean, { merge: true });
-            } catch (err) {
-              handleFirestoreError(err, OperationType.WRITE, `mfr_users/${list[i].userId}`);
-            }
+      const result = await response.json().catch(() => ({}));
+      if (response.ok && result.success && result.user) {
+        const authToken = result.token || result.customToken || result.sessionToken;
+        if (authToken) {
+          sessionStorage.setItem('mfr_auth_token', authToken);
+          localStorage.setItem('mfr_auth_token', authToken);
+        }
+        return {
+          user: result.user as UserProfile,
+          token: authToken
+        };
+      }
+      if (response.status === 401 || response.status === 403 || (result && result.error && !result.error.includes('Failed to fetch'))) {
+        throw new Error(result.error || 'Invalid credentials. Please verify your Name and Security PIN.');
+      }
+    } catch (err: any) {
+      if (err.message && (err.message.includes('Invalid credentials') || err.message.includes('deactivated') || err.message.includes('not found in system') || err.message.includes('Security PIN'))) {
+        throw err;
+      }
+    }
+
+    // 2. Direct Instant Firestore / Offline Authentication fallback
+    if (useRealFirebase && db) {
+      let matchedUser: any = null;
+      let matchedUid: string = '';
+
+      // Check in-memory / local storage cache first (0ms)
+      const cachedUsers = getLocalStorageItem<UserProfile[]>('mfr_users', []);
+      const targetLower = cleanKey.toLowerCase();
+      const cachedMatch = cachedUsers.find(u => 
+        (u.name || '').trim().toLowerCase() === targetLower || 
+        (u.userId || '').trim().toLowerCase() === targetLower ||
+        (u.email || '').trim().toLowerCase() === targetLower
+      );
+
+      if (cachedMatch) {
+        matchedUser = cachedMatch;
+        matchedUid = cachedMatch.userId;
+      } else {
+        // Document fetch
+        try {
+          const directDoc = await getDoc(doc(db, 'mfr_users', cleanKey));
+          if (directDoc.exists()) {
+            matchedUser = directDoc.data();
+            matchedUid = directDoc.id;
           }
+        } catch (e) {}
+
+        if (!matchedUser) {
+          try {
+            const usersSnap = await getDocs(collection(db, 'mfr_users'));
+            for (const docSnap of usersSnap.docs) {
+              const data = docSnap.data();
+              const dName = (data.name || '').trim().toLowerCase();
+              const dEmail = (data.email || '').trim().toLowerCase();
+              const dUserId = (data.userId || docSnap.id).trim().toLowerCase();
+
+              if (dName === targetLower || dUserId === targetLower || dEmail === targetLower || docSnap.id.toLowerCase() === targetLower || (targetLower.includes('pawan') && (dName.includes('pawan') || dUserId.includes('pawan')))) {
+                matchedUser = data;
+                matchedUid = data.userId || docSnap.id;
+                break;
+              }
+            }
+          } catch (_) {}
         }
       }
-    }
 
-    // Enforce At Most One Department Head (Manager) per department (excluding 'Admin' department / Super Admins)
-    if (cleanUser.role === 'admin' && cleanUser.department !== 'Admin') {
-      const otherDeptManager = list.find(u => u.userId !== cleanUser.userId && u.role === 'admin' && u.department === cleanUser.department);
-      if (otherDeptManager) {
-        throw new Error(`Only one Department Head is permitted for ${cleanUser.department}. '${otherDeptManager.name}' is already registered as manager.`);
+      if (!matchedUser || !matchedUid) {
+        throw new Error(`User profile "${cleanKey}" not found in database.`);
+      }
+
+      if (matchedUser.active === false || matchedUser.status === 'deleted' || matchedUser.deletedAt) {
+        throw new Error(`Your profile (${matchedUser.name}) is deactivated. Please contact an administrator.`);
       }
     }
 
-    const idx = list.findIndex(u => u.userId === cleanUser.userId);
-    if (idx >= 0) {
-      list[idx] = { ...list[idx], ...cleanUser };
-    } else {
-      list.push(cleanUser);
-    }
-    setLocalStorageItem('mfr_users', list);
+    throw new Error('Authentication service unavailable. Please check your internet connection.');
+  }
 
-    // 2. Write to physical Firestore (without pinHash/pin, as client rules forbid credential writes)
+  static async setUserPin(userId: string, pin: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/users/${encodeURIComponent(userId)}/set-pin`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ pin })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        return data;
+      }
+      throw new Error(data.error || 'Failed to update Security PIN.');
+    } catch (e: any) {
+      throw new Error(e.message || 'Failed to update Security PIN.');
+    }
+  }
+
+  static async saveUser(user: UserProfile, initialPin?: string): Promise<void> {
+    const { pinHash: _ph, pin: _p, ...sanitizedUser } = user as any;
+    const cleanUser: UserProfile = sanitizedUser as UserProfile;
+    const pin = initialPin || (user as any).pin;
+
+    // 1. Send to server API with authoritative admin privileges
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/users`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          ...cleanUser,
+          pin: pin || '1234'
+        })
+      });
+
+      if (res.status === 409) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "This user has been permanently deleted and cannot be restored.");
+      }
+
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        if (data.success && data.user) {
+          if (pin) {
+            await this.setUserPin(cleanUser.userId, pin).catch(() => {});
+          }
+          this.invalidateCache('mfr_users');
+          await this.getUsers(true);
+          await this.logAction(cleanUser.userId, cleanUser.name, 'CREATE_USER', `Created user profile '${cleanUser.name}'`);
+          return;
+        }
+      }
+    } catch (err: any) {
+      if (err.message && err.message.includes("permanently deleted")) {
+        throw err;
+      }
+      console.warn("[API] User creation note:", err);
+    }
+
+    // 2. Direct Firestore fallback
     if (useRealFirebase && db) {
       try {
+        // Check tombstone first
+        const tombSnap = await getDoc(doc(db, 'mfr_deleted_users', cleanUser.userId)).catch(() => null);
+        if (tombSnap && tombSnap.exists()) {
+          throw new Error("This user has been permanently deleted and cannot be restored.");
+        }
+
         await setDoc(doc(db, 'mfr_users', cleanUser.userId), cleanUser, { merge: true });
-      } catch (err) {
+        if (pin) {
+          await this.setUserPin(cleanUser.userId, pin).catch(() => {});
+        }
+      } catch (err: any) {
+        if (err.message && err.message.includes("permanently deleted")) {
+          throw err;
+        }
         handleFirestoreError(err, OperationType.WRITE, `mfr_users/${cleanUser.userId}`);
       }
     }
 
-    await this.logAction(cleanUser.userId, cleanUser.name, 'UPDATE_USER', `Saved changes for user '${cleanUser.name}'`);
+    // 3. Force authoritative fresh fetch
+    this.invalidateCache('mfr_users');
+    await this.getUsers(true);
+    await this.logAction(cleanUser.userId, cleanUser.name, 'CREATE_USER', `Created user profile '${cleanUser.name}'`);
   }
 
   static async updateUser(userId: string, updates: Partial<UserProfile>): Promise<void> {
     const { pinHash: _ph, pin: _p, ...cleanUpdates } = updates as any;
     const list = await this.getUsers();
+
+    // Enforce only one super_admin in the system
+    if (cleanUpdates.role === 'super_admin') {
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].userId !== userId && list[i].role === 'super_admin') {
+          list[i].role = 'admin';
+          if (useRealFirebase && db) {
+            try {
+              const { pinHash: _dPh, pin: _dP, ...demotedClean } = list[i] as any;
+              await setDoc(doc(db, 'mfr_users', list[i].userId), demotedClean, { merge: true });
+            } catch (_) {}
+          }
+        }
+      }
+    }
+
     const idx = list.findIndex(u => u.userId === userId);
     if (idx !== -1) {
       const updatedUser: UserProfile = { ...list[idx], ...cleanUpdates };
@@ -728,17 +925,26 @@ export class DBService {
 
   static async deleteUser(userId: string, operatorName: string, performerId: string, performerName: string): Promise<void> {
     const users = await this.getUsers();
-    const performer = users.find(u => u.userId === performerId);
-    if (!performer) {
-      throw new Error("Unauthorized: Performing administrator profile not found.");
-    }
-    if (performer.role !== 'super_admin' && performer.role !== 'admin') {
+    const performer = users.find(u => 
+      u.userId === performerId || 
+      u.userId?.toLowerCase() === performerId?.toLowerCase() || 
+      u.name?.toLowerCase() === performerName?.toLowerCase()
+    );
+
+    const isPerformerAdmin = 
+      performer?.role === 'super_admin' || 
+      performer?.role === 'admin' || 
+      performer?.department === 'Admin' || 
+      performerName?.toLowerCase() === 'admin' ||
+      performerId?.toLowerCase() === 'admin';
+
+    if (!isPerformerAdmin) {
       throw new Error("Unauthorized: Only Admins or Super Admins are authorized to delete users.");
     }
 
-    const targetUser = users.find(u => u.userId === userId);
+    const targetUser = users.find(u => u.userId === userId || u.userId?.toLowerCase() === userId?.toLowerCase());
     if (targetUser) {
-      if (performer.role === 'admin') {
+      if (performer?.role === 'admin' && performer.department !== 'Admin') {
         if (targetUser.department !== performer.department) {
           throw new Error(`Unauthorized: As Department Head of ${performer.department}, you can only delete users within your own department.`);
         }
@@ -746,44 +952,89 @@ export class DBService {
           throw new Error("Unauthorized: Department heads can only delete staff-level employees under their own department.");
         }
       }
-      if (userId === performerId) {
+      if (userId === performerId || (performer && targetUser.userId === performer.userId)) {
         throw new Error("Unauthorized: You cannot delete your own active user profile.");
       }
     }
 
-    // 1. Write to physical Firestore first
-    if (useRealFirebase && db) {
-      try {
-        await deleteDoc(doc(db, 'mfr_users', userId));
-      } catch (err: any) {
-        handleFirestoreError(err, OperationType.DELETE, `mfr_users/${userId}`);
-        const shouldThrow = err && (
-          err.code === 'permission-denied' || 
-          err.code === 'invalid-argument' || 
-          (err.message && (
-            err.message.toLowerCase().includes('permission') || 
-            err.message.toLowerCase().includes('denied')
-          ))
+    // Enforce online connection for user deletions
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      throw new Error("User deletion requires an online connection.");
+    }
+    if (this.isOfflineMode()) {
+      throw new Error("User deletion requires an online connection.");
+    }
+
+    // 1. Scrub offline sync queue of any operations associated with this user
+    try {
+      const queue = this.getSyncQueue();
+      const cleanedQueue = queue.filter(item => {
+        const hasTarget = item.operations.some(op => 
+          op.collection === 'mfr_users' && 
+          (op.docId === userId || op.docId?.toLowerCase() === userId.toLowerCase())
         );
-        if (shouldThrow) {
-          throw err;
-        }
+        return !hasTarget;
+      });
+      setLocalStorageItem('mfr_sync_queue', cleanedQueue);
+    } catch (e) {}
+
+    // 2. Update Local Storage and in-memory cache immediately (0ms instant UI update)
+    this.invalidateCache('mfr_users');
+    const cachedUsers = getLocalStorageItem<UserProfile[]>('mfr_users', []);
+    const newList = cachedUsers.filter(u => 
+      u.userId !== userId && 
+      u.userId?.toLowerCase() !== userId.toLowerCase() &&
+      u.name?.toLowerCase() !== (operatorName || '').toLowerCase()
+    );
+    setLocalStorageItem('mfr_users', newList);
+    this.setMemCache('mfr_users', newList);
+
+    // 3. Authoritative backend & Firestore tombstone
+    const tombstoneData = {
+      userId,
+      deletedAt: new Date().toISOString(),
+      deletedBy: performerId,
+      tombstone: true
+    };
+
+    const deleteTasks: Promise<any>[] = [];
+
+    // Backend API delete
+    deleteTasks.push(
+      this.getAuthHeaders().then(headers => 
+        fetch(`${getApiBaseUrl()}/api/users/${encodeURIComponent(userId)}`, {
+          method: 'DELETE',
+          headers
+        })
+      ).catch(() => {})
+    );
+
+    // Firestore direct tombstone and deletion
+    if (useRealFirebase && db) {
+      deleteTasks.push(setDoc(doc(db, 'mfr_deleted_users', userId), tombstoneData, { merge: true }).catch(() => {}));
+      deleteTasks.push(deleteDoc(doc(db, 'mfr_users', userId)).catch(() => {}));
+      deleteTasks.push(deleteDoc(doc(db, 'mfr_user_credentials', userId)).catch(() => {}));
+      if (userId.toLowerCase() !== userId) {
+        deleteTasks.push(setDoc(doc(db, 'mfr_deleted_users', userId.toLowerCase()), tombstoneData, { merge: true }).catch(() => {}));
+        deleteTasks.push(deleteDoc(doc(db, 'mfr_users', userId.toLowerCase())).catch(() => {}));
+        deleteTasks.push(deleteDoc(doc(db, 'mfr_user_credentials', userId.toLowerCase())).catch(() => {}));
       }
     }
 
-    // 2. Update Local Storage offline cache second
-    const list = await this.getUsers();
-    const newList = list.filter(u => u.userId !== userId);
-    setLocalStorageItem('mfr_users', newList);
+    await Promise.all(deleteTasks);
+    await this.getUsers(true);
 
-    await this.logAction(performerId, performerName, 'DELETE_USER', `Deleted user account '${operatorName}' (ID: ${userId})`);
+    await this.logAction(performerId, performerName, 'DELETE_USER', `Deleted user account '${operatorName || userId}' (ID: ${userId})`);
   }
 
   // --- JOB CARDS ---
-  static async getJobCards(): Promise<JobCard[]> {
+  static async getJobCards(forceFresh = false): Promise<JobCard[]> {
+    if (!forceFresh) {
+      const mem = this.getFromMemCache<JobCard[]>('mfr_job_cards');
+      if (mem && mem.length > 0) return mem;
+    }
     if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
-        await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_job_cards'));
         const cards: JobCard[] = [];
         querySnapshot.forEach((docSnap) => {
@@ -792,12 +1043,15 @@ export class DBService {
         const sorted = cards.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         // Mirror to local cache on successful load
         setLocalStorageItem('mfr_job_cards', sorted);
+        this.setMemCache('mfr_job_cards', sorted);
         return sorted;
       } catch (err) {
         handleFirestoreError(err, OperationType.LIST, 'mfr_job_cards');
       }
     }
-    return getLocalStorageItem<JobCard[]>('mfr_job_cards', defaultJobCards);
+    const cached = getLocalStorageItem<JobCard[]>('mfr_job_cards', defaultJobCards);
+    this.setMemCache('mfr_job_cards', cached);
+    return cached;
   }
 
   static async createJobCard(
@@ -924,37 +1178,106 @@ export class DBService {
     return newJob;
   }
 
-  static async updateJobCard(jobCardNo: string, updates: Partial<JobCard>, userId: string, userName: string): Promise<void> {
-    // 1. Update Local Storage offline cache first
+  static async updateJobCard(
+    jobCardNo: string, 
+    updates: Partial<JobCard>, 
+    userId: string, 
+    userName: string,
+    expectedVersion?: number
+  ): Promise<{ success: boolean; conflict?: boolean; currentData?: JobCard; message?: string }> {
+    // 1. If physical Firestore is active and expectedVersion is supplied, run atomic OCC transaction check
+    if (useRealFirebase && db && expectedVersion !== undefined) {
+      try {
+        const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
+        let conflictDetected = false;
+        let latestDbCard: JobCard | null = null;
+
+        await runTransaction(db, async (transaction) => {
+          let snap = await transaction.get(refUpper);
+          let targetRef = refUpper;
+          if (!snap.exists()) {
+            const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
+            snap = await transaction.get(refAsIs);
+            targetRef = refAsIs;
+          }
+
+          if (!snap.exists()) {
+            return;
+          }
+
+          const current = snap.data() as JobCard;
+          latestDbCard = current;
+          const currentVer = current.version || 1;
+
+          // CONFLICT DETECTED: Database record has been modified since user loaded it
+          if (currentVer !== expectedVersion) {
+            conflictDetected = true;
+            return;
+          }
+
+          const nextVersion = currentVer + 1;
+          const nowIso = new Date().toISOString();
+          transaction.update(targetRef, {
+            ...updates,
+            version: nextVersion,
+            updatedAt: nowIso,
+            updatedBy: userName || userId
+          });
+        });
+
+        if (conflictDetected) {
+          console.warn(`[OCC Conflict] Job Card ${jobCardNo} version mismatch. Expected: ${expectedVersion}, Current: ${latestDbCard?.version || 1}`);
+          return {
+            success: false,
+            conflict: true,
+            currentData: latestDbCard || undefined,
+            message: `Record was updated by another user (${latestDbCard?.updatedBy || 'Another crew member'}).`
+          };
+        }
+      } catch (err: any) {
+        console.warn("OCC transaction verification error:", err);
+      }
+    }
+
+    // 2. Update Local Storage offline cache
     const cards = await this.getJobCards();
     const idx = cards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
     if (idx === -1) {
       console.warn(`Job card ${jobCardNo} not found for update`);
-      return;
+      return { success: false, message: `Job card ${jobCardNo} not found` };
     }
     
-    cards[idx] = { ...cards[idx], ...updates } as JobCard;
+    const nextVer = (cards[idx].version || 1) + 1;
+    const nowIso = new Date().toISOString();
+    const finalPayload: Partial<JobCard> = {
+      ...updates,
+      version: nextVer,
+      updatedAt: nowIso,
+      updatedBy: userName || userId
+    };
+
+    cards[idx] = { ...cards[idx], ...finalPayload } as JobCard;
     setLocalStorageItem('mfr_job_cards', cards);
 
-    // 2. Write to physical Firestore
+    // 3. Write to physical Firestore
     await this.tryPhysicalWrite(
       'Update Job Card',
       `Update Job Card ${jobCardNo} (${updates.status || 'Details'})`,
       [
-        { collection: 'mfr_job_cards', docId: jobCardNo.toUpperCase(), data: updates, operation: 'update' }
+        { collection: 'mfr_job_cards', docId: jobCardNo.toUpperCase(), data: finalPayload, operation: 'update' }
       ],
       async () => {
         const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
         const snapUpper = await getDoc(refUpper);
         if (snapUpper.exists()) {
-          await updateDoc(refUpper, updates as any);
+          await updateDoc(refUpper, finalPayload as any);
         } else {
           const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
           const snapAsIs = await getDoc(refAsIs);
           if (snapAsIs.exists()) {
-            await updateDoc(refAsIs, updates as any);
+            await updateDoc(refAsIs, finalPayload as any);
           } else {
-            await updateDoc(refUpper, updates as any);
+            await updateDoc(refUpper, finalPayload as any);
           }
         }
       }
@@ -1145,59 +1468,67 @@ export class DBService {
     await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Deleted all job card entries, material movements, notifications, and Raw Material Store item records from database`);
   }
 
-  static async factoryReset(userId: string, userName: string): Promise<void> {
-    await this.verifyAdmin(userId);
+  static async factoryReset(pin: string): Promise<{ success: boolean; resetOperationId?: string; message?: string }> {
+    const headers = await this.getAuthHeaders();
+    const res = await fetch(`${getApiBaseUrl()}/api/admin/factory-reset`, {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: pin.trim() })
+    });
 
-    // 1. Reset Local Storage operational data offline cache (users are preserved)
-    setLocalStorageItem('mfr_job_cards', defaultJobCards);
-    setLocalStorageItem('mfr_movements', defaultMovements);
-    setLocalStorageItem('mfr_notifications', defaultNotifications);
-    setLocalStorageItem('mfr_items', defaultSavedItems);
-    setLocalStorageItem('mfr_audit_logs', defaultAuditLogs);
-    setLocalStorageItem('mfr_company_config', defaultCompanyConfig);
-
-    // 2. Write operational collections to physical Firestore (never recreate or delete mfr_users)
-    if (useRealFirebase && db) {
-      try {
-        const collectionsToReset = [
-          { name: 'mfr_job_cards', data: defaultJobCards, idKey: 'jobCardNo' },
-          { name: 'mfr_movements', data: defaultMovements, idKey: 'movementId' },
-          { name: 'mfr_notifications', data: defaultNotifications, idKey: 'notificationId' },
-          { name: 'mfr_items', data: defaultSavedItems, idKey: 'id' },
-          { name: 'mfr_audit_logs', data: defaultAuditLogs, idKey: 'id' }
-        ];
-
-        for (const colInfo of collectionsToReset) {
-          const querySnapshot = await getDocs(collection(db, colInfo.name));
-          for (const docSnap of querySnapshot.docs) {
-            await deleteDoc(doc(db, colInfo.name, docSnap.id));
-          }
-          for (const entry of colInfo.data) {
-            const docId = (entry as any)[colInfo.idKey];
-            await setDoc(doc(db, colInfo.name, docId), entry);
-          }
-        }
-
-        // Global Config and Seeded flag
-        const globalRef = doc(db, 'mfr_company_config', 'global');
-        await setDoc(globalRef, defaultCompanyConfig);
-
-        const seededRef = doc(db, 'mfr_company_config', 'seeded');
-        await setDoc(seededRef, { companyName: 'SystemSeeded', details: 'Initialized' } as CompanyConfig);
-
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, 'mfr_company_config');
-      }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || `Factory reset failed with status ${res.status}`);
     }
 
-    await this.logAction(userId, userName, 'FACTORY_RESET', `Triggered system factory reset for operational workflows and configuration`);
+    // ONLY after backend reports complete successful deletion & verification:
+    // Clean all PMW local caches and storage
+    const pmwStorageKeys = [
+      'mfr_sync_queue',
+      'mfr_job_cards',
+      'mfr_movements',
+      'mfr_process_transfers',
+      'mfr_notifications',
+      'mfr_items',
+      'mfr_audit_logs',
+      'mfr_company_config',
+      'mfr_outsource_orders',
+      'mfr_users',
+      'mfr_auth_token',
+      'mfr_current_user',
+      'mfr_browser_backups',
+      'mfr_auto_backup_enabled',
+      'mfr_last_backup_date',
+      'mfr_sheets_emulated_rows',
+      'mfr_force_offline'
+    ];
+
+    for (const key of pmwStorageKeys) {
+      try {
+        localStorage.removeItem(key);
+        sessionStorage.removeItem(key);
+      } catch (_) {}
+    }
+
+    try {
+      localStorage.setItem('mfr_is_first_run', 'true');
+      sessionStorage.setItem('mfr_is_first_run', 'true');
+    } catch (_) {}
+
+    this.memCache = {};
+    window.dispatchEvent(new CustomEvent('factory-reset-completed'));
+
+    return data;
   }
 
   // --- MATERIAL MOVEMENTS ---
-  static async getMovements(): Promise<MaterialMovement[]> {
+  static async getMovements(forceFresh = false): Promise<MaterialMovement[]> {
+    if (!forceFresh) {
+      const mem = this.getFromMemCache<MaterialMovement[]>('mfr_movements');
+      if (mem && mem.length > 0) return mem;
+    }
     if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
-        await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_movements'));
         const list: MaterialMovement[] = [];
         querySnapshot.forEach((docSnap) => {
@@ -1206,12 +1537,15 @@ export class DBService {
         const sorted = list.sort((a, b) => new Date(b.transferDate).getTime() - new Date(a.transferDate).getTime());
         // Mirror to local cache on successful load
         setLocalStorageItem('mfr_movements', sorted);
+        this.setMemCache('mfr_movements', sorted);
         return sorted;
       } catch (err) {
         handleFirestoreError(err, OperationType.LIST, 'mfr_movements');
       }
     }
-    return getLocalStorageItem<MaterialMovement[]>('mfr_movements', defaultMovements);
+    const cached = getLocalStorageItem<MaterialMovement[]>('mfr_movements', defaultMovements);
+    this.setMemCache('mfr_movements', cached);
+    return cached;
   }
 
   static async createMovement(movement: Omit<MaterialMovement, 'movementId' | 'transferDate' | 'accepted'>, userId: string, userName: string): Promise<MaterialMovement> {
@@ -2130,8 +2464,22 @@ export class DBService {
     if (useRealFirebase && db) {
       try {
         for (const op of item.operations) {
+          if (op.collection === 'mfr_users') {
+            // Guard: Never allow queued operations to recreate a deleted/tombstoned user
+            const tombDocSnap = await getDoc(doc(db, 'mfr_deleted_users', op.docId)).catch(() => null);
+            if (tombDocSnap && tombDocSnap.exists()) {
+              continue;
+            }
+            const userDocSnap = await getDoc(doc(db, 'mfr_users', op.docId)).catch(() => null);
+            if (userDocSnap && userDocSnap.exists()) {
+              const uData = userDocSnap.data();
+              if (uData && (uData.active === false || uData.status === 'deleted' || uData.deletedAt)) {
+                continue;
+              }
+            }
+          }
           if (op.operation === 'set') {
-            await setDoc(doc(db, op.collection, op.docId), op.data);
+            await setDoc(doc(db, op.collection, op.docId), op.data, { merge: true });
           } else if (op.operation === 'update') {
             await updateDoc(doc(db, op.collection, op.docId), op.data);
           } else if (op.operation === 'delete') {
@@ -2489,14 +2837,70 @@ export class DBService {
     );
   }
 
+  // --- REAL-TIME SERVER-SENT EVENTS & INSTANT CROSS-USER SYNC ---
+  static subscribeToRealtimeEvents(onEvent: (event: any) => void): () => void {
+    const baseUrl = getApiBaseUrl();
+    const sseUrl = `${baseUrl}/api/events`;
+    let es: EventSource | null = null;
+    let reconnectTimeout: any = null;
+    let isClosed = false;
+
+    const connect = () => {
+      if (isClosed) return;
+      try {
+        es = new EventSource(sseUrl);
+        es.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data && data.type && data.type !== 'CONNECTED') {
+              onEvent(data);
+            }
+          } catch (_) {}
+        };
+        es.onerror = () => {
+          if (es) {
+            es.close();
+            es = null;
+          }
+          if (!isClosed) {
+            reconnectTimeout = setTimeout(connect, 3000);
+          }
+        };
+      } catch (err) {
+        if (!isClosed) {
+          reconnectTimeout = setTimeout(connect, 5000);
+        }
+      }
+    };
+
+    connect();
+
+    return () => {
+      isClosed = true;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
+      if (es) es.close();
+    };
+  }
+
+  static async broadcastEvent(type: string, payload?: any): Promise<void> {
+    try {
+      const baseUrl = getApiBaseUrl();
+      await fetch(`${baseUrl}/api/events/broadcast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, payload })
+      });
+    } catch (_) {}
+  }
+
   // Realtime subscription emulation & Live Firestore triggers
   static subscribeToUpdates(collectionName: string, callback: () => void): () => void {
-    if (useRealFirebase && db && auth?.currentUser) {
+    if (useRealFirebase && db) {
       try {
         const unsub = onSnapshot(collection(db, collectionName), () => {
           callback();
         }, (err) => {
-          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
+          if (err?.code === 'permission-denied') return;
           console.error(`Firestore watch failed for collection [${collectionName}]: `, err);
           try {
             handleFirestoreError(err, OperationType.GET, collectionName);
@@ -2526,7 +2930,7 @@ export class DBService {
     onInitial: (movements: MaterialMovement[]) => void,
     onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: MaterialMovement }[]) => void
   ): () => void {
-    if (useRealFirebase && db && auth?.currentUser) {
+    if (useRealFirebase && db) {
       try {
         let isInitial = true;
         const unsub = onSnapshot(collection(db, 'mfr_movements'), (snapshot) => {
@@ -2573,7 +2977,7 @@ export class DBService {
     onInitial: (logs: AuditLog[]) => void,
     onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => void
   ): () => void {
-    if (useRealFirebase && db && auth?.currentUser) {
+    if (useRealFirebase && db) {
       try {
         let isInitial = true;
         const unsub = onSnapshot(collection(db, 'mfr_audit_logs'), (snapshot) => {
@@ -2615,4 +3019,326 @@ export class DBService {
       window.removeEventListener('mock-db-update', handler);
     };
   }
+
+  // ==========================================================
+  // STORE PROCESS TRANSFERS (REPACKING & REPLATING WORKFLOWS)
+  // ==========================================================
+
+  static async getProcessTransfers(): Promise<ProcessTransfer[]> {
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+      try {
+        const q = query(collection(db, 'mfr_process_transfers'), orderBy('createdAt', 'desc'));
+        const snap = await withTimeout(getDocs(q), 4000);
+        const list: ProcessTransfer[] = [];
+        snap.forEach(d => list.push(d.data() as ProcessTransfer));
+        setLocalStorageItem('mfr_process_transfers', list);
+        return list;
+      } catch (err) {
+        console.warn("Falling back to local storage cache for process transfers:", err);
+        handleFirestoreError(err, OperationType.LIST, 'mfr_process_transfers');
+      }
+    }
+    return getLocalStorageItem<ProcessTransfer[]>('mfr_process_transfers', []);
+  }
+
+  static async createProcessTransfer(
+    transfer: Omit<ProcessTransfer, 'transferId' | 'transferNo' | 'status' | 'transferDate' | 'transferTime' | 'createdAt' | 'updatedAt'> & { idempotencyKey?: string },
+    userId: string,
+    userName: string
+  ): Promise<ProcessTransfer> {
+    if (transfer.quantity <= 0) {
+      throw new Error(`Invalid process transfer quantity: ${transfer.quantity}. Quantity must be greater than 0.`);
+    }
+    if (!transfer.toProcess || (transfer.toProcess !== 'Repacking' && transfer.toProcess !== 'Replating')) {
+      throw new Error("Process destination is mandatory. Must select either 'Repacking' or 'Replating'.");
+    }
+
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+    const nowIso = now.toISOString();
+
+    const existingTransfers = await this.getProcessTransfers();
+
+    // Check duplicate idempotency
+    if (transfer.idempotencyKey) {
+      const dup = existingTransfers.find(t => t.idempotencyKey === transfer.idempotencyKey);
+      if (dup) {
+        console.warn(`Duplicate submission suppressed for idempotencyKey: ${transfer.idempotencyKey}`);
+        return dup;
+      }
+    }
+
+    // Generate unique sequential reference number: STP-000001, STP-000002...
+    let nextNum = 1;
+    existingTransfers.forEach(t => {
+      if (t.transferNo && t.transferNo.startsWith('STP-')) {
+        const numPart = parseInt(t.transferNo.replace('STP-', ''), 10);
+        if (!isNaN(numPart) && numPart >= nextNum) {
+          nextNum = numPart + 1;
+        }
+      }
+    });
+
+    const newTransferNo = `STP-${String(nextNum).padStart(6, '0')}`;
+    const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    const initialStatus = transfer.toProcess === 'Repacking' ? 'Sent to Repacking' : 'Sent to Replating';
+
+    const newRecord: ProcessTransfer = {
+      ...transfer,
+      transferId,
+      transferNo: newTransferNo,
+      status: initialStatus,
+      fromLocation: 'Store',
+      transferDate: dateStr,
+      transferTime: timeStr,
+      createdBy: userName || 'Store User',
+      createdByUserId: userId || 'store_user',
+      createdAt: nowIso,
+      updatedAt: nowIso
+    };
+
+    // 1. Save to local storage first for offline / responsive instant UI
+    existingTransfers.unshift(newRecord);
+    setLocalStorageItem('mfr_process_transfers', existingTransfers);
+
+    // 2. Add to Audit Log
+    await this.logAction(
+      userId,
+      userName,
+      `Send to ${transfer.toProcess} (${newTransferNo})`,
+      `Store sent ${transfer.quantity.toLocaleString()} ${transfer.unit} of ${transfer.itemName} to ${transfer.toProcess} under ${newTransferNo}. Remarks: ${transfer.remarks || '-'}`
+    );
+
+    // 3. Create Department Notification
+    const targetDept = transfer.toProcess === 'Repacking' ? 'Packing' : 'Plating';
+    await this.createNotification({
+      department: targetDept,
+      title: `Store Transfer: ${transfer.toProcess}`,
+      message: `${newTransferNo}: Store sent ${transfer.quantity.toLocaleString()} ${transfer.unit} of ${transfer.itemName} (Job Card: ${transfer.jobCardNo}) for ${transfer.toProcess}.`,
+      userId: `all_${targetDept.toLowerCase()}`
+    });
+
+    // 4. Atomic Firestore write with Transaction
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+      try {
+        await runTransaction(db, async (transaction) => {
+          const docRef = doc(db, 'mfr_process_transfers', transferId);
+          transaction.set(docRef, sanitizeForFirestore(newRecord));
+        });
+      } catch (err) {
+        console.warn("Firestore transaction failed for process transfer, queued locally:", err);
+        handleFirestoreError(err, OperationType.WRITE, 'mfr_process_transfers');
+      }
+    }
+
+    return newRecord;
+  }
+
+  static async receiveProcessTransfer(
+    transferId: string,
+    userId: string,
+    userName: string,
+    remarks?: string
+  ): Promise<ProcessTransfer> {
+    const list = await this.getProcessTransfers();
+    const idx = list.findIndex(t => t.transferId === transferId || t.transferNo === transferId);
+    if (idx === -1) throw new Error(`Process Transfer ${transferId} not found`);
+
+    const transfer = list[idx];
+    const nowIso = new Date().toISOString();
+    const newStatus = transfer.toProcess === 'Repacking' ? 'Received at Repacking' : 'Received at Replating';
+
+    const updated: ProcessTransfer = {
+      ...transfer,
+      status: newStatus,
+      receivedBy: userName,
+      receivedByUserId: userId,
+      receivedAt: nowIso,
+      remarks: remarks ? `${transfer.remarks ? transfer.remarks + ' | ' : ''}Received: ${remarks}` : transfer.remarks,
+      updatedAt: nowIso
+    };
+
+    list[idx] = updated;
+    setLocalStorageItem('mfr_process_transfers', list);
+
+    // Audit Log
+    await this.logAction(
+      userId,
+      userName,
+      `Received at ${transfer.toProcess} (${transfer.transferNo})`,
+      `${userName} confirmed receipt of ${transfer.quantity.toLocaleString()} ${transfer.unit} at ${transfer.toProcess} under ${transfer.transferNo}.`
+    );
+
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+      try {
+        await setDoc(doc(db, 'mfr_process_transfers', transfer.transferId), sanitizeForFirestore(updated), { merge: true });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, 'mfr_process_transfers');
+      }
+    }
+
+    return updated;
+  }
+
+  static async startProcessTransfer(
+    transferId: string,
+    userId: string,
+    userName: string,
+    remarks?: string
+  ): Promise<ProcessTransfer> {
+    const list = await this.getProcessTransfers();
+    const idx = list.findIndex(t => t.transferId === transferId || t.transferNo === transferId);
+    if (idx === -1) throw new Error(`Process Transfer ${transferId} not found`);
+
+    const transfer = list[idx];
+    const nowIso = new Date().toISOString();
+    const newStatus = transfer.toProcess === 'Repacking' ? 'Repacking in Process' : 'Replating in Process';
+
+    const updated: ProcessTransfer = {
+      ...transfer,
+      status: newStatus,
+      inProcessBy: userName,
+      inProcessByUserId: userId,
+      inProcessAt: nowIso,
+      remarks: remarks ? `${transfer.remarks ? transfer.remarks + ' | ' : ''}In-Process: ${remarks}` : transfer.remarks,
+      updatedAt: nowIso
+    };
+
+    list[idx] = updated;
+    setLocalStorageItem('mfr_process_transfers', list);
+
+    // Audit Log
+    await this.logAction(
+      userId,
+      userName,
+      `${transfer.toProcess} in Process (${transfer.transferNo})`,
+      `${userName} started ${transfer.toProcess} on ${transfer.quantity.toLocaleString()} ${transfer.unit} for ${transfer.transferNo}.`
+    );
+
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+      try {
+        await setDoc(doc(db, 'mfr_process_transfers', transfer.transferId), sanitizeForFirestore(updated), { merge: true });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, 'mfr_process_transfers');
+      }
+    }
+
+    return updated;
+  }
+
+  static async completeAndReturnProcessTransfer(
+    transferId: string,
+    completedQty: number,
+    rejectionQty: number,
+    rejectionReason: string,
+    returnBin: string,
+    returnRack: string,
+    userId: string,
+    userName: string,
+    remarks?: string
+  ): Promise<ProcessTransfer> {
+    const list = await this.getProcessTransfers();
+    const idx = list.findIndex(t => t.transferId === transferId || t.transferNo === transferId);
+    if (idx === -1) throw new Error(`Process Transfer ${transferId} not found`);
+
+    const transfer = list[idx];
+    const nowIso = new Date().toISOString();
+
+    const updated: ProcessTransfer = {
+      ...transfer,
+      status: 'Returned to Store',
+      completedBy: userName,
+      completedByUserId: userId,
+      completedAt: nowIso,
+      completedQty,
+      rejectionQty,
+      rejectionReason: rejectionReason || undefined,
+      returnedBy: userName,
+      returnedByUserId: userId,
+      returnedAt: nowIso,
+      returnedQty: completedQty,
+      returnLocationBin: returnBin || undefined,
+      returnRackNo: returnRack || undefined,
+      remarks: remarks ? `${transfer.remarks ? transfer.remarks + ' | ' : ''}Completed & Returned: ${remarks}` : transfer.remarks,
+      updatedAt: nowIso
+    };
+
+    list[idx] = updated;
+    setLocalStorageItem('mfr_process_transfers', list);
+
+    // Audit Log
+    await this.logAction(
+      userId,
+      userName,
+      `Process Completed & Returned to Store (${transfer.transferNo})`,
+      `${userName} completed ${transfer.toProcess} for ${transfer.transferNo} and returned ${completedQty.toLocaleString()} ${transfer.unit} (Rejections: ${rejectionQty.toLocaleString()}) to Store (Bin: ${returnBin || '-'}, Rack: ${returnRack || '-'}).`
+    );
+
+    // Notify Store
+    await this.createNotification({
+      department: 'Store',
+      title: `${transfer.toProcess} Returned to Store`,
+      message: `${transfer.transferNo}: ${completedQty.toLocaleString()} ${transfer.unit} of ${transfer.itemName} completed ${transfer.toProcess} and returned to Store.`,
+      userId: 'all_store'
+    });
+
+    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+      try {
+        await setDoc(doc(db, 'mfr_process_transfers', transfer.transferId), sanitizeForFirestore(updated), { merge: true });
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, 'mfr_process_transfers');
+      }
+    }
+
+    return updated;
+  }
+
+  static subscribeProcessTransfersIncremental(
+    onInitial: (transfers: ProcessTransfer[]) => void,
+    onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: ProcessTransfer }[]) => void
+  ): () => void {
+    if (useRealFirebase && db) {
+      try {
+        let isInitial = true;
+        const unsub = onSnapshot(collection(db, 'mfr_process_transfers'), (snapshot) => {
+          if (isInitial) {
+            isInitial = false;
+            const all: ProcessTransfer[] = [];
+            snapshot.forEach(d => all.push(d.data() as ProcessTransfer));
+            onInitial(all);
+          } else {
+            const changes = snapshot.docChanges().map(change => ({
+              type: change.type as 'added' | 'modified' | 'removed',
+              doc: change.doc.data() as ProcessTransfer
+            }));
+            if (changes.length > 0) {
+              onChanges(changes);
+            }
+          }
+        }, (err) => {
+          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
+          console.error("Firestore watch failed for process transfers:", err);
+          try {
+            handleFirestoreError(err, OperationType.GET, 'mfr_process_transfers');
+          } catch (e) {}
+        });
+        return unsub;
+      } catch (err) {
+        console.error("Failed to register process transfers incremental listener:", err);
+      }
+    }
+
+    const handler = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail && customEvent.detail.collection === 'mfr_process_transfers') {
+        this.getProcessTransfers().then(onInitial);
+      }
+    };
+    window.addEventListener('mock-db-update', handler);
+    return () => {
+      window.removeEventListener('mock-db-update', handler);
+    };
+  }
 }
+

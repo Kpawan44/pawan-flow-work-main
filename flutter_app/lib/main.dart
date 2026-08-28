@@ -176,7 +176,7 @@ class MainAndroidShell extends StatelessWidget {
               'PRO-MFG ERP',
               style: GoogleFonts.sansita(
                 fontSize: 16,
-                fontWeight: FontWeight.black,
+                fontWeight: FontWeight.w900,
                 letterSpacing: 0.5,
               ),
             ),
@@ -190,7 +190,7 @@ class MainAndroidShell extends StatelessWidget {
           IconButton(
             icon: Icon(
               state.isOnline ? Icons.wifi : Icons.wifi_off,
-              color: state.isOnline ? Colors.emerald : Colors.amber,
+              color: state.isOnline ? const Color(0xFF10B981) : Colors.amber,
             ),
             tooltip: state.isOnline ? 'Online Sync Active' : 'Offline Queue Mode',
             onPressed: () => state.toggleOnlineStatus(),
@@ -293,7 +293,7 @@ class DashboardScreen extends StatelessWidget {
                 title: 'Live Movements',
                 value: '${state.movements.length}',
                 icon: Icons.local_shipping,
-                color: Colors.emerald,
+                color: const Color(0xFF10B981),
               ),
             ),
           ],
@@ -364,7 +364,7 @@ class JobCardsOrderScreen extends StatelessWidget {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(jc.jobCardNo, style: const TextStyle(fontWeight: FontWeight.black, fontSize: 16, color: Colors.blue)),
+                      Text(jc.jobCardNo, style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Colors.blue)),
                       Chip(
                         label: Text(jc.status, style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold)),
                         backgroundColor: Colors.amber.shade100,
@@ -443,7 +443,7 @@ class ProductionTrackingScreen extends StatelessWidget {
             subtitle: Text('${mov.fromDepartment} ➔ ${mov.toDepartment}\nBy: ${mov.transferBy}'),
             trailing: Icon(
               mov.accepted ? Icons.check_circle : Icons.pending,
-              color: mov.accepted ? Colors.emerald : Colors.amber,
+              color: mov.accepted ? const Color(0xFF10B981) : Colors.amber,
             ),
           ),
         )),
@@ -517,7 +517,7 @@ class _LoginScreenState extends State<LoginScreen> {
             children: [
               const Icon(Icons.factory, size: 64, color: Colors.blue),
               const SizedBox(height: 12),
-              Text('PRO-MFG ERP Mobile', style: GoogleFonts.inter(fontSize: 22, fontWeight: FontWeight.black)),
+              Text('PRO-MFG ERP Mobile', style: GoogleFonts.inter(fontSize: 22, fontWeight: FontWeight.w900)),
               const SizedBox(height: 4),
               const Text('Secure Crew Login Terminal', style: TextStyle(color: Colors.grey)),
               const SizedBox(height: 32),

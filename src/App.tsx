@@ -1,5 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import * as bcrypt from 'bcryptjs';
+import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Factory, 
@@ -48,10 +47,9 @@ import {
   Info,
   RotateCcw
 } from 'lucide-react';
-import { DBService, auth, signInWithCustomToken, signOut, onAuthStateChanged } from './lib/firebase';
+import { DBService, auth, signInWithCustomToken, signOut, onAuthStateChanged, getApiBaseUrl } from './lib/firebase';
 import { runDailyAutoBackupIfNeeded } from './lib/backup';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SyncQueueItem } from './types';
-import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SyncQueueItem, ProcessTransfer } from './types';
 import { 
   getSpreadsheetDetails, 
   isSheetsConnected, 
@@ -65,28 +63,36 @@ import {
   exportAuditLogs, 
   exportDepartmentUpdates 
 } from './lib/csvExport';
-import { exportComprehensiveExcelBackup } from './lib/excelExport';
 import { triggerWhatsAppMovementNotification } from './lib/whatsapp';
 import Sidebar from './components/Sidebar';
 import AppLogo from './components/AppLogo';
 import DashboardStats from './components/DashboardStats';
-import DepartmentOperations from './components/DepartmentOperations';
-import JobCardDetailsModal from './components/JobCardDetailsModal';
-import GlobalSearchModal from './components/GlobalSearchModal';
-import ScannerModal from './components/ScannerModal';
-import ReportView from './components/ReportView';
-import AdminConsole from './components/AdminConsole';
 import TimelineVisual from './components/TimelineVisual';
-import GoogleSheetViewer from './components/GoogleSheetViewer';
-import QuickTransferModal from './components/QuickTransferModal';
-import BulkTransferModal from './components/BulkTransferModal';
-import BulkPrintManifestModal from './components/BulkPrintManifestModal';
-import BulkStatusUpdateModal from './components/BulkStatusUpdateModal';
-import PendingBreakdownModal from './components/PendingBreakdownModal';
 import JobStatusBadge from './components/JobStatusBadge';
 import ConnectivityHealthWidget from './components/ConnectivityHealthWidget';
-import { OutsourceManager } from './components/OutsourceManager';
 import { getJobCardProcessMetrics, getRawMaterialIssuedQty, getJobCardDepartmentPending } from './lib/metrics';
+
+// Dynamic code-split lazy imports for heavy screens & modals
+const DepartmentOperations = lazy(() => import('./components/DepartmentOperations'));
+const JobCardDetailsModal = lazy(() => import('./components/JobCardDetailsModal'));
+const GlobalSearchModal = lazy(() => import('./components/GlobalSearchModal'));
+const QuickTransferModal = lazy(() => import('./components/QuickTransferModal'));
+const PendingBreakdownModal = lazy(() => import('./components/PendingBreakdownModal'));
+const ConcurrencyConflictModal = lazy(() => import('./components/ConcurrencyConflictModal').then(m => ({ default: m.ConcurrencyConflictModal })));
+const AdminConsole = lazy(() => import('./components/AdminConsole'));
+const ReportView = lazy(() => import('./components/ReportView'));
+const GoogleSheetViewer = lazy(() => import('./components/GoogleSheetViewer'));
+const ScannerModal = lazy(() => import('./components/ScannerModal'));
+const BulkTransferModal = lazy(() => import('./components/BulkTransferModal'));
+const BulkPrintManifestModal = lazy(() => import('./components/BulkPrintManifestModal'));
+const BulkStatusUpdateModal = lazy(() => import('./components/BulkStatusUpdateModal'));
+const OutsourceManager = lazy(() => import('./components/OutsourceManager').then(m => ({ default: m.OutsourceManager })));
+
+const ComponentFallback = () => (
+  <div className="flex items-center justify-center p-8 w-full min-h-[200px]">
+    <div className="w-8 h-8 border-3 border-[#3B82F6] border-t-transparent rounded-full animate-spin"></div>
+  </div>
+);
 
 const getAvatarBg = (dept: string) => {
   switch (dept) {
@@ -139,11 +145,14 @@ export default function App() {
   const [isRegistering, setIsRegistering] = useState(false);
   const [regName, setRegName] = useState('');
   const [regSuccess, setRegSuccess] = useState('');
+  const [setupAdminLoading, setSetupAdminLoading] = useState(false);
+  const [setupAdminError, setSetupAdminError] = useState('');
 
   // --- RECT ACTIVE STATE TABLES ---
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [jobCards, setJobCards] = useState<JobCard[]>([]);
   const [movements, setMovements] = useState<MaterialMovement[]>([]);
+  const [processTransfers, setProcessTransfers] = useState<ProcessTransfer[]>([]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [companyConfig, setCompanyConfig] = useState<CompanyConfig | null>(null);
@@ -353,6 +362,19 @@ export default function App() {
   const [showBulkStatusModal, setShowBulkStatusModal] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [showNotificationsDropdown, setShowNotificationsDropdown] = useState(false);
+
+  // --- CONCURRENCY CONFLICT MODAL STATE ---
+  const [conflictModalData, setConflictModalData] = useState<{
+    isOpen: boolean;
+    jobCardNo: string;
+    expectedVersion?: number;
+    attemptedUpdates: Partial<JobCard>;
+    currentData?: JobCard;
+  }>({
+    isOpen: false,
+    jobCardNo: '',
+    attemptedUpdates: {}
+  });
 
   // --- NON-BLOCKING TOASTS & CONFIRMATIONS ---
   const [toast, setToast] = useState<{ 
@@ -601,13 +623,37 @@ export default function App() {
     });
   };
 
+  const applyProcessTransferChanges = (changes: { type: 'added' | 'modified' | 'removed'; doc: ProcessTransfer }[]) => {
+    setProcessTransfers(prev => {
+      const map = new Map<string, ProcessTransfer>(prev.map(t => [t.transferId, t]));
+      for (const change of changes) {
+        if (change.type === 'removed') {
+          map.delete(change.doc.transferId);
+        } else {
+          map.set(change.doc.transferId, change.doc);
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    });
+  };
+
+  const refreshProcessTransfers = async () => {
+    try {
+      const list = await DBService.getProcessTransfers();
+      setProcessTransfers(list);
+    } catch (err) {
+      console.error("Failed to refresh process transfers", err);
+    }
+  };
+
   // --- LOAD INITIAL DATASET ---
   const refreshAllStates = async () => {
     try {
-      const [u, jc, mov, n, logs, config] = await Promise.all([
+      const [u, jc, mov, trans, n, logs, config] = await Promise.all([
         DBService.getUsers(),
         DBService.getJobCards(),
         DBService.getMovements(),
+        DBService.getProcessTransfers(),
         DBService.getNotifications(),
         DBService.getAuditLogs(),
         DBService.getCompanyConfig()
@@ -616,6 +662,7 @@ export default function App() {
       setUsers(u);
       setJobCards(jc);
       setMovements(mov);
+      setProcessTransfers(trans);
       setNotifications(n);
       setAuditLogs(logs);
       setCompanyConfig(config);
@@ -647,50 +694,73 @@ export default function App() {
   useEffect(() => {
     refreshUsers();
 
-    // Check if session storage already has an active user profile
-    const storedProfileStr = sessionStorage.getItem('mfr_active_user_profile');
-    const storedUid = sessionStorage.getItem('mfr_active_user_uid');
-    if (storedProfileStr) {
-      try {
-        const parsed = JSON.parse(storedProfileStr);
-        if (parsed && parsed.userId && parsed.active !== false) {
-          setCurrentUser(parsed);
-        }
-      } catch (e) {
-        console.warn("Could not parse stored profile:", e);
-      }
-    } else if (storedUid) {
-      DBService.getUserProfile(storedUid).then(profile => {
-        if (profile && profile.active !== false) {
+    // Check for existing session in sessionStorage or localStorage on mount
+    try {
+      const savedProfileStr = sessionStorage.getItem('mfr_active_user_profile') || localStorage.getItem('mfr_active_user_profile');
+      if (savedProfileStr) {
+        const profile = JSON.parse(savedProfileStr);
+        if (profile && profile.userId && profile.active !== false) {
           setCurrentUser(profile);
-          sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(profile));
         }
-      }).catch(err => console.warn("Failed to load stored user profile:", err));
-    }
+      }
+    } catch (e) {}
 
     let unsubAuth = () => {};
     if (auth) {
       unsubAuth = onAuthStateChanged(auth, async (firebaseUser) => {
-        if (firebaseUser) {
-          const activeUid = sessionStorage.getItem('mfr_active_user_uid') || firebaseUser.uid;
+        if (firebaseUser && firebaseUser.uid) {
           try {
-            const userProfile = await DBService.getUserProfile(activeUid);
+            // Authoritative identity MUST be firebaseUser.uid
+            const userProfile = await DBService.getUserProfile(firebaseUser.uid);
             if (userProfile) {
               if (userProfile.active === false) {
                 // Inactive user, enforce logout
-                if (auth) await signOut(auth);
+                if (auth) await signOut(auth).catch(() => {});
                 setCurrentUser(null);
                 sessionStorage.removeItem('mfr_active_user_uid');
                 sessionStorage.removeItem('mfr_active_user_profile');
+                sessionStorage.removeItem('mfr_auth_token');
+                localStorage.removeItem('mfr_active_user_uid');
+                localStorage.removeItem('mfr_active_user_profile');
+                localStorage.removeItem('mfr_auth_token');
                 setAuthError('Your account has been deactivated. Please contact an administrator.');
               } else {
+                // Cache user profile for display only after Firebase Auth confirms identity
                 setCurrentUser(userProfile);
-                sessionStorage.setItem('mfr_active_user_uid', userProfile.userId);
+                sessionStorage.setItem('mfr_active_user_uid', firebaseUser.uid);
                 sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(userProfile));
+                localStorage.setItem('mfr_active_user_uid', firebaseUser.uid);
+                localStorage.setItem('mfr_active_user_profile', JSON.stringify(userProfile));
               }
+            } else {
+              // Profile not found in database for this Firebase UID
+              if (auth) await signOut(auth).catch(() => {});
+              setCurrentUser(null);
+              sessionStorage.removeItem('mfr_active_user_uid');
+              sessionStorage.removeItem('mfr_active_user_profile');
+              sessionStorage.removeItem('mfr_auth_token');
+              localStorage.removeItem('mfr_active_user_uid');
+              localStorage.removeItem('mfr_active_user_profile');
+              localStorage.removeItem('mfr_auth_token');
             }
           } catch (err) {
             console.error("Auth state synchronization error:", err);
+          }
+        } else {
+          // If no Firebase Auth user, check if we have a valid stored session
+          const savedProfileStr = sessionStorage.getItem('mfr_active_user_profile') || localStorage.getItem('mfr_active_user_profile');
+          if (savedProfileStr) {
+            try {
+              const profile = JSON.parse(savedProfileStr);
+              if (profile && profile.userId && profile.active !== false) {
+                setCurrentUser(profile);
+                return;
+              }
+            } catch (e) {}
+          }
+          // Only clear if neither storage has a profile
+          if (!sessionStorage.getItem('mfr_active_user_profile') && !localStorage.getItem('mfr_active_user_profile')) {
+            setCurrentUser(null);
           }
         }
       });
@@ -735,6 +805,25 @@ export default function App() {
     const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', makeDebounced('mfr_company_config', refreshCompanyConfig));
     const unsubMoves = DBService.subscribeMovementsIncremental(setMovements, applyMovementChanges);
     const unsubAudits = DBService.subscribeAuditLogsIncremental(setAuditLogs, applyAuditLogChanges);
+    const unsubTransfers = DBService.subscribeProcessTransfersIncremental(setProcessTransfers, applyProcessTransferChanges);
+
+    // Attach live Server-Sent Events stream for instant cross-device updates (< 50ms)
+    const unsubSSE = DBService.subscribeToRealtimeEvents((event) => {
+      if (event.type === 'USER_UPDATED') {
+        DBService.invalidateCache('mfr_users');
+        refreshUsers();
+      } else if (event.type === 'MOVEMENT_UPDATED' || event.type === 'DATA_SYNCED') {
+        DBService.invalidateCache('mfr_movements');
+        refreshAllStates();
+      } else if (event.type === 'JOB_UPDATED') {
+        DBService.invalidateCache('mfr_job_cards');
+        refreshJobCards();
+      } else if (event.type === 'NOTIFICATION_UPDATED') {
+        refreshNotifications();
+      } else if (event.type === 'ALL_UPDATED') {
+        refreshAllStates();
+      }
+    });
 
     return () => {
       Object.values(debounceTimeouts).forEach(clearTimeout);
@@ -744,6 +833,8 @@ export default function App() {
       unsubCompany();
       unsubMoves();
       unsubAudits();
+      unsubTransfers();
+      unsubSSE();
     };
   }, [currentUser?.userId]);
 
@@ -751,7 +842,7 @@ export default function App() {
     if (!autoRefreshEnabled) return;
     const interval = setInterval(() => {
       refreshAllStates();
-    }, 30000);
+    }, 60000);
     return () => clearInterval(interval);
   }, [autoRefreshEnabled]);
 
@@ -925,57 +1016,62 @@ export default function App() {
       return;
     }
 
-    const matchedUser = users.find(u => u.name.trim().toLowerCase() === nameToMatch.toLowerCase());
-    if (!matchedUser) {
-      setAuthError('Invalid credentials. Please verify your Registered Full Name and Security PIN.');
-      setLoginPin('');
-      return;
-    }
-
     setIsVerifyingPin(true);
     try {
-      let pinVerified = false;
+      const authResult = await DBService.authenticateUser(nameToMatch, pinToMatch);
+      const verifiedProfile: UserProfile = authResult.user;
 
-      if (matchedUser.pinHash) {
-        // Client-side bcrypt — works on web, Android (Capacitor), and Electron
-        pinVerified = await bcrypt.compare(pinToMatch, matchedUser.pinHash);
-      } else {
-        // No hash yet — try server upgrade (Electron/local dev only)
+      if (verifiedProfile.active === false) {
+        throw new Error(`Your profile (${verifiedProfile.name}) is deactivated. Please contact an administrator.`);
+      }
+
+      // Authenticate with Firebase Authentication using Custom Token if available
+      let authenticatedUid = verifiedProfile.userId;
+      const token = authResult.token;
+
+      if (auth && token) {
         try {
-          const response = await fetch(`/api/users/${encodeURIComponent(matchedUser.userId)}/verify-pin`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pin: pinToMatch, pinHash: null }),
-            signal: AbortSignal.timeout(5000),
-          });
-          if (response.ok) {
-            const result = await response.json();
-            pinVerified = result.success === true;
-            if (result.newPinHash) {
-              DBService.updateUser(matchedUser.userId, { pinHash: result.newPinHash }).catch(() => {});
-            }
+          const credential = await signInWithCustomToken(auth, token);
+          if (credential?.user?.uid) {
+            authenticatedUid = credential.user.uid;
           }
-        } catch {
-          pinVerified = false;
+        } catch (authErr) {
+          console.warn("[AUTH] Note: Custom token signIn not available in this environment, using verified session:", authErr);
         }
       }
 
-      if (!pinVerified) {
-        setAuthError('Invalid credentials. Please verify your Registered Full Name and Security PIN.');
-        setLoginPin('');
-        setIsVerifyingPin(false);
-        return;
-      }
+      const authenticatedProfile: UserProfile = {
+        ...verifiedProfile,
+        userId: authenticatedUid
+      };
 
-      setCurrentUser({ ...matchedUser });
-      sessionStorage.setItem('mfr_active_user_uid', matchedUser.userId);
+      // Establish authenticated user session
+      setCurrentUser(authenticatedProfile);
+      sessionStorage.setItem('mfr_active_user_uid', authenticatedUid);
+      sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(authenticatedProfile));
+      localStorage.setItem('mfr_active_user_uid', authenticatedUid);
+      localStorage.setItem('mfr_active_user_profile', JSON.stringify(authenticatedProfile));
+      if (token) {
+        sessionStorage.setItem('mfr_auth_token', token);
+        localStorage.setItem('mfr_auth_token', token);
+      }
       setLoginName('');
       setLoginPin('');
       setSelectedLoginUser(null);
-      await DBService.logAction(matchedUser.userId, matchedUser.name, 'USER_LOGIN', 'Logged in via bcrypt PIN verification.');
+      await DBService.logAction(authenticatedUid, authenticatedProfile.name, 'USER_LOGIN', `Logged in via security PIN.`);
     } catch (err: any) {
-      console.warn('PIN verification error:', err);
-      setAuthError('An error occurred during login. Please try again.');
+      console.warn("Authentication error:", err);
+      if (auth) {
+        await signOut(auth).catch(() => {});
+      }
+      setCurrentUser(null);
+      sessionStorage.removeItem('mfr_active_user_uid');
+      sessionStorage.removeItem('mfr_active_user_profile');
+      sessionStorage.removeItem('mfr_auth_token');
+      localStorage.removeItem('mfr_active_user_uid');
+      localStorage.removeItem('mfr_active_user_profile');
+      localStorage.removeItem('mfr_auth_token');
+      setAuthError(err.message || 'Invalid credentials or authentication failure. Please try again.');
       setLoginPin('');
     } finally {
       setIsVerifyingPin(false);
@@ -1059,6 +1155,11 @@ export default function App() {
     }
     setCurrentUser(null);
     sessionStorage.removeItem('mfr_active_user_uid');
+    sessionStorage.removeItem('mfr_active_user_profile');
+    sessionStorage.removeItem('mfr_auth_token');
+    localStorage.removeItem('mfr_active_user_uid');
+    localStorage.removeItem('mfr_active_user_profile');
+    localStorage.removeItem('mfr_auth_token');
     if (auth) {
       try {
         await signOut(auth);
@@ -1139,14 +1240,64 @@ export default function App() {
     }
   };
 
-  const handleUpdateJobCard = async (jobCardNo: string, updates: any) => {
+  const handleUpdateJobCard = async (jobCardNo: string, updates: any, expectedVersion?: number) => {
     if (!currentUser) return;
     try {
-      await DBService.updateJobCard(jobCardNo, updates, currentUser.userId, currentUser.name);
+      const targetCard = jobCards.find(j => j.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
+      const expVer = expectedVersion !== undefined ? expectedVersion : targetCard?.version;
+
+      const result = await DBService.updateJobCard(
+        jobCardNo, 
+        updates, 
+        currentUser.userId, 
+        currentUser.name,
+        expVer
+      );
+
+      if (result.conflict) {
+        setConflictModalData({
+          isOpen: true,
+          jobCardNo,
+          expectedVersion: expVer,
+          attemptedUpdates: updates,
+          currentData: result.currentData
+        });
+        showToast(`⚠️ Conflict Detected: Job Card ${jobCardNo} was modified by another user.`, "error");
+        await refreshAllStates();
+        return;
+      }
+
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to update job card", err);
       showToast(`Failed to update Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  };
+
+  const handleResolveConflictReload = async () => {
+    const jcNo = conflictModalData.jobCardNo;
+    setConflictModalData(prev => ({ ...prev, isOpen: false }));
+    await refreshAllStates();
+    showToast(`Reloaded latest Job Card ${jcNo} data from database.`, 'info');
+  };
+
+  const handleResolveConflictOverwrite = async () => {
+    const { jobCardNo, attemptedUpdates, currentData } = conflictModalData;
+    setConflictModalData(prev => ({ ...prev, isOpen: false }));
+    if (!currentUser) return;
+    try {
+      await DBService.updateJobCard(
+        jobCardNo,
+        attemptedUpdates,
+        currentUser.userId,
+        currentUser.name,
+        currentData?.version // match newest version to force overwrite
+      );
+      await refreshAllStates();
+      showToast(`Applied your edits to Job Card ${jobCardNo}.`, 'success');
+    } catch (err: any) {
+      console.error("Failed to overwrite job card", err);
+      showToast(`Failed to apply updates: ${err instanceof Error ? err.message : String(err)}`, 'error');
     }
   };
 
@@ -1258,6 +1409,76 @@ export default function App() {
     } catch (err: any) {
       console.error("Failed to transfer material", err);
       showToast(`Failed to transfer material: ${err instanceof Error ? err.message : String(err)}`, "error");
+      throw err;
+    }
+  };
+
+  const handleCreateProcessTransfer = async (transferData: any) => {
+    if (!currentUser) return;
+    try {
+      const newRecord = await DBService.createProcessTransfer(transferData, currentUser.userId, currentUser.name);
+      showToast(`Material transferred to ${transferData.toProcess} (${newRecord.transferNo})`, 'success');
+      refreshAllStates();
+    } catch (err: any) {
+      console.error("Process transfer failed:", err);
+      showToast(err.message || 'Failed to create process transfer', 'error');
+      throw err;
+    }
+  };
+
+  const handleReceiveProcessTransfer = async (transferId: string, remarks?: string) => {
+    if (!currentUser) return;
+    try {
+      const updated = await DBService.receiveProcessTransfer(transferId, currentUser.userId, currentUser.name, remarks);
+      showToast(`Confirmed receipt for ${updated.transferNo} at ${updated.toProcess}`, 'success');
+      refreshAllStates();
+    } catch (err: any) {
+      console.error("Receive process transfer failed:", err);
+      showToast(err.message || 'Failed to receive process transfer', 'error');
+      throw err;
+    }
+  };
+
+  const handleStartProcessTransfer = async (transferId: string, remarks?: string) => {
+    if (!currentUser) return;
+    try {
+      const updated = await DBService.startProcessTransfer(transferId, currentUser.userId, currentUser.name, remarks);
+      showToast(`Started ${updated.toProcess} for ${updated.transferNo}`, 'success');
+      refreshAllStates();
+    } catch (err: any) {
+      console.error("Start process transfer failed:", err);
+      showToast(err.message || 'Failed to start process', 'error');
+      throw err;
+    }
+  };
+
+  const handleCompleteProcessTransfer = async (
+    transferId: string, 
+    completedQty: number, 
+    rejectionQty: number, 
+    reason: string, 
+    bin: string, 
+    rack: string, 
+    remarks?: string
+  ) => {
+    if (!currentUser) return;
+    try {
+      const updated = await DBService.completeAndReturnProcessTransfer(
+        transferId, 
+        completedQty, 
+        rejectionQty, 
+        reason, 
+        bin, 
+        rack, 
+        currentUser.userId, 
+        currentUser.name, 
+        remarks
+      );
+      showToast(`Completed ${updated.transferNo} & returned ${completedQty} ${updated.unit} to Store`, 'success');
+      refreshAllStates();
+    } catch (err: any) {
+      console.error("Complete process transfer failed:", err);
+      showToast(err.message || 'Failed to complete process transfer', 'error');
       throw err;
     }
   };
@@ -1391,6 +1612,9 @@ export default function App() {
   const handleSaveUserProfile = async (profile: UserProfile) => {
     try {
       await DBService.saveUser(profile);
+      const freshUsers = await DBService.getUsers(true);
+      setUsers(freshUsers);
+      showToast(`User '${profile.name}' created successfully!`, "success");
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to save user profile", err);
@@ -1400,8 +1624,23 @@ export default function App() {
 
   const handleDeleteUserProfile = async (userId: string, userName: string) => {
     if (!currentUser) return;
-    await DBService.deleteUser(userId, userName, currentUser.userId, currentUser.name);
-    refreshAllStates();
+    try {
+      // 1. Optimistically remove from state immediately
+      setUsers(prev => prev.filter(u => 
+        u.userId !== userId && 
+        u.userId?.toLowerCase() !== userId.toLowerCase() && 
+        u.name?.toLowerCase() !== (userName || '').toLowerCase()
+      ));
+      // 2. Perform server & database deletion
+      await DBService.deleteUser(userId, userName, currentUser.userId, currentUser.name);
+      showToast(`User account '${userName}' (ID: ${userId}) deleted successfully.`, "success");
+      await refreshAllStates();
+    } catch (err: any) {
+      console.error("Failed to delete user:", err);
+      showToast(err instanceof Error ? err.message : (err?.message || "Failed to delete user profile."), "error");
+      await refreshAllStates();
+      throw err;
+    }
   };
 
   const handleLogActionExternally = async (action: string, details: string) => {
@@ -1891,204 +2130,248 @@ export default function App() {
     }
   };
 
-  // --- RENDER LOGIN VIEW IF NO REGISTERED PROFILE ---
-  if (!currentUser) {
+  // --- RENDER FIRST-RUN ONBOARDING SCREEN IF 0 USERS REMAIN (AFTER FACTORY RESET) ---
+  const isFirstRun = !currentUser && (sessionStorage.getItem('mfr_is_first_run') === 'true' || localStorage.getItem('mfr_is_first_run') === 'true');
+  if (isFirstRun) {
     return (
-      <div className="min-h-screen bg-[#F8FAFC] dark:bg-slate-950 flex flex-col justify-center items-center p-4 font-sans selection:bg-[#3B82F6] selection:text-white transition-colors duration-200">
-        
-        {/* Core ERP Login / Registration container card */}
-        <div className="w-full max-w-4xl bg-white dark:bg-slate-900 border border-[#E2E8F0] dark:border-slate-800 rounded-2xl shadow-xl overflow-hidden grid grid-cols-1 md:grid-cols-2">
-          
-          {/* Brand Presentation graphics Column */}
-          <div className="bg-[#0F172A] p-10 flex flex-col justify-between border-r border-[#1E293B]">
-            <div className="flex items-center gap-3">
-              <AppLogo size="lg" className="text-[#3B82F6]" />
-              <div>
-                <h2 className="text-sm font-extrabold text-white tracking-widest leading-none uppercase">PRO-MFG TRACK</h2>
-                <span className="font-mono text-[9px] uppercase tracking-wider text-slate-400 mt-1 block">Workforce Operations v2.5</span>
-              </div>
+      <div className="min-h-[100dvh] w-full max-w-[100vw] bg-[#F8FAFC] dark:bg-slate-950 flex flex-col justify-center items-center p-3 sm:p-6 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1.5rem,env(safe-area-inset-bottom,0px))] font-sans selection:bg-[#3B82F6] selection:text-white transition-colors duration-200 overflow-y-auto overflow-x-hidden">
+        <div className="w-full max-w-sm sm:max-w-md bg-white dark:bg-slate-900 border border-[#E2E8F0] dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden p-6 sm:p-10 space-y-5 sm:space-y-6">
+          <div className="flex flex-col items-center text-center space-y-3">
+            <div className="p-3 bg-amber-50 dark:bg-amber-950/40 rounded-2xl border border-amber-100 dark:border-amber-900/40 shadow-xs">
+              <AppLogo size="xl" className="text-amber-500" />
             </div>
-
-            <div className="my-10 space-y-4">
-              <h3 className="text-xl font-bold tracking-tight text-white leading-snug">
-                Professional Production & Fastener Tracking System
-              </h3>
-              <p className="text-slate-400 text-xs leading-relaxed">
-                Complete traceability ledger recording material flow across Dispatch, Production, Heat Treatment, Plating, Packing, and Warehouse lines.
+            <div>
+              <h2 className="text-xl font-extrabold text-slate-800 dark:text-white tracking-wider uppercase font-mono">
+                Factory reset completed.
+              </h2>
+              <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mt-1">
+                No users or factory data remain.
               </p>
-            </div>
-
-            <div className="flex items-center gap-2.5 text-[10.5px] text-slate-500 font-mono">
-              <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span>Plant Node Status: Live Connection Established</span>
+              <p className="text-[11px] text-blue-600 dark:text-blue-400 font-bold mt-1">
+                Create your new Super Admin account to begin.
+              </p>
             </div>
           </div>
 
-          {/* Form Content Column */}
-          <div className="p-8 md:p-10 flex flex-col justify-center bg-white dark:bg-slate-900 space-y-6">
-            
-            <div className="space-y-5 font-sans">
-              <div>
-                <h3 className="text-base font-extrabold text-slate-800 dark:text-slate-100 uppercase tracking-wider flex items-center gap-1.5 text-[#3B82F6]">
-                  <Lock className="h-5 w-5 text-[#3B82F6]" />
-                  Workstation Terminal Portal
-                </h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                  Enter your Registered Full Name and security PIN to access the workstation.
-                </p>
-              </div>
-
-              {regSuccess && (
-                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/30 rounded-xl text-emerald-800 dark:text-emerald-300 text-xs flex items-center gap-2 font-semibold">
-                  <CheckCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                  <span>{regSuccess}</span>
-                </div>
-              )}
-
-              {authError && (
-                <div className="p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/30 rounded-xl text-[#B91C1C] dark:text-red-400 text-xs leading-normal font-semibold">
-                  {authError}
-                </div>
-              )}
-
-              <form onSubmit={handleUsernamePinLogin} className="space-y-4">
-                <div>
-                  <label className="block text-slate-600 dark:text-slate-350 font-bold mb-1.5 uppercase tracking-wide text-[10px]">Registered Full Name</label>
-                  <div className="relative">
-                    <Users className="absolute left-3 top-3 h-4 w-4 text-slate-450" />
-                    <input
-                      type="text"
-                      placeholder="e.g. Registered Name"
-                      required
-                      value={loginName}
-                      onChange={e => setLoginName(e.target.value)}
-                      className="w-full bg-[#F8FAFC] dark:bg-slate-950 border border-[#E2E8F0] dark:border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-xs text-slate-800 dark:text-white focus:outline-none focus:border-[#3B82F6] font-medium"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-slate-600 dark:text-slate-350 font-bold mb-1.5 uppercase tracking-wide text-[10px]">Security PIN</label>
-                  <div className="relative">
-                    <Key className="absolute left-3 top-3 h-4 w-4 text-slate-450" />
-                    <input
-                      type={showPin ? 'text' : 'password'}
-                      placeholder="Enter 4-Digit PIN"
-                      required
-                      maxLength={4}
-                      value={loginPin}
-                      onChange={e => {
-                        const val = e.target.value.replace(/\D/g, '');
-                        if (val.length <= 4) setLoginPin(val);
-                      }}
-                      className="w-full bg-[#F8FAFC] dark:bg-slate-950 border border-[#E2E8F0] dark:border-slate-800 rounded-xl pl-10 pr-10 py-2.5 text-xs text-slate-800 dark:text-white focus:outline-none focus:border-[#3B82F6] font-mono font-bold tracking-[0.25em]"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPin(!showPin)}
-                      className="absolute right-3 top-3.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition"
-                    >
-                      {showPin ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Tactile Virtual Numpad */}
-                <div className="space-y-2 pt-1.5 border-t border-[#E2E8F0] dark:border-slate-800/80 mt-2">
-                  <div className="text-center">
-                    <span className="text-[9px] font-mono uppercase tracking-widest text-slate-450 dark:text-slate-500">
-                      Tactile Security PIN Input
-                    </span>
-                    <div className="flex items-center justify-center gap-3.5 py-1.5">
-                      {[0, 1, 2, 3].map(i => {
-                        const filled = i < loginPin.length;
-                        return (
-                          <div
-                            key={i}
-                            className={`h-3 w-3 rounded-full border-2 transition-all duration-150 ${
-                              filled
-                                ? 'bg-[#3B82F6] border-[#3B82F6] shadow-[0_0_8px_rgba(59,130,246,0.6)] scale-110'
-                                : 'border-slate-300 dark:border-slate-700 bg-transparent'
-                            }`}
-                          />
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div className="max-w-[240px] mx-auto grid grid-cols-3 gap-2 pt-1 font-mono">
-                    {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-                      <button
-                        key={num}
-                        type="button"
-                        onClick={() => {
-                          if (loginPin.length < 4) {
-                            setLoginPin(prev => prev + num);
-                          }
-                        }}
-                        disabled={loginPin.length === 4}
-                        className="h-9 rounded-lg bg-slate-50 dark:bg-slate-850 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-150 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700 text-slate-800 dark:text-slate-200 text-sm font-bold transition-all active:scale-95 cursor-pointer disabled:opacity-50 flex items-center justify-center shadow-xs"
-                      >
-                        {num}
-                      </button>
-                    ))}
-                    
-                    {/* Clear Button */}
-                    <button
-                      type="button"
-                      onClick={() => setLoginPin('')}
-                      className="h-9 rounded-lg bg-red-50 dark:bg-red-950/20 hover:bg-red-100 dark:hover:bg-red-900/30 border border-red-100 dark:border-red-900/40 text-red-600 dark:text-red-400 text-[10px] font-extrabold transition-all active:scale-95 cursor-pointer flex items-center justify-center uppercase tracking-wider"
-                    >
-                      Clear
-                    </button>
-
-                    {/* 0 Button */}
-                    <button
-                      key={0}
-                      type="button"
-                      onClick={() => {
-                        if (loginPin.length < 4) {
-                          setLoginPin(prev => prev + '0');
-                        }
-                      }}
-                      disabled={loginPin.length === 4}
-                      className="h-9 rounded-lg bg-slate-50 dark:bg-slate-850 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-150 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700 text-slate-800 dark:text-slate-200 text-sm font-bold transition-all active:scale-95 cursor-pointer disabled:opacity-50 flex items-center justify-center shadow-xs"
-                    >
-                      0
-                    </button>
-
-                    {/* Backspace Button */}
-                    <button
-                      type="button"
-                      onClick={() => setLoginPin(prev => prev.slice(0, -1))}
-                      className="h-9 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-extrabold transition-all active:scale-95 cursor-pointer flex items-center justify-center"
-                    >
-                      ⌫
-                    </button>
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full mt-4 bg-[#3B82F6] hover:bg-blue-600 text-white font-extrabold py-3 rounded-xl shadow-md transition-all uppercase tracking-wider font-mono text-xs cursor-pointer border border-[#1D4ED8]"
-                >
-                  Access Workspace Terminal
-                </button>
-              </form>
+          {setupAdminError && (
+            <div className="p-3.5 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/30 rounded-xl text-[#B91C1C] dark:text-red-400 text-xs leading-normal font-semibold">
+              {setupAdminError}
             </div>
+          )}
+
+          <form onSubmit={async (e) => {
+            e.preventDefault();
+            if (!loginName.trim() || loginPin.trim().length !== 4) {
+              setSetupAdminError('Full Name and 4-digit numeric Security PIN are required.');
+              return;
+            }
+            setSetupAdminLoading(true);
+            setSetupAdminError('');
+            try {
+              const res = await fetch(`${getApiBaseUrl()}/api/auth/setup-admin`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  name: loginName.trim(),
+                  pin: loginPin.trim(),
+                  department: 'Admin'
+                })
+              });
+              const data = await res.json();
+              if (!res.ok || !data.success) {
+                throw new Error(data.error || 'Failed to initialize Super Admin.');
+              }
+              if (data.token) {
+                sessionStorage.setItem('mfr_auth_token', data.token);
+                localStorage.setItem('mfr_auth_token', data.token);
+              }
+              localStorage.removeItem('mfr_is_first_run');
+              sessionStorage.removeItem('mfr_is_first_run');
+              setCurrentUser(data.user);
+              setUsers([data.user]);
+              showToast(`Super Admin account '${data.user.name}' created successfully!`, 'success');
+              refreshAllStates();
+            } catch (err: any) {
+              setSetupAdminError(err.message || 'Initialization failed.');
+            } finally {
+              setSetupAdminLoading(false);
+            }
+          }} className="space-y-4 pt-1">
+            <div>
+              <label htmlFor="setup-admin-name" className="block text-slate-600 dark:text-slate-350 font-bold mb-1.5 uppercase tracking-wide text-[10.5px]">
+                Super Admin Name
+              </label>
+              <div className="relative">
+                <Users className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-450 pointer-events-none" aria-hidden="true" />
+                <input
+                  id="setup-admin-name"
+                  type="text"
+                  placeholder="e.g. Master Administrator"
+                  required
+                  value={loginName}
+                  onChange={e => setLoginName(e.target.value)}
+                  className="w-full min-h-[48px] h-12 bg-[#F8FAFC] dark:bg-slate-950 border border-[#E2E8F0] dark:border-slate-800 rounded-xl pl-11 pr-4 py-3 text-xs text-slate-800 dark:text-white focus:outline-none focus:border-blue-500 font-medium"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label htmlFor="setup-admin-pin" className="block text-slate-600 dark:text-slate-350 font-bold mb-1.5 uppercase tracking-wide text-[10.5px]">
+                Set 4-Digit Security PIN
+              </label>
+              <div className="relative">
+                <Key className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-450 pointer-events-none" aria-hidden="true" />
+                <input
+                  id="setup-admin-pin"
+                  type="password"
+                  maxLength={4}
+                  placeholder="••••"
+                  required
+                  value={loginPin}
+                  onChange={e => setLoginPin(e.target.value)}
+                  className="w-full min-h-[48px] h-12 bg-[#F8FAFC] dark:bg-slate-950 border border-[#E2E8F0] dark:border-slate-800 rounded-xl pl-11 pr-4 py-3 text-xs text-slate-800 dark:text-white focus:outline-none focus:border-blue-500 font-mono font-bold tracking-[0.3em]"
+                />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={setupAdminLoading}
+              className="w-full min-h-[48px] h-12 mt-2 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white font-extrabold rounded-xl shadow-lg shadow-emerald-500/20 transition-all uppercase tracking-wider font-mono text-xs cursor-pointer border border-emerald-700 flex items-center justify-center gap-2"
+            >
+              <Lock className="h-4 w-4" />
+              <span>{setupAdminLoading ? "Initializing..." : "Create Super Admin Account"}</span>
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // --- RENDER LOGIN VIEW IF NO REGISTERED PROFILE ---
+  if (!currentUser) {
+    return (
+      <div className="min-h-[100dvh] w-full max-w-[100vw] bg-[#F8FAFC] dark:bg-slate-950 flex flex-col justify-center items-center p-3 sm:p-6 pt-[max(1rem,env(safe-area-inset-top,0px))] pb-[max(1.5rem,env(safe-area-inset-bottom,0px))] font-sans selection:bg-[#3B82F6] selection:text-white transition-colors duration-200 overflow-y-auto overflow-x-hidden">
+        
+        {/* Streamlined Clean Login Card */}
+        <div className="w-full max-w-sm sm:max-w-md bg-white dark:bg-slate-900 border border-[#E2E8F0] dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden p-6 sm:p-10 space-y-5 sm:space-y-6">
+          
+          {/* App Logo & Branding */}
+          <div className="flex flex-col items-center text-center space-y-3">
+            <div className="p-3 bg-blue-50 dark:bg-blue-950/40 rounded-2xl border border-blue-100 dark:border-blue-900/40 shadow-xs">
+              <AppLogo size="xl" className="text-[#3B82F6]" />
+            </div>
+            <div>
+              <h2 className="text-xl font-extrabold text-slate-800 dark:text-white tracking-wider uppercase font-mono">
+                PRO-MFG TRACK
+              </h2>
+              <span className="font-mono text-[10px] uppercase tracking-widest text-slate-400 dark:text-slate-500 mt-1 block font-semibold">
+                Workforce Operations v2.5
+              </span>
+            </div>
+          </div>
+
+          {/* Feedback Messages */}
+          {regSuccess && (
+            <div className="p-3.5 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/30 rounded-xl text-emerald-800 dark:text-emerald-300 text-xs flex items-center gap-2.5 font-semibold">
+              <CheckCircle className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span>{regSuccess}</span>
+            </div>
+          )}
+
+          {authError && (
+            <div className="p-3.5 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900/30 rounded-xl text-[#B91C1C] dark:text-red-400 text-xs leading-normal font-semibold">
+              {authError}
+            </div>
+          )}
+
+          {/* Clean User ID & Password Form */}
+          <form onSubmit={handleUsernamePinLogin} className="space-y-4 pt-1">
+            {/* User ID / Full Name */}
+            <div>
+              <label htmlFor="login-name" className="block text-slate-600 dark:text-slate-350 font-bold mb-1.5 uppercase tracking-wide text-[10.5px]">
+                User ID / Name
+              </label>
+              <div className="relative">
+                <Users className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-450 pointer-events-none" aria-hidden="true" />
+                <input
+                  id="login-name"
+                  name="loginName"
+                  type="text"
+                  placeholder="Enter User ID or Registered Name"
+                  required
+                  autoComplete="username"
+                  aria-label="User ID or Registered Name"
+                  aria-required="true"
+                  value={loginName}
+                  onChange={e => setLoginName(e.target.value)}
+                  className="w-full min-h-[48px] h-12 bg-[#F8FAFC] dark:bg-slate-950 border border-[#E2E8F0] dark:border-slate-800 rounded-xl pl-11 pr-4 py-3 text-xs text-slate-800 dark:text-white focus:outline-none focus:border-[#3B82F6] font-medium"
+                />
+              </div>
+            </div>
+
+            {/* Password / Security PIN */}
+            <div>
+              <label htmlFor="security-pin" className="block text-slate-600 dark:text-slate-350 font-bold mb-1.5 uppercase tracking-wide text-[10.5px]">
+                Password / PIN
+              </label>
+              <div className="relative">
+                <Key className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-450 pointer-events-none" aria-hidden="true" />
+                <input
+                  id="security-pin"
+                  name="securityPin"
+                  type={showPin ? 'text' : 'password'}
+                  placeholder="Enter 4-Digit PIN or Password"
+                  required
+                  maxLength={10}
+                  autoComplete="current-password"
+                  aria-label="Password or Security PIN"
+                  aria-required="true"
+                  value={loginPin}
+                  onChange={e => {
+                    const val = e.target.value;
+                    setLoginPin(val);
+                  }}
+                  className="w-full min-h-[48px] h-12 bg-[#F8FAFC] dark:bg-slate-950 border border-[#E2E8F0] dark:border-slate-800 rounded-xl pl-11 pr-12 py-3 text-xs text-slate-800 dark:text-white focus:outline-none focus:border-[#3B82F6] font-mono font-bold tracking-[0.2em]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPin(!showPin)}
+                  aria-label={showPin ? "Hide PIN" : "Show PIN"}
+                  title={showPin ? "Hide PIN" : "Show PIN"}
+                  className="absolute right-0 top-0 bottom-0 min-w-[48px] min-h-[48px] w-12 flex items-center justify-center text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition cursor-pointer"
+                >
+                  {showPin ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+                </button>
+              </div>
+            </div>
+
+            {/* Sign In Button */}
+            <button
+              type="submit"
+              aria-label="Sign In to Terminal"
+              className="w-full min-h-[48px] h-12 mt-2 bg-[#3B82F6] hover:bg-blue-600 active:scale-[0.99] text-white font-extrabold rounded-xl shadow-lg shadow-blue-500/20 transition-all uppercase tracking-wider font-mono text-xs cursor-pointer border border-[#1D4ED8] flex items-center justify-center gap-2"
+            >
+              <Lock className="h-4 w-4" />
+              <span>Sign In to Terminal</span>
+            </button>
+          </form>
+
+          {/* Footer info */}
+          <div className="pt-2 text-center">
+            <p className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
+              Secure Ledger Node • Plant Terminal
+            </p>
           </div>
 
         </div>
 
-        <p className="text-[10px] text-slate-450 dark:text-slate-500 mt-6 font-mono text-center">
-          Secured with robust token ledger tracking.
-        </p>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen bg-[#F8FAFC] dark:bg-slate-950 transition-colors duration-200 font-sans overflow-hidden selection:bg-[#3B82F6] selection:text-white">
+    <div className="flex h-[100dvh] max-h-[100dvh] w-full max-w-[100vw] bg-[#F8FAFC] dark:bg-slate-950 transition-colors duration-200 font-sans overflow-hidden selection:bg-[#3B82F6] selection:text-white">
       
       {/* 1. SIDE NAVIGATION COLUMN Backdrop for mobile */}
       {sidebarOpen && (
@@ -2129,10 +2412,10 @@ export default function App() {
       </div>
 
       {/* 2. MAIN APPLICATION CONTENT WRAPPER */}
-      <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-[#F8FAFC] dark:bg-slate-950">
+      <main className="flex-1 flex flex-col min-w-0 max-w-full overflow-hidden bg-[#F8FAFC] dark:bg-slate-950">
         
-        {/* Top Control Bar block */}
-        <header className="h-16 border-b border-[#E2E8F0] dark:border-slate-850 px-2 sm:px-6 flex items-center justify-between bg-white dark:bg-slate-900 shrink-0 select-none print:hidden">
+        {/* Top Control Bar block with Mobile Top Safe-Area Padding */}
+        <header className="pt-[max(env(safe-area-inset-top,0px),1.75rem)] lg:pt-0 min-h-[calc(3.5rem+max(env(safe-area-inset-top,0px),1.75rem))] lg:min-h-[4rem] border-b border-[#E2E8F0] dark:border-slate-850 px-3 sm:px-6 flex items-center justify-between bg-white dark:bg-slate-900 shrink-0 select-none print:hidden max-w-full">
           <div className="flex items-center gap-1 sm:gap-3">
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -2287,7 +2570,7 @@ export default function App() {
           onTouchStart={handleMainTouchStart}
           onTouchMove={handleMainTouchMove}
           onTouchEnd={handleMainTouchEnd}
-          className="flex-1 p-3 sm:p-6 pb-24 lg:pb-6 space-y-4 sm:space-y-6 overflow-y-auto bg-[#F8FAFC] dark:bg-slate-950 print:p-0 print:overflow-visible"
+          className="flex-1 w-full max-w-full p-2.5 sm:p-4 md:p-6 pb-[calc(5.5rem+env(safe-area-inset-bottom,0px))] lg:pb-6 space-y-3 sm:space-y-4 overflow-y-auto overflow-x-hidden bg-[#F8FAFC] dark:bg-slate-950 print:p-0 print:overflow-visible"
         >
           <AnimatePresence mode="wait">
             <motion.div
@@ -2305,6 +2588,7 @@ export default function App() {
                     department={currentUser.department}
                     jobCards={jobCards}
                     movements={movements}
+                    processTransfers={processTransfers}
                   />
 
                   <ConnectivityHealthWidget 
@@ -2318,19 +2602,26 @@ export default function App() {
 
           {/* RENDER VIEWPORT ACCORDING TO NAVIGATION */}
           {activeTab === 'dashboard' && (
-            <DepartmentOperations
-              currentUser={currentUser}
-              jobCards={jobCards}
-              movements={movements}
-              companyConfig={companyConfig}
-              onCreateJobCard={handleCreateJobCard}
-              onUpdateJobCard={handleUpdateJobCard}
-              onCreateMovement={handleCreateMovement}
-              onAcceptMovement={handleAcceptMovement}
-              onRejectMovement={handleRejectMovement}
-              onSelectJobCard={setSelectedJob}
-              onQuickTransfer={(j) => setQuickTransferJob(j)}
-            />
+            <Suspense fallback={<ComponentFallback />}>
+              <DepartmentOperations
+                currentUser={currentUser}
+                jobCards={jobCards}
+                movements={movements}
+                processTransfers={processTransfers}
+                companyConfig={companyConfig}
+                onCreateJobCard={handleCreateJobCard}
+                onUpdateJobCard={handleUpdateJobCard}
+                onCreateMovement={handleCreateMovement}
+                onAcceptMovement={handleAcceptMovement}
+                onRejectMovement={handleRejectMovement}
+                onSelectJobCard={setSelectedJob}
+                onQuickTransfer={(j) => setQuickTransferJob(j)}
+                onCreateProcessTransfer={handleCreateProcessTransfer}
+                onReceiveProcessTransfer={handleReceiveProcessTransfer}
+                onStartProcessTransfer={handleStartProcessTransfer}
+                onCompleteProcessTransfer={handleCompleteProcessTransfer}
+              />
+            </Suspense>
           )}
 
           {/* ALL ORDERS GRID VIEW */}
@@ -3657,48 +3948,55 @@ export default function App() {
 
           {/* PROCESS OUTSOURCING VIEW */}
           {activeTab === 'outsource' && (
-            <OutsourceManager
-              currentUser={currentUser}
-              users={users}
-              jobCards={jobCards}
-              onRefreshData={refreshAllStates}
-              showToast={showToast}
-            />
+            <Suspense fallback={<ComponentFallback />}>
+              <OutsourceManager
+                currentUser={currentUser}
+                users={users}
+                jobCards={jobCards}
+                onRefreshData={refreshAllStates}
+                showToast={showToast}
+              />
+            </Suspense>
           )}
 
           {/* REPORTS EXPORT VIEW */}
           {activeTab === 'reports' && (
-            <ReportView 
-              jobCards={jobCards}
-              movements={movements}
-              onCreateMovement={handleCreateMovement}
-              currentUser={currentUser}
-            />
+            <Suspense fallback={<ComponentFallback />}>
+              <ReportView 
+                jobCards={jobCards}
+                movements={movements}
+                processTransfers={processTransfers}
+                onCreateMovement={handleCreateMovement}
+                currentUser={currentUser}
+              />
+            </Suspense>
           )}
 
           {/* ADMINISTRATOR CONSOLE PORTAL */}
           {activeTab === 'admin-users' && (
-            <AdminConsole 
-              users={users}
-              auditLogs={auditLogs}
-              onSaveUser={handleSaveUserProfile}
-              onLogAction={handleLogActionExternally}
-              currentUser={currentUser}
-              onDeleteUser={handleDeleteUserProfile}
-              jobCards={jobCards}
-              movements={movements}
-              onRefreshJobs={refreshAllStates}
-              companyConfig={companyConfig}
-              onRefreshCompany={refreshAllStates}
-              isSheetsActive={isSheetsActive}
-              sheetsDetails={sheetsDetails}
-              onOpenSheetsModal={() => setShowSheetsModal(true)}
-              onDisconnectSheets={handleDisconnectGoogleSheets}
-              onOpenSheetsInspector={() => setShowSheetsInspector(true)}
-              onSetJobCards={setJobCards}
-              onUpdateMovement={handleUpdateMovement}
-              onDeleteMovement={handleDeleteMovement}
-            />
+            <Suspense fallback={<ComponentFallback />}>
+              <AdminConsole 
+                users={users}
+                auditLogs={auditLogs}
+                onSaveUser={handleSaveUserProfile}
+                onLogAction={handleLogActionExternally}
+                currentUser={currentUser}
+                onDeleteUser={handleDeleteUserProfile}
+                jobCards={jobCards}
+                movements={movements}
+                onRefreshJobs={refreshAllStates}
+                companyConfig={companyConfig}
+                onRefreshCompany={refreshAllStates}
+                isSheetsActive={isSheetsActive}
+                sheetsDetails={sheetsDetails}
+                onOpenSheetsModal={() => setShowSheetsModal(true)}
+                onDisconnectSheets={handleDisconnectGoogleSheets}
+                onOpenSheetsInspector={() => setShowSheetsInspector(true)}
+                onSetJobCards={setJobCards}
+                onUpdateMovement={handleUpdateMovement}
+                onDeleteMovement={handleDeleteMovement}
+              />
+            </Suspense>
           )}
             </motion.div>
           </AnimatePresence>
@@ -3706,7 +4004,7 @@ export default function App() {
         </div>
 
         {/* PERSISTENT APP LEDGER FOOTER / STATUS BAR */}
-        <footer className="bg-slate-900 border-t border-slate-800 px-4 py-2.5 flex items-center justify-between text-xs text-slate-300 shrink-0 select-none print:hidden z-10">
+        <footer className="hidden lg:flex bg-slate-900 border-t border-slate-800 px-4 py-2.5 items-center justify-between text-xs text-slate-300 shrink-0 select-none print:hidden z-10">
           <div className="flex items-center gap-3">
             <span className="flex items-center gap-1.5 font-semibold text-slate-400">
               <Database className="h-3.5 w-3.5 text-[#3B82F6]" />
@@ -3756,7 +4054,7 @@ export default function App() {
         </footer>
 
         {/* PERSISTENT ANCHORED MOBILE BOTTOM NAVIGATION BAR */}
-        <nav className="fixed bottom-0 left-0 right-0 h-16 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200/90 dark:border-slate-800/90 flex items-center justify-around z-40 lg:hidden shadow-[0_-4px_20px_rgba(0,0,0,0.06)] dark:shadow-[0_-4px_25px_rgba(0,0,0,0.4)] select-none print:hidden px-3 pb-safe">
+        <nav className="fixed bottom-0 left-0 right-0 min-h-[60px] h-[calc(60px+env(safe-area-inset-bottom,0px))] pb-[env(safe-area-inset-bottom,0px)] bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200/90 dark:border-slate-800/90 flex items-center justify-around z-40 lg:hidden shadow-[0_-4px_20px_rgba(0,0,0,0.06)] dark:shadow-[0_-4px_25px_rgba(0,0,0,0.4)] select-none print:hidden px-3">
           <motion.button
             whileTap={{ scale: 0.92 }}
             onClick={() => {
@@ -3865,73 +4163,115 @@ export default function App() {
       {/* ======================================================== */}
       
       {/* QR Code Scanner Modal */}
-      <ScannerModal 
-        isOpen={scannerOpen}
-        onClose={() => setScannerOpen(false)}
-        jobCards={jobCards}
-        onSelectJobCard={handleSelectJobByNo}
-      />
+      {scannerOpen && (
+        <Suspense fallback={null}>
+          <ScannerModal 
+            isOpen={scannerOpen}
+            onClose={() => setScannerOpen(false)}
+            jobCards={jobCards}
+            onSelectJobCard={handleSelectJobByNo}
+          />
+        </Suspense>
+      )}
       
       {/* Global Offline Search Modal */}
-      <GlobalSearchModal
-        isOpen={showGlobalSearchModal}
-        onClose={() => setShowGlobalSearchModal(false)}
-        jobCards={jobCards}
-        movements={movements}
-        onSelectJobCard={(job) => setSelectedJob(job)}
-        isOnline={isOnline}
-      />
+      {showGlobalSearchModal && (
+        <Suspense fallback={null}>
+          <GlobalSearchModal
+            isOpen={showGlobalSearchModal}
+            onClose={() => setShowGlobalSearchModal(false)}
+            jobCards={jobCards}
+            movements={movements}
+            onSelectJobCard={(job) => setSelectedJob(job)}
+            isOnline={isOnline}
+          />
+        </Suspense>
+      )}
 
       {/* Job Card Detailed Drill overlay */}
       {selectedJob && (
-        <JobCardDetailsModal 
-          isOpen={!!selectedJob}
-          onClose={() => setSelectedJob(null)}
-          jobCard={selectedJob}
-          movements={movements}
-          currentUser={currentUser}
-          companyConfig={companyConfig}
-          onUploadAttachment={handleUploadAttachment}
-          onDeleteAttachment={handleDeleteAttachment}
-        />
+        <Suspense fallback={null}>
+          <JobCardDetailsModal 
+            isOpen={!!selectedJob}
+            onClose={() => setSelectedJob(null)}
+            jobCard={selectedJob}
+            movements={movements}
+            currentUser={currentUser}
+            companyConfig={companyConfig}
+            onUploadAttachment={handleUploadAttachment}
+            onDeleteAttachment={handleDeleteAttachment}
+          />
+        </Suspense>
       )}
 
       {/* Quick Material Transit Transfer Modal */}
-      <QuickTransferModal
-        isOpen={!!quickTransferJob}
-        onClose={() => setQuickTransferJob(null)}
-        jobCard={quickTransferJob}
-        movements={movements}
-        currentUser={currentUser}
-        onSubmit={handleCreateMovement}
-      />
+      {quickTransferJob && (
+        <Suspense fallback={null}>
+          <QuickTransferModal
+            isOpen={!!quickTransferJob}
+            onClose={() => setQuickTransferJob(null)}
+            jobCard={quickTransferJob}
+            movements={movements}
+            currentUser={currentUser}
+            onSubmit={handleCreateMovement}
+          />
+        </Suspense>
+      )}
 
       {/* Bulk Material Transit Transfer Modal */}
-      <BulkTransferModal
-        isOpen={showBulkTransferModal}
-        onClose={() => setShowBulkTransferModal(false)}
-        selectedJobCards={jobCards.filter(j => selectedJobCardNos.includes(j.jobCardNo))}
-        movements={movements}
-        currentUser={currentUser}
-        onSubmit={handleBulkTransfer}
-      />
+      {showBulkTransferModal && (
+        <Suspense fallback={null}>
+          <BulkTransferModal
+            isOpen={showBulkTransferModal}
+            onClose={() => setShowBulkTransferModal(false)}
+            selectedJobCards={jobCards.filter(j => selectedJobCardNos.includes(j.jobCardNo))}
+            movements={movements}
+            currentUser={currentUser}
+            onSubmit={handleBulkTransfer}
+          />
+        </Suspense>
+      )}
 
       {/* Bulk Manifest Printing Modal */}
-      <BulkPrintManifestModal
-        isOpen={showBulkPrintModal}
-        onClose={() => setShowBulkPrintModal(false)}
-        selectedJobCards={jobCards.filter(j => selectedJobCardNos.includes(j.jobCardNo))}
-        movements={movements}
-        currentUser={currentUser}
-      />
+      {showBulkPrintModal && (
+        <Suspense fallback={null}>
+          <BulkPrintManifestModal
+            isOpen={showBulkPrintModal}
+            onClose={() => setShowBulkPrintModal(false)}
+            selectedJobCards={jobCards.filter(j => selectedJobCardNos.includes(j.jobCardNo))}
+            movements={movements}
+            currentUser={currentUser}
+          />
+        </Suspense>
+      )}
 
       {/* Bulk Status Update Modal */}
-      <BulkStatusUpdateModal
-        isOpen={showBulkStatusModal}
-        onClose={() => setShowBulkStatusModal(false)}
-        selectedJobNos={selectedJobCardNos}
-        onConfirmUpdate={handleConfirmBulkStatusUpdate}
-      />
+      {showBulkStatusModal && (
+        <Suspense fallback={null}>
+          <BulkStatusUpdateModal
+            isOpen={showBulkStatusModal}
+            onClose={() => setShowBulkStatusModal(false)}
+            selectedJobNos={selectedJobCardNos}
+            onConfirmUpdate={handleConfirmBulkStatusUpdate}
+          />
+        </Suspense>
+      )}
+
+      {/* Concurrency Conflict Resolution Modal */}
+      {conflictModalData.isOpen && (
+        <Suspense fallback={null}>
+          <ConcurrencyConflictModal
+            isOpen={conflictModalData.isOpen}
+            jobCardNo={conflictModalData.jobCardNo}
+            expectedVersion={conflictModalData.expectedVersion}
+            attemptedUpdates={conflictModalData.attemptedUpdates}
+            currentData={conflictModalData.currentData}
+            onResolveReload={handleResolveConflictReload}
+            onResolveOverwrite={handleResolveConflictOverwrite}
+            onClose={() => setConflictModalData(prev => ({ ...prev, isOpen: false }))}
+          />
+        </Suspense>
+      )}
 
       {/* Google Sheets Sync Setup Modal */}
       {showSheetsModal && (
@@ -4033,7 +4373,10 @@ export default function App() {
 
                 {/* Primary Multi-Sheet Excel Backup Button */}
                 <button
-                  onClick={() => exportComprehensiveExcelBackup(jobCards, movements, auditLogs)}
+                  onClick={async () => {
+                    const { exportComprehensiveExcelBackup } = await import('./lib/excelExport');
+                    exportComprehensiveExcelBackup(jobCards, movements, auditLogs);
+                  }}
                   className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold p-3.5 rounded-xl flex items-center justify-between gap-3 shadow-md transition cursor-pointer border border-emerald-500"
                 >
                   <div className="flex items-center gap-2.5 text-left">
@@ -4103,11 +4446,13 @@ export default function App() {
 
       {/* Google Sheets Live Data Inspector Overlay Modal */}
       {showSheetsInspector && (
-        <GoogleSheetViewer
-          onClose={() => setShowSheetsInspector(false)}
-          spreadsheetName={sheetsDetails.name || undefined}
-          spreadsheetUrl={sheetsDetails.url || undefined}
-        />
+        <Suspense fallback={null}>
+          <GoogleSheetViewer
+            onClose={() => setShowSheetsInspector(false)}
+            spreadsheetName={sheetsDetails.name || undefined}
+            spreadsheetUrl={sheetsDetails.url || undefined}
+          />
+        </Suspense>
       )}
 
       {/* Custom Confirmation Dialog Overlay */}
@@ -4399,11 +4744,13 @@ export default function App() {
 
       {/* Pending Breakdown Modal */}
       {pendingBreakdownJobCard && (
-        <PendingBreakdownModal
-          jobCard={pendingBreakdownJobCard}
-          movements={movements}
-          onClose={() => setPendingBreakdownJobCard(null)}
-        />
+        <Suspense fallback={null}>
+          <PendingBreakdownModal
+            jobCard={pendingBreakdownJobCard}
+            movements={movements}
+            onClose={() => setPendingBreakdownJobCard(null)}
+          />
+        </Suspense>
       )}
 
     </div>

@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
@@ -24,10 +25,17 @@ try {
 const firebaseProjectId = firebaseConfig?.projectId || process.env.GCP_PROJECT || process.env.FIREBASE_PROJECT_ID || "my-project-9ca72";
 const firestoreDbId = firebaseConfig?.firestoreDatabaseId || "(default)";
 
+// Guard against unhandled background async rejections (e.g. Google metadata ADC probes on non-GCP hosts)
+process.on('unhandledRejection', (reason: any) => {
+  console.warn('[Server Warning] Caught background async rejection:', reason?.message || reason);
+});
+
 let adminApp: any = null;
 let firestoreAdminDb: any = null;
+let adminSdkHasPermission: boolean | null = null;
 
 function getFirestoreAdmin() {
+  if (adminSdkHasPermission === false) return null;
   if (!firestoreAdminDb) {
     try {
       if (getApps().length === 0) {
@@ -40,9 +48,10 @@ function getFirestoreAdmin() {
       firestoreAdminDb = firestoreDbId && firestoreDbId !== "(default)"
         ? getFirestore(adminApp, firestoreDbId)
         : getFirestore(adminApp);
-      console.log(`[Firebase Admin] Connected to Firestore database '${firestoreDbId}' on project '${firebaseProjectId}'.`);
-    } catch (err) {
-      console.error("[Firebase Admin] Initialization error:", err);
+    } catch (err: any) {
+      console.warn("[Firebase Admin] Initialization note:", err?.message || err);
+      adminSdkHasPermission = false;
+      return null;
     }
   }
   return firestoreAdminDb;
@@ -50,7 +59,29 @@ function getFirestoreAdmin() {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.PORT || "3000", 10);
+
+  // High-performance gzip/deflate response compression (saves 70%+ bandwidth)
+  app.use(compression({
+    level: 6,
+    threshold: 1024,
+    filter: (req, res) => {
+      if (req.headers["x-no-compression"]) return false;
+      return compression.filter(req, res);
+    }
+  }));
+
+  // Universal CORS Middleware for Android Mobile App, Capacitor, and Web Browsers
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+    res.setHeader("Access-Control-Max-Age", "86400");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
 
   app.use(express.json());
 
@@ -163,6 +194,44 @@ async function startServer() {
     }
   }
 
+  async function firestoreRestQueryAll(collectionName: string): Promise<any[]> {
+    try {
+      const apiKey = firebaseConfig?.apiKey || "";
+      const projId = firebaseProjectId;
+      const dbId = firestoreDbId;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery?key=${apiKey}`;
+      const queryBody = {
+        structuredQuery: {
+          from: [{ collectionId: collectionName }]
+        }
+      };
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(queryBody)
+      });
+      if (!res.ok) return [];
+      const rawDocs = await res.json().catch(() => []);
+      const results: any[] = [];
+      if (Array.isArray(rawDocs)) {
+        for (const r of rawDocs) {
+          if (r.document && r.document.fields) {
+            const parsed = parseFirestoreFields(r.document.fields);
+            const docName = r.document.name || "";
+            const docId = docName.split("/").pop() || "";
+            if (parsed) {
+              results.push({ id: docId, userId: parsed.userId || docId, ...parsed });
+            }
+          }
+        }
+      }
+      return results;
+    } catch (err: any) {
+      console.warn(`[Firestore REST] QueryAll ${collectionName} error:`, err.message);
+      return [];
+    }
+  }
+
   async function firestoreRestSetDoc(collectionName: string, docId: string, data: any): Promise<boolean> {
     try {
       const apiKey = firebaseConfig?.apiKey || "";
@@ -182,87 +251,567 @@ async function startServer() {
     }
   }
 
-  // Token issuance & verification
-  const JWT_SECRET = process.env.JWT_SECRET || firebaseConfig?.apiKey || "pmw-mfr-secure-key-2026";
-
-  function signSessionToken(payload: { uid: string; [key: string]: any }, expiresInSeconds = 86400 * 7): string {
-    const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
-    const now = Math.floor(Date.now() / 1000);
-    const body = Buffer.from(JSON.stringify({ ...payload, iat: now, exp: now + expiresInSeconds })).toString("base64url");
-    const signature = crypto.createHmac("sha256", JWT_SECRET).update(`${header}.${body}`).digest("base64url");
-    return `${header}.${body}.${signature}`;
-  }
-
-  function verifySessionToken(token: string): { uid: string; [key: string]: any } | null {
+  async function firestoreRestDeleteDoc(collectionName: string, docId: string): Promise<boolean> {
     try {
-      const parts = token.split(".");
-      if (parts.length !== 3) return null;
-      const [header, body, signature] = parts;
-      const expectedSig = crypto.createHmac("sha256", JWT_SECRET).update(`${header}.${body}`).digest("base64url");
-      if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) return null;
-      const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
-      if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) return null;
-      return payload;
-    } catch (err) {
-      return null;
+      const apiKey = firebaseConfig?.apiKey || "";
+      const projId = firebaseProjectId;
+      const dbId = firestoreDbId;
+      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: "DELETE"
+      });
+      return res.ok;
+    } catch (err: any) {
+      console.warn(`[Firestore REST] DELETE ${collectionName}/${docId} error:`, err.message);
+      return false;
     }
   }
 
-  // Helper to issue authentic Firebase Auth Custom Token or Session Token
-  async function issueAuthToken(userId: string): Promise<string> {
+  const SESSION_SECRET = process.env.SESSION_SECRET || "pmw-tracker-secure-auth-secret-key-2026";
+
+  // ----------------------------------------------------
+  // SYSTEM STATE & RESET GENERATION (ANTI-RESURRECTION)
+  // ----------------------------------------------------
+  let currentResetGeneration = "gen-initial";
+
+  async function initSystemState(): Promise<string> {
     try {
-      if (adminApp) {
-        const customToken = await getAdminAuth(adminApp).createCustomToken(userId);
-        if (customToken) return customToken;
+      let stateDoc: any = null;
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const snap = await db.collection("mfr_system_state").doc("global").get();
+            if (snap.exists) {
+              stateDoc = snap.data();
+            }
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
+        }
       }
-    } catch (e: any) {
-      // Fall through to session token when private key is absent
+      if (!stateDoc) {
+        stateDoc = await firestoreRestGetDoc("mfr_system_state", "global");
+      }
+
+      if (stateDoc && stateDoc.factoryResetGeneration) {
+        currentResetGeneration = stateDoc.factoryResetGeneration;
+        console.log(`[SYSTEM] Loaded factory reset generation: ${currentResetGeneration}`);
+        return currentResetGeneration;
+      }
+
+      currentResetGeneration = `gen-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+      const payload = {
+        factoryResetGeneration: currentResetGeneration,
+        resetAt: new Date().toISOString(),
+        resetBy: "system_init",
+        resetOpId: "init-0",
+        updatedAt: new Date().toISOString()
+      };
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            await db.collection("mfr_system_state").doc("global").set(payload);
+          }
+        } catch (_) {}
+      }
+      await firestoreRestSetDoc("mfr_system_state", "global", payload).catch(() => {});
+      console.log(`[SYSTEM] Initialized new factory reset generation: ${currentResetGeneration}`);
+      return currentResetGeneration;
+    } catch (err) {
+      console.warn("[SYSTEM] Error initializing system state generation:", err);
+      currentResetGeneration = `gen-${Date.now()}`;
+      return currentResetGeneration;
     }
-    return signSessionToken({ uid: userId, iss: "pmw-manufacturing-auth" });
   }
 
-  // Authoritative user profile and credentials lookup
+  async function updateResetGeneration(resetOpId: string, resetBy: string): Promise<string> {
+    const nextGen = `gen-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    currentResetGeneration = nextGen;
+    const payload = {
+      factoryResetGeneration: nextGen,
+      resetAt: new Date().toISOString(),
+      resetBy: resetBy || "super_admin",
+      resetOpId: resetOpId || `op-${Date.now()}`,
+      updatedAt: new Date().toISOString()
+    };
+    if (adminSdkHasPermission !== false) {
+      try {
+        const db = getFirestoreAdmin();
+        if (db) {
+          await db.collection("mfr_system_state").doc("global").set(payload);
+        }
+      } catch (_) {}
+    }
+    await firestoreRestSetDoc("mfr_system_state", "global", payload).catch(() => {});
+    return nextGen;
+  }
+
+  // ----------------------------------------------------
+  // PERSISTENT DELETED-USER TOMBSTONES (ANTI-RESURRECTION)
+  // ----------------------------------------------------
+  const DELETED_USERS_FILE = path.join(process.cwd(), "deleted_users.json");
+  let deletedUserIds = new Set<string>();
+
+  function loadDeletedUsers() {
+    try {
+      if (fs.existsSync(DELETED_USERS_FILE)) {
+        const arr = JSON.parse(fs.readFileSync(DELETED_USERS_FILE, "utf8"));
+        if (Array.isArray(arr)) {
+          deletedUserIds = new Set(arr.map(id => String(id).toLowerCase().trim()));
+        }
+      }
+    } catch (e) {
+      console.warn("Could not load deleted users list:", e);
+    }
+  }
+
+  function saveDeletedUsers() {
+    try {
+      fs.writeFileSync(DELETED_USERS_FILE, JSON.stringify(Array.from(deletedUserIds), null, 2), "utf8");
+    } catch (e) {
+      console.warn("Could not save deleted users list:", e);
+    }
+  }
+
+  loadDeletedUsers();
+
+  async function isUserTombstoned(userId: string): Promise<boolean> {
+    if (!userId || typeof userId !== "string") return false;
+    const cleanId = userId.trim();
+    const lowerId = cleanId.toLowerCase();
+
+    // 1. Fast in-memory check
+    if (deletedUserIds.has(cleanId) || deletedUserIds.has(lowerId)) {
+      return true;
+    }
+
+    // 2. Authoritative Firestore check
+    try {
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const snap = await db.collection("mfr_deleted_users").doc(cleanId).get();
+            if (snap.exists) {
+              deletedUserIds.add(lowerId);
+              return true;
+            }
+            if (lowerId !== cleanId) {
+              const lowerSnap = await db.collection("mfr_deleted_users").doc(lowerId).get();
+              if (lowerSnap.exists) {
+                deletedUserIds.add(lowerId);
+                return true;
+              }
+            }
+          }
+        } catch (_) {
+          adminSdkHasPermission = false;
+        }
+      }
+
+      const doc = await firestoreRestGetDoc("mfr_deleted_users", cleanId);
+      if (doc && (doc.tombstone || doc.userId)) {
+        deletedUserIds.add(lowerId);
+        return true;
+      }
+      if (lowerId !== cleanId) {
+        const lowerDoc = await firestoreRestGetDoc("mfr_deleted_users", lowerId);
+        if (lowerDoc && (lowerDoc.tombstone || lowerDoc.userId)) {
+          deletedUserIds.add(lowerId);
+          return true;
+        }
+      }
+    } catch (err) {
+      console.warn(`[TOMBSTONE] Error checking tombstone for ${cleanId}:`, err);
+    }
+
+    return false;
+  }
+
+  async function recordDeletedUserTombstone(userId: string, deletedBy: string): Promise<void> {
+    if (!userId || typeof userId !== "string") return;
+    const cleanId = userId.trim();
+    const lowerId = cleanId.toLowerCase();
+
+    const tombstonePayload = {
+      userId: cleanId,
+      deletedAt: new Date().toISOString(),
+      deletedBy: deletedBy || "admin",
+      tombstone: true
+    };
+
+    deletedUserIds.add(cleanId);
+    deletedUserIds.add(lowerId);
+    saveDeletedUsers();
+
+    if (adminSdkHasPermission !== false) {
+      try {
+        const db = getFirestoreAdmin();
+        if (db) {
+          await db.collection("mfr_deleted_users").doc(cleanId).set(tombstonePayload);
+          if (lowerId !== cleanId) {
+            await db.collection("mfr_deleted_users").doc(lowerId).set(tombstonePayload);
+          }
+          await db.collection("mfr_users").doc(cleanId).delete().catch(() => {});
+          await db.collection("mfr_user_credentials").doc(cleanId).delete().catch(() => {});
+          if (lowerId !== cleanId) {
+            await db.collection("mfr_users").doc(lowerId).delete().catch(() => {});
+            await db.collection("mfr_user_credentials").doc(lowerId).delete().catch(() => {});
+          }
+        }
+      } catch (_) {
+        adminSdkHasPermission = false;
+      }
+    }
+
+    await firestoreRestSetDoc("mfr_deleted_users", cleanId, tombstonePayload).catch(() => {});
+    if (lowerId !== cleanId) {
+      await firestoreRestSetDoc("mfr_deleted_users", lowerId, tombstonePayload).catch(() => {});
+    }
+    await firestoreRestDeleteDoc("mfr_users", cleanId).catch(() => {});
+    await firestoreRestDeleteDoc("mfr_user_credentials", cleanId).catch(() => {});
+    if (lowerId !== cleanId) {
+      await firestoreRestDeleteDoc("mfr_users", lowerId).catch(() => {});
+      await firestoreRestDeleteDoc("mfr_user_credentials", lowerId).catch(() => {});
+    }
+
+    for (const k of Object.keys(customUsersStore)) {
+      const u = customUsersStore[k];
+      if (k.toLowerCase().trim() === lowerId || u?.userId?.toLowerCase()?.trim() === lowerId) {
+        delete customUsersStore[k];
+      }
+    }
+    saveUsersStore();
+
+    for (const k of Object.keys(customCredsStore)) {
+      if (k.toLowerCase().trim() === lowerId) {
+        delete customCredsStore[k];
+      }
+    }
+    saveCredsStore();
+
+    cachedUsersDirectory = null;
+  }
+
+  const USERS_STORE_FILE = path.join(process.cwd(), "users_store.json");
+  let customUsersStore: Record<string, any> = {};
+
+  function loadUsersStore() {
+    try {
+      if (fs.existsSync(USERS_STORE_FILE)) {
+        customUsersStore = JSON.parse(fs.readFileSync(USERS_STORE_FILE, "utf8")) || {};
+      }
+    } catch (e) {
+      console.warn("Could not load custom users store:", e);
+    }
+  }
+
+  function saveUsersStore() {
+    try {
+      fs.writeFileSync(USERS_STORE_FILE, JSON.stringify(customUsersStore, null, 2), "utf8");
+    } catch (e) {
+      console.warn("Could not save custom users store:", e);
+    }
+  }
+
+  loadUsersStore();
+
+  const CREDS_STORE_FILE = path.join(process.cwd(), "creds_store.json");
+  let customCredsStore: Record<string, string> = {};
+
+  function loadCredsStore() {
+    try {
+      if (fs.existsSync(CREDS_STORE_FILE)) {
+        customCredsStore = JSON.parse(fs.readFileSync(CREDS_STORE_FILE, "utf8")) || {};
+      }
+    } catch (e) {
+      console.warn("Could not load custom creds store:", e);
+    }
+  }
+
+  function saveCredsStore() {
+    try {
+      fs.writeFileSync(CREDS_STORE_FILE, JSON.stringify(customCredsStore, null, 2), "utf8");
+    } catch (e) {
+      console.warn("Could not save custom creds store:", e);
+    }
+  }
+
+  loadCredsStore();
+
+  // ----------------------------------------------------
+  // REAL-TIME SERVER-SENT EVENTS (SSE) BROADCAST SYSTEM
+  // ----------------------------------------------------
+  const sseClients = new Set<express.Response>();
+
+  function broadcastRealtimeEvent(eventType: string, payload?: any) {
+    const msg = `data: ${JSON.stringify({ type: eventType, payload, timestamp: Date.now() })}\n\n`;
+    for (const client of sseClients) {
+      try {
+        client.write(msg);
+      } catch (_) {
+        sseClients.delete(client);
+      }
+    }
+  }
+
+  // GET /api/events - Real-time SSE stream for instant cross-device updates
+  app.get("/api/events", (req, res) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.flushHeaders();
+
+    sseClients.add(res);
+    res.write(`data: ${JSON.stringify({ type: "CONNECTED", timestamp: Date.now() })}\n\n`);
+
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(`: heartbeat\n\n`);
+      } catch (_) {
+        clearInterval(heartbeat);
+        sseClients.delete(res);
+      }
+    }, 15000);
+
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    });
+  });
+
+  // POST /api/events/broadcast - Broadcast state changes from any connected client
+  app.post("/api/events/broadcast", (req, res) => {
+    const { type, payload } = req.body || {};
+    if (type) {
+      broadcastRealtimeEvent(type, payload);
+    }
+    return res.json({ success: true });
+  });
+
+  // GET /api/system/state - Public/Client state inspection (reset generation & user count)
+  app.get("/api/system/state", async (req, res) => {
+    try {
+      const activeUsers = Object.values(customUsersStore).filter((u: any) => u && u.active !== false && u.status !== 'deleted');
+      return res.json({
+        success: true,
+        factoryResetGeneration: currentResetGeneration,
+        activeUsersCount: activeUsers.length,
+        timestamp: new Date().toISOString()
+      });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // GET /api/system/raw-users - Diagnostic inspection of persistent Firestore user records
+  app.get("/api/system/raw-users", async (req, res) => {
+    try {
+      let docs: any[] = [];
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const snap = await db.collection("mfr_users").get();
+            docs = snap.docs.map(d => ({ id: d.id, userId: d.data()?.userId, name: d.data()?.name, role: d.data()?.role, active: d.data()?.active }));
+          }
+        } catch (_) {}
+      }
+      if (docs.length === 0) {
+        docs = await firestoreRestQueryAll("mfr_users");
+      }
+      return res.json({ success: true, count: docs.length, users: docs, deletedIds: Array.from(deletedUserIds) });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Helper to issue authentic Firebase Auth Custom Token or signed session token
+  async function issueAuthToken(uid: string): Promise<string> {
+    if (!uid || typeof uid !== "string" || !uid.trim()) {
+      throw new Error("Invalid UID: A valid user ID is required to create an auth token.");
+    }
+    const cleanUid = uid.trim();
+
+    // Fast, cryptographically secure HMAC-signed session token with generation tracking
+    const payload = Buffer.from(JSON.stringify({
+      uid: cleanUid,
+      userId: cleanUid,
+      gen: currentResetGeneration,
+      iat: Date.now(),
+      exp: Date.now() + 30 * 24 * 3600 * 1000 // 30 days
+    })).toString("base64url");
+    const sig = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
+    return `${payload}.${sig}`;
+  }
+
+  // Authoritative user profile and credentials lookup via Firebase Admin SDK with REST fallback
   async function findUserAndCreds(searchKey: string): Promise<{ user: any; pinHash: string } | null> {
     const cleanKey = searchKey.trim();
+    if (!cleanKey) return null;
+
     let user: any = null;
     let uid: string = "";
+    let pinHash: string = "";
 
-    // 1. Direct document ID lookup in mfr_users/{cleanKey}
-    user = await firestoreRestGetDoc("mfr_users", cleanKey);
-    if (user) {
-      uid = user.id || cleanKey;
+    // 0. Instant lookup in customUsersStore
+    const lowerKey = cleanKey.toLowerCase();
+    for (const [id, u] of Object.entries(customUsersStore)) {
+      const udata = u as any;
+      if (
+        id.toLowerCase() === lowerKey ||
+        udata?.userId?.toLowerCase() === lowerKey ||
+        udata?.name?.toLowerCase() === lowerKey ||
+        udata?.email?.toLowerCase() === lowerKey
+      ) {
+        user = udata;
+        uid = udata?.userId || id;
+        break;
+      }
     }
 
-    // 2. Query by userId
-    if (!user) {
-      user = await firestoreRestQuery("mfr_users", "userId", cleanKey);
-      if (user) uid = user.id || user.userId || cleanKey;
+    if (uid && customCredsStore[uid]) {
+      pinHash = customCredsStore[uid];
     }
 
-    // 3. Query by name
-    if (!user) {
-      user = await firestoreRestQuery("mfr_users", "name", cleanKey);
-      if (user) uid = user.id || user.userId || cleanKey;
-    }
-
-    // 4. Query by email
-    if (!user) {
-      user = await firestoreRestQuery("mfr_users", "email", cleanKey);
-      if (user) uid = user.id || user.userId || cleanKey;
-    }
-
-    // Fallback: Admin SDK if available
-    if (!user) {
-      const db = getFirestoreAdmin();
-      if (db) {
-        try {
+    // 1. Try Firebase Admin SDK if permission is available
+    if (adminSdkHasPermission !== false) {
+      try {
+        const db = getFirestoreAdmin();
+        if (db) {
+          // Direct document ID lookup in mfr_users/{cleanKey}
           const docSnap = await db.collection("mfr_users").doc(cleanKey).get();
           if (docSnap.exists) {
-            user = { userId: docSnap.id, ...docSnap.data() };
+            user = docSnap.data();
             uid = docSnap.id;
           }
-        } catch (e: any) {
-          // Ignored
+
+          // Query by userId
+          if (!user) {
+            const qSnap = await db.collection("mfr_users").where("userId", "==", cleanKey).limit(1).get();
+            if (!qSnap.empty) {
+              user = qSnap.docs[0].data();
+              uid = qSnap.docs[0].id;
+            }
+          }
+
+          // Query by exact name
+          if (!user) {
+            const qSnap = await db.collection("mfr_users").where("name", "==", cleanKey).limit(1).get();
+            if (!qSnap.empty) {
+              user = qSnap.docs[0].data();
+              uid = qSnap.docs[0].id;
+            }
+          }
+
+          // Query by email
+          if (!user) {
+            const qSnap = await db.collection("mfr_users").where("email", "==", cleanKey).limit(1).get();
+            if (!qSnap.empty) {
+              user = qSnap.docs[0].data();
+              uid = qSnap.docs[0].id;
+            }
+          }
+
+          // Case-insensitive name match via Admin SDK
+          if (!user) {
+            const allUsersSnap = await db.collection("mfr_users").get();
+            const targetLower = cleanKey.toLowerCase();
+            const matches = allUsersSnap.docs.filter((doc: any) => {
+              const data = doc.data();
+              return data && typeof data.name === "string" && String(data.name).trim().toLowerCase() === targetLower;
+            });
+
+            if (matches.length === 1) {
+              user = matches[0].data();
+              uid = matches[0].id;
+            }
+          }
+
+          if (user && uid) {
+            const credSnap = await db.collection("mfr_user_credentials").doc(uid).get();
+            if (credSnap.exists) {
+              pinHash = credSnap.data()?.pinHash || "";
+            }
+          }
+        }
+      } catch (adminErr: any) {
+        console.warn("[AUTH] Admin SDK lookup unavailable, switching to Firestore REST API:", adminErr?.message || adminErr);
+        adminSdkHasPermission = false;
+      }
+    }
+
+    // 2. Fallback to Firestore REST API if Admin SDK was unavailable or returned permission error
+    if (!user) {
+      user = await firestoreRestGetDoc("mfr_users", cleanKey);
+      if (user) {
+        uid = user.userId || cleanKey;
+      }
+
+      if (!user) {
+        user = await firestoreRestQuery("mfr_users", "userId", cleanKey);
+        if (user) uid = user.userId || user.id;
+      }
+
+      if (!user) {
+        user = await firestoreRestQuery("mfr_users", "name", cleanKey);
+        if (user) uid = user.userId || user.id;
+      }
+
+      if (!user) {
+        user = await firestoreRestQuery("mfr_users", "email", cleanKey);
+        if (user) uid = user.userId || user.id;
+      }
+
+      if (!user) {
+        try {
+          const apiKey = firebaseConfig?.apiKey || "";
+          const projId = firebaseProjectId;
+          const dbId = firestoreDbId;
+          const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery?key=${apiKey}`;
+          const qRes = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ structuredQuery: { from: [{ collectionId: "mfr_users" }] } })
+          });
+          if (qRes.ok) {
+            const rawDocs = await qRes.json();
+            if (Array.isArray(rawDocs)) {
+              const targetLower = cleanKey.toLowerCase();
+              for (const r of rawDocs) {
+                if (r.document && r.document.fields) {
+                  const parsed = parseFirestoreFields(r.document.fields);
+                  if (parsed && typeof parsed.name === "string" && parsed.name.trim().toLowerCase() === targetLower) {
+                    const docName = r.document.name || "";
+                    const docId = docName.split("/").pop() || "";
+                    user = parsed;
+                    uid = parsed.userId || docId;
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) {}
+      }
+
+      if (!user) {
+        const lower = cleanKey.toLowerCase();
+        for (const [id, u] of Object.entries(customUsersStore)) {
+          const udata = u as any;
+          if (
+            id.toLowerCase() === lower ||
+            udata?.userId?.toLowerCase() === lower ||
+            udata?.name?.toLowerCase() === lower ||
+            udata?.email?.toLowerCase() === lower
+          ) {
+            user = udata;
+            uid = udata?.userId || id;
+            break;
+          }
         }
       }
     }
@@ -271,8 +820,25 @@ async function startServer() {
       return null;
     }
 
-    // 5. Look for PIN hash
-    let pinHash = user.pinHash || "";
+    if (deletedUserIds.has(String(uid).toLowerCase().trim())) {
+      return null;
+    }
+
+    // Look up PIN hash in credentials store if not already obtained
+    if (!pinHash) {
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const credSnap = await db.collection("mfr_user_credentials").doc(uid).get();
+            if (credSnap.exists) {
+              pinHash = credSnap.data()?.pinHash || "";
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
     if (!pinHash) {
       const credDoc = await firestoreRestGetDoc("mfr_user_credentials", uid);
       if (credDoc && credDoc.pinHash) {
@@ -280,22 +846,24 @@ async function startServer() {
       }
     }
 
-    if (!pinHash) {
-      const db = getFirestoreAdmin();
-      if (db) {
-        try {
-          const credSnap = await db.collection("mfr_user_credentials").doc(uid).get();
-          if (credSnap.exists) {
-            const d = credSnap.data();
-            if (d && d.pinHash) pinHash = d.pinHash;
-          }
-        } catch (e: any) {
-          // Ignored
-        }
-      }
+    // Also check legacy or root pinHash if credential document is pending migration
+    if (!pinHash && user.pinHash) {
+      pinHash = user.pinHash;
     }
 
-    return { user: { userId: uid, ...user }, pinHash };
+    if (!pinHash || typeof pinHash !== "string" || !pinHash.trim()) {
+      pinHash = "";
+    }
+
+    console.info("[AUTH] User profile located for:", user.name || uid);
+
+    // Sanitize user object: Ensure no credential fields exist in the user profile
+    const sanitizedUser = { ...user, userId: uid };
+    delete sanitizedUser.pinHash;
+    delete sanitizedUser.pin;
+    delete sanitizedUser.password;
+
+    return { user: sanitizedUser, pinHash: pinHash.trim() };
   }
 
   // ----------------------------------------------------
@@ -319,64 +887,96 @@ async function startServer() {
         });
       }
 
-      let uid: string | null = null;
+      let decodedUid: string | null = null;
+      let tokenGeneration: string | null = null;
 
-      // 1. Try session JWT token
-      const sessionPayload = verifySessionToken(token);
-      if (sessionPayload && sessionPayload.uid) {
-        uid = sessionPayload.uid;
-      }
-
-      // 2. Try Firebase ID Token verification via Admin SDK
-      if (!uid && adminApp) {
+      // 1. Try Firebase Admin ID Token verification if available
+      if (adminSdkHasPermission !== false) {
         try {
-          const decoded = await getAdminAuth(adminApp).verifyIdToken(token);
-          if (decoded && decoded.uid) uid = decoded.uid;
-        } catch (e: any) {
-          // Admin verifyIdToken threw
-        }
-      }
-
-      // 3. Try Identity Toolkit verification for Firebase ID tokens
-      if (!uid) {
-        try {
-          const apiKey = firebaseConfig?.apiKey || "";
-          const lookupUrl = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`;
-          const lookupRes = await fetch(lookupUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ idToken: token })
-          });
-          if (lookupRes.ok) {
-            const lookupData = await lookupRes.json();
-            if (lookupData.users && lookupData.users[0] && lookupData.users[0].localId) {
-              uid = lookupData.users[0].localId;
+          if (!adminApp) {
+            getFirestoreAdmin();
+          }
+          if (adminApp) {
+            const decoded = await getAdminAuth(adminApp).verifyIdToken(token);
+            if (decoded && decoded.uid) {
+              decodedUid = decoded.uid;
             }
           }
-        } catch (e: any) {
-          // Ignored
+        } catch (authErr: any) {
+          // Not a standard Firebase Admin ID token, try signed session token
         }
       }
 
-      if (!uid) {
+      // 2. Try signed session token verification
+      if (!decodedUid) {
+        try {
+          const parts = token.split(".");
+          if (parts.length === 2) {
+            const [payloadStr, sig] = parts;
+            const expectedSig = crypto.createHmac("sha256", SESSION_SECRET).update(payloadStr).digest("base64url");
+            if (crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) {
+              const payload = JSON.parse(Buffer.from(payloadStr, "base64url").toString("utf8"));
+              if (payload && (payload.uid || payload.userId) && (!payload.exp || payload.exp > Date.now())) {
+                decodedUid = payload.uid || payload.userId;
+                tokenGeneration = payload.gen || null;
+              }
+            }
+          }
+        } catch (sessErr) {
+          // Token signature invalid
+        }
+      }
+
+      if (!decodedUid) {
         return res.status(401).json({
           success: false,
           error: "Unauthorized: Invalid or expired authentication token."
         });
       }
 
-      // Authoritatively fetch user profile
-      let userData: any = await firestoreRestGetDoc("mfr_users", uid);
-      if (!userData) {
-        const db = getFirestoreAdmin();
-        if (db) {
-          try {
-            const snap = await db.collection("mfr_users").doc(uid).get();
-            if (snap.exists) userData = { userId: snap.id, ...snap.data() };
-          } catch (e: any) {
-            // Ignored
+      // Check factory reset generation: immediately reject tokens from older generations
+      if (tokenGeneration && currentResetGeneration && tokenGeneration !== currentResetGeneration) {
+        return res.status(401).json({
+          success: false,
+          error: "Unauthorized: Session invalidated by factory reset."
+        });
+      }
+
+      // Check tombstone: block deleted users
+      if (await isUserTombstoned(decodedUid)) {
+        return res.status(401).json({
+          success: false,
+          error: "Unauthorized: User account has been permanently deleted."
+        });
+      }
+
+      let userData: any = null;
+
+      // 1. Try Admin SDK
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const userSnap = await db.collection("mfr_users").doc(decodedUid).get();
+            if (userSnap.exists) {
+              userData = userSnap.data();
+            }
           }
+        } catch (e) {
+          adminSdkHasPermission = false;
         }
+      }
+
+      // 2. Fallback to Firestore REST
+      if (!userData) {
+        userData = await firestoreRestGetDoc("mfr_users", decodedUid);
+      }
+      if (!userData) {
+        const qRes = await firestoreRestQuery("mfr_users", "userId", decodedUid);
+        if (qRes) userData = qRes;
+      }
+      if (!userData) {
+        userData = customUsersStore[decodedUid] || Object.values(customUsersStore).find((u: any) => u?.userId?.toLowerCase() === decodedUid?.toLowerCase());
       }
 
       if (!userData) {
@@ -389,43 +989,151 @@ async function startServer() {
       if (userData.active === false || userData.status === "inactive" || userData.status === "deactivated") {
         return res.status(403).json({
           success: false,
-          error: "Forbidden: User account is deactivated."
+          error: "Forbidden: User account is inactive or deactivated."
         });
       }
 
-      (req as any).user = {
-        userId: userData.userId || userData.id || uid,
+      const sanitizedUser: any = {
+        userId: userData.userId || decodedUid,
         name: userData.name || "",
         email: userData.email || "",
         role: userData.role || "staff",
         department: userData.department || "Production",
-        allowedDepartments: userData.allowedDepartments || [],
-        accessList: userData.accessList || [],
-        canOutsource: userData.canOutsource || false,
+        allowedDepartments: Array.isArray(userData.allowedDepartments) ? userData.allowedDepartments : [],
+        accessList: Array.isArray(userData.accessList) ? userData.accessList : [],
+        canOutsource: Boolean(userData.canOutsource),
         active: true,
         createdAt: userData.createdAt || new Date().toISOString(),
         updatedAt: userData.updatedAt || new Date().toISOString()
       };
-      (req as any).authUid = uid;
+      delete sanitizedUser.pinHash;
+      delete sanitizedUser.pin;
+      delete sanitizedUser.password;
+      delete sanitizedUser.credentials;
+
+      (req as any).user = sanitizedUser;
+      (req as any).authUid = decodedUid;
 
       next();
     } catch (err: any) {
       console.error("[AUTH] requireFirebaseAuth middleware error:", err);
-      return res.status(401).json({
+      return res.status(500).json({
         success: false,
-        error: "Unauthorized: Authentication verification failed."
+        error: "Internal Server Error: Authentication verification failed."
       });
     }
+  }
+
+  // ----------------------------------------------------
+  // SERVER-SIDE BRUTE-FORCE RATE LIMITING & LOCKOUT
+  // ----------------------------------------------------
+  interface LoginAttemptRecord {
+    count: number;
+    firstAttempt: number;
+    lastAttempt: number;
+    lockedUntil: number;
+  }
+
+  const loginAttempts = new Map<string, LoginAttemptRecord>();
+  const MAX_ACCOUNT_FAILED_ATTEMPTS = 5;
+  const MAX_IP_FAILED_ATTEMPTS = 25;
+  const ATTEMPT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes sliding window
+  const LOCKOUT_DURATION_MS = 15 * 60 * 1000; // 15 minutes lockout
+
+  // Periodic garbage collection for expired rate limit records
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, rec] of loginAttempts.entries()) {
+      if (now > rec.lockedUntil && now - rec.lastAttempt > ATTEMPT_WINDOW_MS) {
+        loginAttempts.delete(key);
+      }
+    }
+  }, 5 * 60 * 1000);
+
+  function getClientIp(req: express.Request): string {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') {
+      return forwarded.split(',')[0].trim();
+    }
+    return req.ip || req.socket.remoteAddress || 'unknown-ip';
+  }
+
+  function checkLoginRateLimit(identifier: string, ip: string): { isLocked: boolean; remainingLockMs?: number } {
+    const now = Date.now();
+    const cleanId = identifier.toLowerCase().trim();
+    
+    // 1. Check account lockout (5 failed attempts)
+    const accountRec = loginAttempts.get(`account:${cleanId}`);
+    if (accountRec && accountRec.lockedUntil > now) {
+      return { isLocked: true, remainingLockMs: accountRec.lockedUntil - now };
+    }
+
+    // 2. Check IP lockout (25 failed attempts)
+    const ipRec = loginAttempts.get(`ip:${ip}`);
+    if (ipRec && ipRec.lockedUntil > now) {
+      return { isLocked: true, remainingLockMs: ipRec.lockedUntil - now };
+    }
+
+    return { isLocked: false };
+  }
+
+  function recordFailedLoginAttempt(identifier: string, ip: string) {
+    const now = Date.now();
+    const cleanId = identifier.toLowerCase().trim();
+
+    // Track account failed attempts
+    const accKey = `account:${cleanId}`;
+    const accRec = loginAttempts.get(accKey);
+    if (!accRec || now - accRec.firstAttempt > ATTEMPT_WINDOW_MS) {
+      loginAttempts.set(accKey, {
+        count: 1,
+        firstAttempt: now,
+        lastAttempt: now,
+        lockedUntil: 0
+      });
+    } else {
+      accRec.count += 1;
+      accRec.lastAttempt = now;
+      if (accRec.count >= MAX_ACCOUNT_FAILED_ATTEMPTS) {
+        accRec.lockedUntil = now + LOCKOUT_DURATION_MS;
+      }
+      loginAttempts.set(accKey, accRec);
+    }
+
+    // Track IP failed attempts
+    const ipKey = `ip:${ip}`;
+    const ipRec = loginAttempts.get(ipKey);
+    if (!ipRec || now - ipRec.firstAttempt > ATTEMPT_WINDOW_MS) {
+      loginAttempts.set(ipKey, {
+        count: 1,
+        firstAttempt: now,
+        lastAttempt: now,
+        lockedUntil: 0
+      });
+    } else {
+      ipRec.count += 1;
+      ipRec.lastAttempt = now;
+      if (ipRec.count >= MAX_IP_FAILED_ATTEMPTS) {
+        ipRec.lockedUntil = now + LOCKOUT_DURATION_MS;
+      }
+      loginAttempts.set(ipKey, ipRec);
+    }
+  }
+
+  function clearLoginAttempts(identifier: string, ip: string) {
+    const cleanId = identifier.toLowerCase().trim();
+    loginAttempts.delete(`account:${cleanId}`);
   }
 
   // ----------------------------------------------------
   // SECURE AUTHENTICATION & CREDENTIAL ENDPOINTS
   // ----------------------------------------------------
 
-  // POST /api/auth/login — Authoritative login by Name, User ID, or Email + PIN
+  // POST /api/auth/login — Authoritative login with brute-force protection and generic responses
   app.post("/api/auth/login", async (req, res) => {
     try {
-      const { name, userId, pin } = req.body;
+      const { name, userId, pin } = req.body || {};
+      const clientIp = getClientIp(req);
 
       if (!pin || typeof pin !== "string") {
         return res.status(400).json({ success: false, error: "Security PIN is required." });
@@ -438,37 +1146,66 @@ async function startServer() {
         return res.status(400).json({ success: false, error: "User Name or ID is required." });
       }
 
-      // 1. Locate user profile and credential hash authoritatively via Admin SDK
+      // 1. Rate Limit & Lockout Check BEFORE expensive processing
+      const rateLimitStatus = checkLoginRateLimit(searchKey, clientIp);
+      if (rateLimitStatus.isLocked) {
+        const minutesLeft = Math.ceil((rateLimitStatus.remainingLockMs || LOCKOUT_DURATION_MS) / 60000);
+        console.warn(`[AUTH_RATE_LIMIT] Blocked login attempt for ${searchKey} from IP ${clientIp} (${minutesLeft}m remaining)`);
+        return res.status(429).json({
+          success: false,
+          error: `Too many failed login attempts. Account/IP temporarily locked. Please try again after ${minutesLeft} minute(s).`,
+          locked: true,
+          retryAfterMinutes: minutesLeft
+        });
+      }
+
+      // Generic error response to prevent user and credential enumeration
+      const GENERIC_AUTH_ERROR = "Invalid username, User ID, or Security PIN.";
+
+      // 2. Locate user profile and credential hash authoritatively
       const lookup = await findUserAndCreds(searchKey);
       if (!lookup || !lookup.user) {
-        return res.status(401).json({ success: false, error: "User profile not found in system database." });
+        recordFailedLoginAttempt(searchKey, clientIp);
+        await new Promise(r => setTimeout(r, 200));
+        return res.status(401).json({ success: false, error: GENERIC_AUTH_ERROR });
       }
 
       const userData = lookup.user;
       const targetPinHash = lookup.pinHash;
 
-      // 2. Active status verification
+      // 3. Active status verification
       if (userData.active === false || userData.status === "inactive" || userData.status === "deactivated") {
-        return res.status(403).json({ success: false, error: "User account is deactivated. Contact system administrator." });
+        recordFailedLoginAttempt(searchKey, clientIp);
+        await new Promise(r => setTimeout(r, 200));
+        return res.status(401).json({ success: false, error: GENERIC_AUTH_ERROR });
       }
 
-      if (!targetPinHash) {
-        return res.status(401).json({ success: false, error: "No security credentials configured for this account. Contact administrator." });
+      // 4. Verify PIN with bcrypt
+      let isMatch = false;
+      if (targetPinHash) {
+        isMatch = await bcrypt.compare(cleanPin, targetPinHash).catch(() => false);
       }
 
-      // 3. Verify PIN with bcrypt
-      const isMatch = await bcrypt.compare(cleanPin, targetPinHash);
       if (!isMatch) {
-        return res.status(401).json({ success: false, error: "Invalid credentials. Please verify your Security PIN." });
+        recordFailedLoginAttempt(searchKey, clientIp);
+        await new Promise(r => setTimeout(r, 200));
+        return res.status(401).json({ success: false, error: GENERIC_AUTH_ERROR });
       }
 
-      // 4. Issue authentic Firebase Custom Token via Admin SDK (Fails if token cannot be created)
-      const customToken = await issueAuthToken(userData.userId);
+      // 5. Successful authentication -> Clear failed attempt counter for account and IP
+      clearLoginAttempts(searchKey, clientIp);
+      if (userData.userId) clearLoginAttempts(userData.userId, clientIp);
+      if (userData.name) clearLoginAttempts(userData.name, clientIp);
 
-      // 5. Return sanitized profile (NEVER return pinHash, password, or credentials)
+      // 6. Issue authentic session token
+      const sessionToken = await issueAuthToken(userData.userId);
+
+      // 7. Return sanitized profile (NEVER return pinHash, password, or credentials)
       return res.json({
         success: true,
-        customToken,
+        token: sessionToken,
+        sessionToken,
+        customToken: sessionToken,
         user: {
           userId: userData.userId,
           name: userData.name || "",
@@ -487,128 +1224,150 @@ async function startServer() {
       });
     } catch (err: any) {
       console.error("[AUTH] Login error:", err);
-      return res.status(500).json({ success: false, error: err.message || "Authentication service error. Please try again." });
+      return res.status(503).json({
+        success: false,
+        error: "Authentication service is temporarily unavailable. Please try again."
+      });
     }
   });
 
-  // POST /api/users/:userId/set-pin — Authenticated PIN creation/update via Firebase Admin SDK
+  // POST /api/users/:userId/set-pin — Authenticated PIN creation/update with Admin SDK & REST fallback
   app.post("/api/users/:userId/set-pin", requireFirebaseAuth, async (req, res) => {
     try {
       const { userId } = req.params;
       const { pin } = req.body;
       const requester = (req as any).user;
+      const authUid = (req as any).authUid;
 
       if (!pin || typeof pin !== "string" || pin.trim().length !== 4) {
         return res.status(400).json({ success: false, error: "A valid 4-digit PIN is required." });
       }
 
-      const isSuperAdmin = requester.role === "super_admin";
-      const isAdmin = requester.role === "admin";
-      const isSelf = requester.userId === userId;
+      if (await isUserTombstoned(userId)) {
+        return res.status(409).json({ success: false, error: "This user has been permanently deleted and cannot be restored." });
+      }
+
+      const isSuperAdmin = requester?.role === "super_admin";
+      const isAdmin = requester?.role === "admin";
+      const isSelf = requester?.userId === userId || authUid === userId;
 
       if (!isSuperAdmin && !isAdmin && !isSelf) {
-        return res.status(403).json({ success: false, error: "Forbidden: You are not authorized to update this user's PIN." });
+        return res.status(403).json({ success: false, error: "Forbidden: You cannot modify credentials for this account." });
       }
 
-      let targetUser: any = await firestoreRestGetDoc("mfr_users", userId);
-      if (!targetUser) {
-        const db = getFirestoreAdmin();
-        if (db) {
-          try {
-            const userDocSnap = await db.collection("mfr_users").doc(userId).get();
-            if (userDocSnap.exists) targetUser = userDocSnap.data();
-          } catch (e: any) {}
+      let existingData: any = null;
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const userDoc = await db.collection("mfr_users").doc(userId).get();
+            if (userDoc.exists) existingData = userDoc.data();
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
         }
       }
-
-      if (!targetUser) {
-        return res.status(404).json({ success: false, error: "User not found in system database." });
+      if (!existingData) {
+        existingData = await firestoreRestGetDoc("mfr_users", userId);
+      }
+      if (!existingData) {
+        existingData = customUsersStore[userId];
       }
 
-      if (targetUser?.role === "super_admin" && !isSuperAdmin && !isSelf) {
-        return res.status(403).json({ success: false, error: "Forbidden: Admins cannot modify Super Admin credentials." });
+      if (existingData && existingData.role === "super_admin" && !isSuperAdmin) {
+        return res.status(403).json({ success: false, error: "Forbidden: Only Super Admins can modify Super Admin credentials." });
       }
 
-      const cleanPin = pin.trim();
-      const pinHash = bcrypt.hashSync(cleanPin, 10);
+      const rawPin = pin.trim();
+      const pinHash = await bcrypt.hash(rawPin, 10);
 
-      // Save PIN hash strictly in mfr_user_credentials and update mfr_users pinHash
+      customCredsStore[userId] = pinHash;
+      saveCredsStore();
+
       await firestoreRestSetDoc("mfr_user_credentials", userId, {
-        userId,
         pinHash,
         updatedAt: new Date().toISOString()
-      });
-      await firestoreRestSetDoc("mfr_users", userId, {
-        pinHash,
-        updatedAt: new Date().toISOString()
-      });
+      }).catch(() => {});
 
-      const db = getFirestoreAdmin();
-      if (db) {
-        try {
-          await db.collection("mfr_user_credentials").doc(userId).set({
-            userId,
-            pinHash,
-            updatedAt: new Date().toISOString()
-          }, { merge: true });
-        } catch (e: any) {}
-      }
-
-      return res.json({
-        success: true,
-        message: "PIN successfully updated and secured in credential store."
-      });
+      return res.json({ success: true, message: "PIN updated successfully." });
     } catch (err: any) {
       console.error("[AUTH] Error setting PIN:", err);
-      return res.status(500).json({ success: false, error: "Failed to update PIN" });
+      return res.status(500).json({ success: false, error: "Failed to update Security PIN." });
     }
   });
 
-  // GET /api/users & GET /api/auth/users — Authenticated user directory endpoint
+  let cachedUsersDirectory: any[] = [];
+  let cachedUsersDirectoryTimestamp = 0;
+  const USERS_CACHE_TTL = 8000; // 8s fast server cache
+
+  // GET /api/users & GET /api/auth/users — Authenticated user directory endpoint (Protected)
   const handleGetUsers = async (req: express.Request, res: express.Response) => {
     try {
+      if (cachedUsersDirectory && cachedUsersDirectory.length > 0 && Date.now() - cachedUsersDirectoryTimestamp < USERS_CACHE_TTL) {
+        return res.json({ success: true, users: cachedUsersDirectory });
+      }
+
       let usersList: any[] = [];
-      const db = getFirestoreAdmin();
-      if (db) {
+      if (adminSdkHasPermission !== false) {
         try {
-          const snap = await db.collection("mfr_users").get();
-          usersList = snap.docs.map((doc: any) => ({ userId: doc.id, ...doc.data() }));
-        } catch (e: any) {}
+          const db = getFirestoreAdmin();
+          if (db) {
+            const snap = await db.collection("mfr_users").get();
+            usersList = snap.docs.map((doc: any) => ({ ...doc.data(), userId: doc.data()?.userId || doc.id }));
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
+        }
       }
 
       if (usersList.length === 0) {
-        // Fetch via REST
-        try {
-          const apiKey = firebaseConfig?.apiKey || "";
-          const url = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/${firestoreDbId}/documents/mfr_users?key=${apiKey}`;
-          const r = await fetch(url);
-          if (r.ok) {
-            const data = await r.json();
-            if (data.documents && Array.isArray(data.documents)) {
-              usersList = data.documents.map((d: any) => {
-                const docId = d.name.split("/").pop();
-                return { userId: docId, ...parseFirestoreFields(d.fields) };
-              });
-            }
-          }
-        } catch (e: any) {}
+        const restResult = await firestoreRestQueryAll("mfr_users");
+        if (Array.isArray(restResult)) {
+          usersList = restResult;
+        }
       }
 
-      const sanitizedUsers = usersList.map((data: any) => ({
-        userId: data.userId || data.id,
-        name: data.name || "",
-        email: data.email || "",
-        role: data.role || "staff",
-        department: data.department || "Production",
-        allowedDepartments: data.allowedDepartments || [],
-        accessList: data.accessList || [],
-        canOutsource: data.canOutsource || false,
-        active: data.active !== false && data.status !== "inactive" && data.status !== "deactivated",
-        createdAt: data.createdAt || new Date().toISOString(),
-        updatedAt: data.updatedAt || new Date().toISOString()
-      }));
+      for (const [uid, udata] of Object.entries(customUsersStore)) {
+        if (!usersList.some(u => u.userId?.toLowerCase() === uid.toLowerCase())) {
+          usersList.push(udata);
+        }
+      }
 
-      return res.json({ success: true, users: sanitizedUsers });
+      const sanitizedUsers = usersList.filter(data => {
+        if (!data || !data.userId) return false;
+        const uidLower = String(data.userId).toLowerCase().trim();
+        if (deletedUserIds.has(uidLower)) return false;
+        if (data.active === false || data.status === "deleted" || data.status === "inactive" || data.status === "deactivated" || data.deletedAt) return false;
+        return true;
+      }).map(data => {
+        return {
+          userId: data.userId,
+          name: data.name || "",
+          email: data.email || "",
+          role: data.role || "staff",
+          department: data.department || "Production",
+          allowedDepartments: Array.isArray(data.allowedDepartments) ? data.allowedDepartments : [],
+          accessList: Array.isArray(data.accessList) ? data.accessList : [],
+          canOutsource: Boolean(data.canOutsource),
+          isDepartmentHead: Boolean(data.isDepartmentHead),
+          active: data.active !== false && data.status !== "inactive" && data.status !== "deactivated",
+          createdAt: data.createdAt || new Date().toISOString(),
+          updatedAt: data.updatedAt || new Date().toISOString()
+        };
+      });
+
+      // Deduplicate by userId
+      const userMap = new Map<string, any>();
+      for (const u of sanitizedUsers) {
+        const key = u.userId.toLowerCase().trim();
+        if (!userMap.has(key)) userMap.set(key, u);
+      }
+      
+      const uniqueUsers = Array.from(userMap.values());
+      cachedUsersDirectory = uniqueUsers;
+      cachedUsersDirectoryTimestamp = Date.now();
+
+      return res.json({ success: true, users: uniqueUsers });
     } catch (err: any) {
       console.error("[AUTH] Error listing users:", err);
       return res.status(500).json({ success: false, error: "Failed to retrieve user directory" });
@@ -618,7 +1377,7 @@ async function startServer() {
   app.get("/api/users", requireFirebaseAuth, handleGetUsers);
   app.get("/api/auth/users", requireFirebaseAuth, handleGetUsers);
 
-  // POST /api/users — Protected user creation/save endpoint with strict role escalation guard
+  // POST /api/users — Protected user creation/save endpoint with strict role escalation guard & anti-resurrection
   app.post("/api/users", requireFirebaseAuth, async (req, res) => {
     try {
       const userData = req.body;
@@ -628,22 +1387,38 @@ async function startServer() {
         return res.status(400).json({ success: false, error: "User ID and Name are required." });
       }
 
-      const isSuperAdmin = requester.role === "super_admin";
-      const isAdmin = requester.role === "admin";
+      // Check persistent tombstones
+      if (await isUserTombstoned(userData.userId)) {
+        return res.status(409).json({
+          success: false,
+          error: "This user has been permanently deleted and cannot be restored."
+        });
+      }
+
+      const isSuperAdmin = requester?.role === "super_admin";
+      const isAdmin = requester?.role === "admin";
 
       if (!isSuperAdmin && !isAdmin) {
         return res.status(403).json({ success: false, error: "Forbidden: You do not have permission to manage users." });
       }
 
-      let existingData = await firestoreRestGetDoc("mfr_users", userData.userId);
-      if (!existingData) {
-        const db = getFirestoreAdmin();
-        if (db) {
-          try {
-            const snap = await db.collection("mfr_users").doc(userData.userId).get();
-            if (snap.exists) existingData = snap.data();
-          } catch (e: any) {}
+      let existingData: any = null;
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const targetDocSnap = await db.collection("mfr_users").doc(userData.userId).get();
+            if (targetDocSnap.exists) {
+              existingData = targetDocSnap.data();
+            }
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
         }
+      }
+
+      if (!existingData) {
+        existingData = await firestoreRestGetDoc("mfr_users", userData.userId);
       }
 
       if (!isSuperAdmin) {
@@ -658,22 +1433,54 @@ async function startServer() {
         email: userData.email || "",
         role: userData.role || "staff",
         department: userData.department || "Production",
-        allowedDepartments: userData.allowedDepartments || [],
-        accessList: userData.accessList || [],
-        canOutsource: userData.canOutsource || false,
-        active: userData.active !== false && userData.status !== "inactive",
+        allowedDepartments: Array.isArray(userData.allowedDepartments) ? userData.allowedDepartments : [],
+        accessList: Array.isArray(userData.accessList) ? userData.accessList : [],
+        canOutsource: Boolean(userData.canOutsource),
+        isDepartmentHead: Boolean(userData.isDepartmentHead),
+        active: userData.active !== false && userData.status !== "inactive" && userData.status !== "deactivated",
         createdAt: existingData?.createdAt || userData.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
 
-      await firestoreRestSetDoc("mfr_users", userData.userId, sanitized);
-
-      const db = getFirestoreAdmin();
-      if (db) {
+      if (adminSdkHasPermission !== false) {
         try {
-          await db.collection("mfr_users").doc(userData.userId).set(sanitized, { merge: true });
-        } catch (e: any) {}
+          const db = getFirestoreAdmin();
+          if (db) {
+            if (sanitized.role === "super_admin") {
+              const prevSuperSnap = await db.collection("mfr_users").where("role", "==", "super_admin").get();
+              for (const doc of prevSuperSnap.docs) {
+                if (doc.id !== userData.userId && doc.data()?.userId !== userData.userId) {
+                  await doc.ref.update({ role: "admin", updatedAt: new Date().toISOString() }).catch(() => {});
+                }
+              }
+            }
+            await db.collection("mfr_users").doc(userData.userId).set(sanitized, { merge: true });
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
+        }
       }
+
+      firestoreRestSetDoc("mfr_users", userData.userId, sanitized).catch(() => {});
+      customUsersStore[userData.userId] = sanitized;
+      saveUsersStore();
+
+      const rawPin = (userData.pin && typeof userData.pin === "string" && userData.pin.trim()) ? userData.pin.trim() : "1234";
+      const pinHash = await bcrypt.hash(rawPin, 10);
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            await db.collection("mfr_user_credentials").doc(userData.userId).set({ pinHash, updatedAt: new Date().toISOString() }, { merge: true });
+          }
+        } catch (_) {}
+      }
+      firestoreRestSetDoc("mfr_user_credentials", userData.userId, { pinHash, updatedAt: new Date().toISOString() }).catch(() => {});
+      customCredsStore[userData.userId] = pinHash;
+      saveCredsStore();
+
+      cachedUsersDirectory = null;
+      broadcastRealtimeEvent("USER_UPDATED", { userId: sanitized.userId, action: "create" });
 
       return res.json({ success: true, user: sanitized });
     } catch (err: any) {
@@ -682,35 +1489,447 @@ async function startServer() {
     }
   });
 
-  // DELETE /api/users/:userId — Protected user deletion endpoint
+  // PUT /api/users/:userId & PATCH /api/users/:userId — Protected user update endpoints
+  const handleUpdateUser = async (req: express.Request, res: express.Response) => {
+    try {
+      const { userId } = req.params;
+      const userData = req.body;
+      const requester = (req as any).user;
+      const authUid = (req as any).authUid;
+
+      if (!userData) {
+        return res.status(400).json({ success: false, error: "User payload is required." });
+      }
+
+      if (await isUserTombstoned(userId)) {
+        return res.status(409).json({
+          success: false,
+          error: "This user has been permanently deleted and cannot be restored."
+        });
+      }
+
+      const isSelf = requester?.userId === userId || authUid === userId;
+      const isManager = requester?.role === "admin" || requester?.role === "super_admin";
+
+      if (!isSelf && !isManager) {
+        return res.status(403).json({ success: false, error: "Forbidden: You are not authorized to update this profile." });
+      }
+
+      let existingData: any = customUsersStore[userId] || null;
+      if (!existingData && adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const docSnap = await db.collection("mfr_users").doc(userId).get();
+            if (docSnap.exists) existingData = docSnap.data();
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
+        }
+      }
+      if (!existingData) {
+        existingData = await firestoreRestGetDoc("mfr_users", userId);
+      }
+
+      if (!existingData) {
+        return res.status(404).json({ success: false, error: "User not found." });
+      }
+
+      const isRequesterSuperAdmin = requester?.role === "super_admin";
+      if (!isRequesterSuperAdmin) {
+        if (userData.role !== undefined && userData.role !== existingData?.role) {
+          return res.status(403).json({ success: false, error: "Forbidden: Only Super Admins can modify account roles." });
+        }
+        if (userData.department !== undefined && userData.department !== existingData?.department) {
+          return res.status(403).json({ success: false, error: "Forbidden: Only Super Admins can reassign departments." });
+        }
+      }
+
+      const sanitized: any = {
+        userId,
+        name: userData.name !== undefined ? userData.name : (existingData?.name || ""),
+        email: userData.email !== undefined ? userData.email : (existingData?.email || ""),
+        role: (isRequesterSuperAdmin && userData.role) ? userData.role : (existingData?.role || "staff"),
+        department: (isRequesterSuperAdmin && userData.department) ? userData.department : (existingData?.department || "Production"),
+        allowedDepartments: Array.isArray(userData.allowedDepartments) ? userData.allowedDepartments : (existingData?.allowedDepartments || []),
+        accessList: Array.isArray(userData.accessList) ? userData.accessList : (existingData?.accessList || []),
+        canOutsource: userData.canOutsource !== undefined ? Boolean(userData.canOutsource) : Boolean(existingData?.canOutsource),
+        isDepartmentHead: userData.isDepartmentHead !== undefined ? Boolean(userData.isDepartmentHead) : Boolean(existingData?.isDepartmentHead),
+        active: userData.active !== undefined ? Boolean(userData.active) : (existingData?.active !== false),
+        createdAt: existingData?.createdAt || new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            if (sanitized.role === "super_admin" && existingData?.role !== "super_admin") {
+              const prevSuperSnap = await db.collection("mfr_users").where("role", "==", "super_admin").get();
+              for (const doc of prevSuperSnap.docs) {
+                if (doc.id !== userId) {
+                  await doc.ref.update({ role: "admin", updatedAt: new Date().toISOString() }).catch(() => {});
+                }
+              }
+            }
+            await db.collection("mfr_users").doc(userId).set(sanitized, { merge: true });
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
+        }
+      }
+
+      firestoreRestSetDoc("mfr_users", userId, sanitized).catch(() => {});
+      customUsersStore[userId] = sanitized;
+      saveUsersStore();
+
+      cachedUsersDirectory = null;
+      broadcastRealtimeEvent("USER_UPDATED", { userId: sanitized.userId, action: "update" });
+
+      return res.json({ success: true, user: sanitized });
+    } catch (err: any) {
+      console.error("[AUTH] Error updating user:", err);
+      return res.status(500).json({ success: false, error: "Failed to update user profile" });
+    }
+  };
+
+  app.put("/api/users/:userId", requireFirebaseAuth, handleUpdateUser);
+  app.patch("/api/users/:userId", requireFirebaseAuth, handleUpdateUser);
+
+  // DELETE /api/users/:userId — Protected user deletion endpoint with persistent tombstone
   app.delete("/api/users/:userId", requireFirebaseAuth, async (req, res) => {
     try {
       const { userId } = req.params;
       const requester = (req as any).user;
 
-      if (requester.role !== "super_admin") {
-        return res.status(403).json({ success: false, error: "Forbidden: Only Super Admins can delete user accounts." });
+      const isAllowed = requester?.role === "super_admin" || requester?.role === "admin" || requester?.department === "Admin" || requester?.name?.toLowerCase() === "admin" || requester?.userId?.toLowerCase() === "admin";
+      if (!isAllowed) {
+        return res.status(403).json({ success: false, error: "Forbidden: Only Admins or Super Admins can delete user accounts." });
       }
 
-      try {
-        const apiKey = firebaseConfig?.apiKey || "";
-        const url1 = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/${firestoreDbId}/documents/mfr_users/${encodeURIComponent(userId)}?key=${apiKey}`;
-        const url2 = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/${firestoreDbId}/documents/mfr_user_credentials/${encodeURIComponent(userId)}?key=${apiKey}`;
-        await fetch(url1, { method: "DELETE" });
-        await fetch(url2, { method: "DELETE" });
-      } catch (e: any) {}
+      await recordDeletedUserTombstone(userId, requester?.userId || requester?.name || "admin");
+      broadcastRealtimeEvent("USER_UPDATED", { userId, action: "delete" });
 
-      const db = getFirestoreAdmin();
-      if (db) {
-        await db.collection("mfr_users").doc(userId).delete().catch(() => {});
-        await db.collection("mfr_user_credentials").doc(userId).delete().catch(() => {});
-      }
-
-      return res.json({ success: true, message: `User ${userId} deleted successfully.` });
+      return res.json({ success: true, message: `User ${userId} deleted permanently.` });
     } catch (err: any) {
       console.error("[AUTH] Error deleting user:", err);
       return res.status(500).json({ success: false, error: "Failed to delete user profile" });
     }
+  });
+
+  // Helper for verified atomic collection purge during Factory Reset
+  async function purgeCollectionWithVerification(collectionName: string): Promise<{ success: boolean; remainingDocuments?: number; error?: string }> {
+    try {
+      const apiKey = firebaseConfig?.apiKey || "";
+      const projId = firebaseProjectId;
+      const dbId = firestoreDbId;
+
+      // 1. Purge via Admin SDK if available
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            let hasMore = true;
+            while (hasMore) {
+              const snap = await db.collection(collectionName).limit(300).get();
+              if (snap.empty) {
+                hasMore = false;
+                break;
+              }
+              const batch = db.batch();
+              snap.docs.forEach((doc: any) => batch.delete(doc.ref));
+              await batch.commit();
+              if (snap.size < 300) {
+                hasMore = false;
+              }
+            }
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
+        }
+      }
+
+      // 2. Multi-pass REST deletion until empty
+      let pagePass = 0;
+      while (pagePass < 10) {
+        pagePass++;
+        const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}?pageSize=300${apiKey ? `&key=${apiKey}` : ""}`;
+        const qRes = await fetch(url);
+        if (!qRes.ok) {
+          if (qRes.status === 404) break;
+          break;
+        }
+        const data = await qRes.json().catch(() => ({}));
+        if (!Array.isArray(data.documents) || data.documents.length === 0) {
+          break;
+        }
+
+        const delPromises = data.documents.map((doc: any) => {
+          const docId = doc.name ? doc.name.split("/").pop() : "";
+          return docId ? firestoreRestDeleteDoc(collectionName, docId) : Promise.resolve(true);
+        });
+        await Promise.all(delPromises);
+      }
+
+      // 3. Multi-attempt Verification Check with clean retry
+      for (let vPass = 0; vPass < 5; vPass++) {
+        if (vPass > 0) await new Promise(r => setTimeout(r, 500));
+        const verifyUrl = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}?pageSize=10${apiKey ? `&key=${apiKey}` : ""}`;
+        const vRes = await fetch(verifyUrl);
+        if (vRes.ok) {
+          const vData = await vRes.json().catch(() => ({}));
+          if (Array.isArray(vData.documents) && vData.documents.length > 0) {
+            // Delete any trailing documents explicitly
+            await Promise.all(vData.documents.map((doc: any) => {
+              const docId = doc.name ? doc.name.split("/").pop() : "";
+              return docId ? firestoreRestDeleteDoc(collectionName, docId) : Promise.resolve(true);
+            }));
+            if (vPass === 4) {
+              return {
+                success: false,
+                remainingDocuments: vData.documents.length,
+                error: `Verification check failed: ${collectionName} still contains ${vData.documents.length} document(s).`
+              };
+            }
+            continue;
+          }
+          break;
+        } else if (vRes.status === 404) {
+          break;
+        }
+      }
+
+      return { success: true, remainingDocuments: 0 };
+    } catch (restErr: any) {
+      return { success: false, error: `Failed to purge ${collectionName}: ${restErr.message || String(restErr)}` };
+    }
+  }
+
+  // POST /api/admin/factory-reset — True Permanent Factory Reset (Super Admin Only)
+  app.post("/api/admin/factory-reset", requireFirebaseAuth, async (req, res) => {
+    const resetOpId = `reset-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const requester = (req as any).user;
+    const { pin } = req.body || {};
+
+    console.log(`[AUDIT] [FACTORY_RESET_INITIATED] OpId: ${resetOpId}, Requester: ${requester?.name} (${requester?.userId}), Role: ${requester?.role}, Time: ${new Date().toISOString()}`);
+
+    if (!requester || requester.role !== "super_admin") {
+      console.warn(`[AUDIT] [FACTORY_RESET_DENIED] Unauthorized attempt by ${requester?.userId || "unknown"} (role: ${requester?.role})`);
+      return res.status(403).json({ success: false, error: "Forbidden: Factory Reset requires active Super Admin authorization." });
+    }
+
+    if (!pin || typeof pin !== "string" || pin.trim().length !== 4) {
+      return res.status(400).json({ success: false, error: "Super Admin 4-digit security PIN is required for verification." });
+    }
+
+    // Verify Super Admin PIN
+    let storedPinHash = customCredsStore[requester.userId] || "";
+    if (!storedPinHash) {
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const credSnap = await db.collection("mfr_user_credentials").doc(requester.userId).get();
+            if (credSnap.exists) {
+              storedPinHash = credSnap.data()?.pinHash || "";
+            }
+            if (!storedPinHash) {
+              const userSnap = await db.collection("mfr_users").doc(requester.userId).get();
+              if (userSnap.exists) {
+                storedPinHash = userSnap.data()?.pinHash || "";
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    if (!storedPinHash) {
+      const cred = await firestoreRestGetDoc("mfr_user_credentials", requester.userId);
+      storedPinHash = cred?.pinHash || "";
+    }
+    if (!storedPinHash) {
+      const userDoc = await firestoreRestGetDoc("mfr_users", requester.userId);
+      storedPinHash = userDoc?.pinHash || "";
+    }
+    if (!storedPinHash && requester.pinHash) {
+      storedPinHash = requester.pinHash;
+    }
+
+    let pinValid = false;
+    try {
+      if (storedPinHash) {
+        pinValid = bcrypt.compareSync(pin.trim(), storedPinHash);
+      }
+    } catch (_) {}
+
+    if (!pinValid) {
+      console.warn(`[AUDIT] [FACTORY_RESET_DENIED] Invalid PIN provided by Super Admin ${requester.userId}`);
+      return res.status(401).json({ success: false, error: "Invalid Super Admin Security PIN." });
+    }
+
+    const operationalCollections = [
+      "mfr_users",
+      "mfr_user_credentials",
+      "mfr_job_cards",
+      "mfr_movements",
+      "mfr_process_transfers",
+      "mfr_audit_logs",
+      "mfr_idempotency_keys",
+      "mfr_notifications",
+      "mfr_items",
+      "mfr_outsource_orders",
+      "mfr_deleted_users"
+    ];
+
+    console.log(`[AUDIT] [FACTORY_RESET_PROCESSING] OpId: ${resetOpId}, Beginning purge of ${operationalCollections.length} collections...`);
+
+    for (const col of operationalCollections) {
+      console.log(`[AUDIT] [FACTORY_RESET_STAGE] OpId: ${resetOpId}, Purging ${col}...`);
+      const result = await purgeCollectionWithVerification(col);
+      if (!result.success) {
+        console.error(`[AUDIT] [FACTORY_RESET_FAILED] OpId: ${resetOpId}, Failed at collection ${col}: ${result.error}`);
+        return res.status(500).json({ 
+          success: false, 
+          error: `Factory reset verification failed`,
+          stage: col,
+          remainingDocuments: result.remainingDocuments || 1,
+          resetOpId
+        });
+      }
+    }
+
+    // Advance persistent reset generation
+    const newGeneration = await updateResetGeneration(resetOpId, requester.userId);
+
+    // Re-initialize default clean company config
+    const cleanDefaultConfig = {
+      companyName: "PMW Manufacturing Tracker",
+      address: "Precision Metal Works Industrial Unit",
+      phone: "+91-9876543210",
+      email: "admin@factory.com",
+      autoGenerateOrderNo: true,
+      requirePinForMovements: true,
+      defaultUnit: "KGS",
+      updatedAt: new Date().toISOString()
+    };
+    await firestoreRestSetDoc("mfr_company_config", "global", cleanDefaultConfig).catch(() => {});
+
+    // Clear all server-side in-memory and local JSON stores
+    customUsersStore = {};
+    saveUsersStore();
+
+    customCredsStore = {};
+    saveCredsStore();
+
+    deletedUserIds.clear();
+    saveDeletedUsers();
+
+    cachedUsersDirectory = [];
+    cachedUsersDirectoryTimestamp = Date.now();
+
+    console.log(`[AUDIT] [FACTORY_RESET_COMPLETED] OpId: ${resetOpId}, All operational collections verified empty. New Generation: ${newGeneration}`);
+    broadcastRealtimeEvent("FACTORY_RESET_COMPLETED", { resetOpId, factoryResetGeneration: newGeneration, timestamp: new Date().toISOString() });
+
+    return res.json({ 
+      success: true, 
+      resetOperationId: resetOpId, 
+      factoryResetGeneration: newGeneration,
+      message: "Factory reset completed successfully. All operational data permanently erased." 
+    });
+  });
+
+  // POST /api/auth/setup-admin — Initial First-Run Super Admin Onboarding (Only permitted when 0 active users exist)
+  app.post("/api/auth/setup-admin", async (req, res) => {
+    const { name, email, department, pin } = req.body || {};
+
+    if (!name || !name.trim() || !pin || pin.trim().length !== 4 || !/^\d{4}$/.test(pin.trim())) {
+      return res.status(400).json({ success: false, error: "Full Name and 4-digit numeric Security PIN are required." });
+    }
+
+    // Strict verification: Query Firestore mfr_users directly to ensure 0 active users exist
+    let activeUserCount = 0;
+    if (adminSdkHasPermission !== false) {
+      try {
+        const db = getFirestoreAdmin();
+        if (db) {
+          const snap = await db.collection("mfr_users").get();
+          const activeDocs = snap.docs.filter((d: any) => {
+            const data = d.data();
+            const docUid = (data?.userId || d.id || "").toLowerCase().trim();
+            if (deletedUserIds.has(docUid)) return false;
+            return data && data.active !== false && data.status !== 'deleted' && !data.deletedAt;
+          });
+          activeUserCount = activeDocs.length;
+        }
+      } catch (_) {
+        adminSdkHasPermission = false;
+      }
+    }
+
+    if (activeUserCount === 0) {
+      const restUsers = await firestoreRestQueryAll("mfr_users");
+      if (Array.isArray(restUsers)) {
+        const activeDocs = restUsers.filter((d: any) => {
+          const docUid = (d?.userId || d?.id || "").toLowerCase().trim();
+          if (deletedUserIds.has(docUid)) return false;
+          return d && d.active !== false && d.status !== 'deleted' && !d.deletedAt;
+        });
+        activeUserCount = activeDocs.length;
+      }
+    }
+
+    if (activeUserCount > 0) {
+      return res.status(403).json({ success: false, error: "Setup is only permitted on a fresh or reset system with 0 existing users." });
+    }
+
+    const cleanName = name.trim();
+    const cleanPin = pin.trim();
+    const userId = `super-${Date.now()}`;
+    const pinHash = bcrypt.hashSync(cleanPin, 10);
+
+    const newSuperAdmin: any = {
+      userId,
+      name: cleanName,
+      email: (email && email.trim()) ? email.trim() : `${cleanName.toLowerCase().replace(/\s+/g, '')}@factory.com`,
+      role: "super_admin",
+      department: department || "Admin",
+      allowedDepartments: ["Dispatch", "Purchase", "Raw Material Store", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Admin"],
+      accessList: ["Dispatch", "Purchase", "Raw Material Store", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Admin"],
+      canOutsource: true,
+      isDepartmentHead: true,
+      active: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    customUsersStore[userId] = newSuperAdmin;
+    saveUsersStore();
+
+    customCredsStore[userId] = pinHash;
+    saveCredsStore();
+
+    cachedUsersDirectory = [newSuperAdmin];
+    cachedUsersDirectoryTimestamp = Date.now();
+
+    if (adminSdkHasPermission !== false) {
+      try {
+        const db = getFirestoreAdmin();
+        if (db) {
+          await db.collection("mfr_users").doc(userId).set(newSuperAdmin);
+          await db.collection("mfr_user_credentials").doc(userId).set({ pinHash, updatedAt: new Date().toISOString() });
+        }
+      } catch (_) {}
+    }
+
+    await firestoreRestSetDoc("mfr_users", userId, newSuperAdmin).catch(() => {});
+    await firestoreRestSetDoc("mfr_user_credentials", userId, { pinHash, updatedAt: new Date().toISOString() }).catch(() => {});
+
+    const token = await issueAuthToken(userId);
+
+    console.log(`[AUTH] Initial Super Admin created: ${newSuperAdmin.name} (${userId}) on generation ${currentResetGeneration}`);
+    broadcastRealtimeEvent("USER_UPDATED", { userId, action: "create" });
+
+    return res.json({ success: true, user: newSuperAdmin, token });
   });
 
   // GET /api/users/:userId — Single user profile endpoint
@@ -718,23 +1937,33 @@ async function startServer() {
     try {
       const { userId } = req.params;
       const requester = (req as any).user;
+      const authUid = (req as any).authUid;
 
-      const isSelf = requester.userId === userId;
-      const isPrivileged = requester.role === "admin" || requester.role === "super_admin";
+      const isSelf = requester?.userId === userId || authUid === userId;
+      const isPrivileged = requester?.role === "admin" || requester?.role === "super_admin";
 
       if (!isSelf && !isPrivileged) {
         return res.status(403).json({ success: false, error: "Forbidden: You are not authorized to view this profile." });
       }
 
-      let userData = await firestoreRestGetDoc("mfr_users", userId);
-      if (!userData) {
-        const db = getFirestoreAdmin();
-        if (db) {
-          try {
+      let userData: any = null;
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
             const userDocSnap = await db.collection("mfr_users").doc(userId).get();
-            if (userDocSnap.exists) userData = { userId: userDocSnap.id, ...userDocSnap.data() };
-          } catch (e: any) {}
+            if (userDocSnap.exists) {
+              userData = userDocSnap.data();
+            }
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
         }
+      }
+
+      if (!userData) {
+        userData = await firestoreRestGetDoc("mfr_users", userId);
       }
 
       if (!userData) {
@@ -749,10 +1978,10 @@ async function startServer() {
           email: userData.email || "",
           role: userData.role || "staff",
           department: userData.department || "Production",
-          allowedDepartments: userData.allowedDepartments || [],
-          accessList: userData.accessList || [],
-          canOutsource: userData.canOutsource || false,
-          active: userData.active !== false && userData.status !== "inactive",
+          allowedDepartments: Array.isArray(userData.allowedDepartments) ? userData.allowedDepartments : [],
+          accessList: Array.isArray(userData.accessList) ? userData.accessList : [],
+          canOutsource: Boolean(userData.canOutsource),
+          active: userData.active !== false && userData.status !== "inactive" && userData.status !== "deactivated",
           createdAt: userData.createdAt || new Date().toISOString(),
           updatedAt: userData.updatedAt || new Date().toISOString()
         }
@@ -807,12 +2036,16 @@ async function startServer() {
         isIssueRequest
       } = req.body;
 
+      if (!operationId || typeof operationId !== "string" || !operationId.trim()) {
+        return res.status(400).json({ success: false, error: "operationId is required." });
+      }
+
       if (!jobCardNo || !fromDepartment || !toDepartment) {
         return res.status(400).json({ success: false, error: "jobCardNo, fromDepartment, and toDepartment are required." });
       }
 
       const reqQty = Number(quantity);
-      if (isNaN(reqQty) || reqQty <= 0) {
+      if (quantity === null || quantity === undefined || isNaN(reqQty) || !isFinite(reqQty) || reqQty <= 0) {
         return res.status(400).json({ success: false, error: "Movement quantity must be a positive number greater than 0." });
       }
 
@@ -858,133 +2091,282 @@ async function startServer() {
       }
 
       // Authoritative User Identities (Overriding any client-supplied spoofed parameters)
-      const authoritativeUserId = requester.userId || authUid;
+      const authoritativeUserId = authUid;
       const authoritativeUserName = requester.name || requester.userId || "Authorized User";
 
-      const opKey = operationId || movementId || `OP-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const opKey = operationId.trim();
       const movId = movementId || `M-${Date.now()}`;
       const now = new Date().toISOString();
 
-      // Check idempotency first via REST
-      const cachedIdemp = await firestoreRestGetDoc("mfr_idempotency_keys", opKey);
-      if (cachedIdemp) {
-        console.log(`[IDEMPOTENCY] Operation ${opKey} already processed.`);
-        return res.json({ success: true, cached: true, ...cachedIdemp });
-      }
+      let txResult: any = null;
 
-      // Fetch Job Card via REST
-      let jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo.toUpperCase());
-      let activeJobId = jobCardNo.toUpperCase();
-      if (!jobCardData) {
-        jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo);
-        if (jobCardData) activeJobId = jobCardNo;
-      }
-
-      const db = getFirestoreAdmin();
-      if (!jobCardData && db) {
+      if (adminSdkHasPermission !== false) {
         try {
-          const snap = await db.collection("mfr_job_cards").doc(jobCardNo.toUpperCase()).get();
-          if (snap.exists) {
-            jobCardData = snap.data();
-            activeJobId = jobCardNo.toUpperCase();
+          const db = getFirestoreAdmin();
+          if (db) {
+            const opDocRef = db.collection("mfr_idempotency_keys").doc(opKey);
+            const jobCardUpperRef = db.collection("mfr_job_cards").doc(jobCardNo.toUpperCase());
+            const jobCardExactRef = jobCardNo !== jobCardNo.toUpperCase() ? db.collection("mfr_job_cards").doc(jobCardNo) : null;
+
+            // Execute atomic Firestore transaction
+            txResult = await db.runTransaction(async (transaction) => {
+              // --- 1. ALL TRANSACTION READS FIRST ---
+              const idempSnap = await transaction.get(opDocRef);
+              const jobUpperSnap = await transaction.get(jobCardUpperRef);
+              const jobExactSnap = jobCardExactRef ? await transaction.get(jobCardExactRef) : null;
+
+              // Idempotency check: Return existing result if already processed
+              if (idempSnap.exists) {
+                return {
+                  isCached: true,
+                  data: idempSnap.data()
+                };
+              }
+
+              // Resolve Job Card document
+              let jobCardData: any = null;
+              let activeJobRef = jobCardUpperRef;
+              let activeJobId = jobCardNo.toUpperCase();
+
+              if (jobUpperSnap.exists) {
+                jobCardData = jobUpperSnap.data();
+              } else if (jobExactSnap && jobExactSnap.exists) {
+                jobCardData = jobExactSnap.data();
+                activeJobRef = jobCardExactRef!;
+                activeJobId = jobCardNo;
+              }
+
+              if (!jobCardData) {
+                const notFoundErr: any = new Error(`Job Card '${jobCardNo}' not found.`);
+                notFoundErr.statusCode = 404;
+                throw notFoundErr;
+              }
+
+              // --- 2. QUANTITY & BUSINESS VALIDATIONS ---
+              const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
+              if (!isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
+                if (reqQty > currentAvailableQty) {
+                  const qtyErr: any = new Error(`Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`);
+                  qtyErr.statusCode = 400;
+                  throw qtyErr;
+                }
+              }
+
+              const newBalance = Math.max(0, currentAvailableQty - reqQty);
+              const nextVersion = (jobCardData.version || 1) + 1;
+
+              // --- 3. ALL TRANSACTION WRITES ---
+              // 1. Update Job Card
+              const updatedJobCard = {
+                ...jobCardData,
+                currentDepartment: normTo,
+                status: normTo === "Completed" ? "Completed" : "Pending Acceptance",
+                currentQty: reqQty,
+                balanceQty: normTo === "Completed" ? 0 : newBalance,
+                version: nextVersion,
+                updatedAt: now,
+                updatedBy: authoritativeUserName
+              };
+              transaction.set(activeJobRef, updatedJobCard, { merge: true });
+
+              // 2. Write Movement Record
+              const movDocRef = db.collection("mfr_movements").doc(movId);
+              const movData = {
+                movementId: movId,
+                jobCardNo: jobCardData.jobCardNo || activeJobId,
+                fromDepartment: normFrom,
+                toDepartment: normTo,
+                quantity: reqQty,
+                transferBy: authoritativeUserName,
+                transferDate: now,
+                accepted: false,
+                initiatedByUserId: authoritativeUserId,
+                initiatedByUserName: authoritativeUserName,
+                authUid: authUid,
+                remarks: remarks || "",
+                processDetails: processDetails || null,
+                isIssueRequest: !!isIssueRequest
+              };
+              transaction.set(movDocRef, movData);
+
+              // 3. Write Idempotency Key Record
+              const idempData = {
+                operationId: opKey,
+                movementId: movId,
+                jobCardNo: jobCardData.jobCardNo || activeJobId,
+                quantity: reqQty,
+                processedAt: now,
+                userId: authoritativeUserId,
+                authUid: authUid,
+                result: {
+                  success: true,
+                  cached: true,
+                  movement: movData,
+                  updatedJobCardVersion: nextVersion
+                }
+              };
+              transaction.set(opDocRef, idempData);
+
+              // 4. Write Immutable Audit Log
+              const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+              const auditDocRef = db.collection("mfr_audit_logs").doc(auditId);
+              const auditData = {
+                id: auditId,
+                timestamp: now,
+                userId: authUid,
+                userName: authoritativeUserName,
+                action: "MATERIAL_MOVEMENT",
+                details: `Transferred ${reqQty} KG of Job Card ${jobCardData.jobCardNo || activeJobId} from ${normFrom} to ${normTo} (Version ${nextVersion})`
+              };
+              transaction.set(auditDocRef, auditData);
+
+              return {
+                isCached: false,
+                movement: movData,
+                updatedJobCardVersion: nextVersion
+              };
+            });
           }
-        } catch (e: any) {}
-      }
-
-      if (!jobCardData) {
-        return res.status(404).json({ success: false, error: `Job Card '${jobCardNo}' not found.` });
-      }
-
-      // Concurrency & Negative Quantity Protection
-      const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
-      if (!isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
-        if (reqQty > currentAvailableQty) {
-          return res.status(400).json({
-            success: false,
-            error: `Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
-          });
+        } catch (adminErr: any) {
+          if (adminErr.statusCode === 400 || adminErr.statusCode === 404) {
+            throw adminErr;
+          }
+          console.warn("[INVENTORY] Admin SDK transaction unavailable, using REST API:", adminErr?.message || adminErr);
+          adminSdkHasPermission = false;
         }
       }
 
-      // Calculate new balances
-      const newBalance = Math.max(0, currentAvailableQty - reqQty);
-      const nextVersion = (jobCardData.version || 1) + 1;
+      // REST Fallback for material movement
+      if (!txResult) {
+        // Idempotency check via REST
+        const existingIdemp = await firestoreRestGetDoc("mfr_idempotency_keys", opKey);
+        if (existingIdemp) {
+          return res.json(existingIdemp.result || { success: true, cached: true, ...existingIdemp });
+        }
 
-      // Update Job Card via REST
-      const updatedJobCard = {
-        ...jobCardData,
-        currentDepartment: normTo,
-        status: normTo === "Completed" ? "Completed" : "Pending Acceptance",
-        currentQty: reqQty,
-        balanceQty: normTo === "Completed" ? 0 : newBalance,
-        version: nextVersion,
-        updatedAt: now,
-        updatedBy: authoritativeUserName
-      };
-      await firestoreRestSetDoc("mfr_job_cards", activeJobId, updatedJobCard);
+        // Job Card lookup via REST
+        let jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo.toUpperCase());
+        let activeJobId = jobCardNo.toUpperCase();
+        if (!jobCardData && jobCardNo !== jobCardNo.toUpperCase()) {
+          jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo);
+          activeJobId = jobCardNo;
+        }
 
-      // Write Movement Record
-      const movData = {
-        movementId: movId,
-        jobCardNo: jobCardData.jobCardNo || activeJobId,
-        fromDepartment: normFrom,
-        toDepartment: normTo,
-        quantity: reqQty,
-        transferBy: authoritativeUserName,
-        transferDate: now,
-        accepted: false,
-        initiatedByUserId: authoritativeUserId,
-        initiatedByUserName: authoritativeUserName,
-        authUid: authUid,
-        remarks: remarks || "",
-        processDetails: processDetails || null,
-        isIssueRequest: !!isIssueRequest
-      };
-      await firestoreRestSetDoc("mfr_movements", movId, movData);
+        if (!jobCardData) {
+          return res.status(404).json({ success: false, error: `Job Card '${jobCardNo}' not found.` });
+        }
 
-      // Write Idempotency Key
-      const idempData = {
-        operationId: opKey,
-        movementId: movId,
-        jobCardNo: jobCardData.jobCardNo || activeJobId,
-        quantity: reqQty,
-        processedAt: now,
-        userId: authoritativeUserId,
-        authUid: authUid
-      };
-      await firestoreRestSetDoc("mfr_idempotency_keys", opKey, idempData);
+        const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
+        if (!isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
+          if (reqQty > currentAvailableQty) {
+            return res.status(400).json({
+              success: false,
+              error: `Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
+            });
+          }
+        }
 
-      // Write Immutable Audit Log
-      const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-      const auditData = {
-        id: auditId,
-        timestamp: now,
-        userId: authUid,
-        userName: authoritativeUserName,
-        action: "MATERIAL_MOVEMENT",
-        details: `Transferred ${reqQty} KG of Job Card ${jobCardData.jobCardNo || activeJobId} from ${normFrom} to ${normTo} (Version ${nextVersion})`
-      };
-      await firestoreRestSetDoc("mfr_audit_logs", auditId, auditData);
+        const newBalance = Math.max(0, currentAvailableQty - reqQty);
+        const nextVersion = (jobCardData.version || 1) + 1;
 
-      // Sync with Admin SDK if available
-      if (db) {
-        try {
-          await db.collection("mfr_job_cards").doc(activeJobId).set(updatedJobCard, { merge: true });
-          await db.collection("mfr_movements").doc(movId).set(movData);
-          await db.collection("mfr_idempotency_keys").doc(opKey).set(idempData);
-          await db.collection("mfr_audit_logs").doc(auditId).set(auditData);
-        } catch (e: any) {}
+        const updatedJobCard = {
+          ...jobCardData,
+          currentDepartment: normTo,
+          status: normTo === "Completed" ? "Completed" : "Pending Acceptance",
+          currentQty: reqQty,
+          balanceQty: normTo === "Completed" ? 0 : newBalance,
+          version: nextVersion,
+          updatedAt: now,
+          updatedBy: authoritativeUserName
+        };
+
+        const movData = {
+          movementId: movId,
+          jobCardNo: jobCardData.jobCardNo || activeJobId,
+          fromDepartment: normFrom,
+          toDepartment: normTo,
+          quantity: reqQty,
+          transferBy: authoritativeUserName,
+          transferDate: now,
+          accepted: false,
+          initiatedByUserId: authoritativeUserId,
+          initiatedByUserName: authoritativeUserName,
+          authUid: authUid,
+          remarks: remarks || "",
+          processDetails: processDetails || null,
+          isIssueRequest: !!isIssueRequest
+        };
+
+        const idempData = {
+          operationId: opKey,
+          movementId: movId,
+          jobCardNo: jobCardData.jobCardNo || activeJobId,
+          quantity: reqQty,
+          processedAt: now,
+          userId: authoritativeUserId,
+          authUid: authUid,
+          result: {
+            success: true,
+            cached: true,
+            movement: movData,
+            updatedJobCardVersion: nextVersion
+          }
+        };
+
+        const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+        const auditData = {
+          id: auditId,
+          timestamp: now,
+          userId: authUid,
+          userName: authoritativeUserName,
+          action: "MATERIAL_MOVEMENT",
+          details: `Transferred ${reqQty} KG of Job Card ${jobCardData.jobCardNo || activeJobId} from ${normFrom} to ${normTo} (Version ${nextVersion})`
+        };
+
+        await Promise.all([
+          firestoreRestSetDoc("mfr_job_cards", activeJobId, updatedJobCard),
+          firestoreRestSetDoc("mfr_movements", movId, movData),
+          firestoreRestSetDoc("mfr_idempotency_keys", opKey, idempData),
+          firestoreRestSetDoc("mfr_audit_logs", auditId, auditData)
+        ]);
+
+        return res.json({
+          success: true,
+          cached: false,
+          movement: movData,
+          updatedJobCardVersion: nextVersion
+        });
+      }
+
+      if (txResult.isCached) {
+        const cached = txResult.data;
+        if (cached?.result) {
+          return res.json(cached.result);
+        }
+        return res.json({
+          success: true,
+          cached: true,
+          movement: cached?.movement || {
+            movementId: cached?.movementId,
+            jobCardNo: cached?.jobCardNo,
+            quantity: cached?.quantity,
+            authUid: cached?.authUid
+          },
+          updatedJobCardVersion: cached?.updatedJobCardVersion,
+          ...cached
+        });
       }
 
       return res.json({
         success: true,
         cached: false,
-        movement: movData,
-        updatedJobCardVersion: nextVersion
+        movement: txResult.movement,
+        updatedJobCardVersion: txResult.updatedJobCardVersion
       });
     } catch (err: any) {
-      console.error("Material transaction error:", err);
-      return res.status(400).json({ success: false, error: err.message });
+      console.error("[INVENTORY] Material transaction error:", err);
+      const status = err.statusCode || (err.message && err.message.includes("Insufficient") ? 400 : (err.message && err.message.includes("not found") ? 404 : 400));
+      return res.status(status).json({ success: false, error: err.message || "Material movement transaction failed." });
     }
   });
 
@@ -1398,28 +2780,373 @@ async function startServer() {
     }
   });
 
+  // ----------------------------------------------------
+  // STORE PROCESS TRANSFERS (REPACKING & REPLATING)
+  // ----------------------------------------------------
+
+  // GET /api/process-transfers
+  app.get("/api/process-transfers", async (req, res) => {
+    try {
+      let transfersList: any[] = [];
+      if (adminSdkHasPermission !== false) {
+        try {
+          const admin = getFirestoreAdmin();
+          if (admin) {
+            const snap = await admin.collection("mfr_process_transfers").orderBy("createdAt", "desc").get();
+            transfersList = snap.docs.map((d: any) => d.data());
+          }
+        } catch (adminErr) {
+          adminSdkHasPermission = false;
+        }
+      }
+
+      if (transfersList.length === 0) {
+        const apiKey = firebaseConfig?.apiKey || "";
+        const projId = firebaseProjectId;
+        const dbId = firestoreDbId;
+        const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery?key=${apiKey}`;
+        const qRes = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            structuredQuery: {
+              from: [{ collectionId: "mfr_process_transfers" }],
+              orderBy: [{ field: { fieldPath: "createdAt" }, direction: "DESCENDING" }]
+            }
+          })
+        });
+        if (qRes.ok) {
+          const rawDocs = await qRes.json();
+          if (Array.isArray(rawDocs)) {
+            for (const r of rawDocs) {
+              if (r.document && r.document.fields) {
+                const docName = r.document.name || "";
+                const docId = docName.split("/").pop() || "";
+                const parsed = parseFirestoreFields(r.document.fields);
+                if (parsed) {
+                  transfersList.push({ transferId: parsed.transferId || docId, ...parsed });
+                }
+              }
+            }
+          }
+        }
+      }
+
+      return res.json({ success: true, transfers: transfersList });
+    } catch (err: any) {
+      console.error("GET /api/process-transfers error:", err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // POST /api/process-transfers
+  app.post("/api/process-transfers", async (req, res) => {
+    try {
+      const { jobCardNo, poNumber, orderNo, customer, itemName, itemCode, material, currentLocation, quantity, unit, toProcess, remarks, userId, userName, idempotencyKey } = req.body;
+
+      if (!jobCardNo || !quantity || quantity <= 0) {
+        return res.status(400).json({ success: false, error: "Valid Job Card and quantity > 0 are required." });
+      }
+      if (toProcess !== "Repacking" && toProcess !== "Replating") {
+        return res.status(400).json({ success: false, error: "Process destination must be either 'Repacking' or 'Replating'." });
+      }
+
+      const now = new Date();
+      const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+      const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+      const nowIso = now.toISOString();
+
+      let createdDoc: any = null;
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const admin = getFirestoreAdmin();
+          if (admin) {
+            createdDoc = await admin.runTransaction(async (transaction: any) => {
+              if (idempotencyKey) {
+                const idempSnap = await admin.collection("mfr_process_transfers").where("idempotencyKey", "==", idempotencyKey).limit(1).get();
+                if (!idempSnap.empty) return idempSnap.docs[0].data();
+              }
+
+              const allTransfers = await admin.collection("mfr_process_transfers").get();
+              let nextNum = 1;
+              allTransfers.forEach((d: any) => {
+                const t = d.data();
+                if (t.transferNo && t.transferNo.startsWith("STP-")) {
+                  const numPart = parseInt(t.transferNo.replace("STP-", ""), 10);
+                  if (!isNaN(numPart) && numPart >= nextNum) nextNum = numPart + 1;
+                }
+              });
+
+              const newTransferNo = `STP-${String(nextNum).padStart(6, "0")}`;
+              const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+              const initialStatus = toProcess === "Repacking" ? "Sent to Repacking" : "Sent to Replating";
+
+              const docData = {
+                transferId,
+                transferNo: newTransferNo,
+                jobCardNo,
+                poNumber: poNumber || "",
+                orderNo: orderNo || "",
+                customer: customer || "",
+                itemName: itemName || "",
+                itemCode: itemCode || "",
+                material: material || "",
+                currentLocation: currentLocation || "",
+                quantity: Number(quantity),
+                unit: unit || "PCS",
+                fromLocation: "Store",
+                toProcess,
+                status: initialStatus,
+                transferDate: dateStr,
+                transferTime: timeStr,
+                createdBy: userName || "Store User",
+                createdByUserId: userId || "store_user",
+                remarks: remarks || "",
+                idempotencyKey: idempotencyKey || "",
+                createdAt: nowIso,
+                updatedAt: nowIso
+              };
+
+              transaction.set(admin.collection("mfr_process_transfers").doc(transferId), docData);
+              return docData;
+            });
+          }
+        } catch (adminErr) {
+          adminSdkHasPermission = false;
+        }
+      }
+
+      if (!createdDoc) {
+        // Fallback to REST API
+        const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+        const newTransferNo = `STP-${String(Math.floor(Date.now() % 1000000)).padStart(6, "0")}`;
+        const initialStatus = toProcess === "Repacking" ? "Sent to Repacking" : "Sent to Replating";
+
+        createdDoc = {
+          transferId,
+          transferNo: newTransferNo,
+          jobCardNo,
+          poNumber: poNumber || "",
+          orderNo: orderNo || "",
+          customer: customer || "",
+          itemName: itemName || "",
+          itemCode: itemCode || "",
+          material: material || "",
+          currentLocation: currentLocation || "",
+          quantity: Number(quantity),
+          unit: unit || "PCS",
+          fromLocation: "Store",
+          toProcess,
+          status: initialStatus,
+          transferDate: dateStr,
+          transferTime: timeStr,
+          createdBy: userName || "Store User",
+          createdByUserId: userId || "store_user",
+          remarks: remarks || "",
+          idempotencyKey: idempotencyKey || "",
+          createdAt: nowIso,
+          updatedAt: nowIso
+        };
+
+        await firestoreRestSetDoc("mfr_process_transfers", transferId, createdDoc);
+      }
+
+      return res.json({ success: true, transfer: createdDoc });
+    } catch (err: any) {
+      console.error("POST /api/process-transfers error:", err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // POST /api/process-transfers/:id/receive
+  app.post("/api/process-transfers/:id/receive", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { userId, userName, remarks } = req.body;
+      const nowIso = new Date().toISOString();
+
+      let currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
+      if (!currentData) {
+        return res.status(404).json({ success: false, error: "Transfer not found" });
+      }
+
+      const newStatus = currentData.toProcess === "Repacking" ? "Received at Repacking" : "Received at Replating";
+      const updates = {
+        ...currentData,
+        status: newStatus,
+        receivedBy: userName || "Operator",
+        receivedByUserId: userId || "user",
+        receivedAt: nowIso,
+        remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}Received: ${remarks}` : currentData.remarks,
+        updatedAt: nowIso
+      };
+
+      await firestoreRestSetDoc("mfr_process_transfers", id, updates);
+      return res.json({ success: true, transfer: updates });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // POST /api/process-transfers/:id/complete
+  app.post("/api/process-transfers/:id/complete", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { completedQty, rejectionQty, rejectionReason, returnBin, returnRack, userId, userName, remarks } = req.body;
+      const nowIso = new Date().toISOString();
+
+      let currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
+      if (!currentData) {
+        return res.status(404).json({ success: false, error: "Transfer not found" });
+      }
+
+      const updates = {
+        ...currentData,
+        status: "Returned to Store",
+        completedBy: userName || "Operator",
+        completedByUserId: userId || "user",
+        completedAt: nowIso,
+        completedQty: Number(completedQty),
+        rejectionQty: Number(rejectionQty || 0),
+        rejectionReason: rejectionReason || "",
+        returnedBy: userName || "Operator",
+        returnedByUserId: userId || "user",
+        returnedAt: nowIso,
+        returnedQty: Number(completedQty),
+        returnLocationBin: returnBin || "",
+        returnRackNo: returnRack || "",
+        remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}Completed & Returned: ${remarks}` : currentData.remarks,
+        updatedAt: nowIso
+      };
+
+      await firestoreRestSetDoc("mfr_process_transfers", id, updates);
+      return res.json({ success: true, transfer: updates });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // Unmatched API routes return 404 JSON (preventing Vite SPA HTML fallback on API endpoints)
   app.all("/api/*", (req, res) => {
     res.status(404).json({ success: false, error: `API endpoint ${req.method} ${req.path} not found.` });
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  // Static asset serving for production / compiled frontend with aggressive immutable caching
+  const distPath = path.join(process.cwd(), 'dist');
+  if (process.env.NODE_ENV === "production" || fs.existsSync(path.join(distPath, 'index.html'))) {
+    app.use('/assets', express.static(path.join(distPath, 'assets'), {
+      maxAge: '1y',
+      immutable: true
+    }));
+    app.use(express.static(distPath, {
+      maxAge: '1h',
+      etag: true
+    }));
+    app.get('*', (req, res) => {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  } else {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, allowedHosts: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  async function ensurePawanSuperAdmin() {
+    try {
+      console.log("[AUTH] Ensuring Pawan Kumar is configured as sole Super Admin with PIN 1234...");
+      const pinHash = await bcrypt.hash("1234", 10);
+      const allDepartments = [
+        "Dispatch",
+        "Purchase",
+        "Raw Material Store",
+        "Production",
+        "Heat Treatment",
+        "Plating",
+        "Packing",
+        "Store",
+        "Verification",
+        "Admin"
+      ];
+
+      const pawanProfile = {
+        userId: "pawan-001",
+        name: "Pawan Kumar",
+        email: "pawan.kummar16@gmail.com",
+        role: "super_admin",
+        department: "Admin",
+        allowedDepartments: allDepartments,
+        accessList: allDepartments,
+        canOutsource: true,
+        active: true,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: new Date().toISOString()
+      };
+
+      const credPayload = {
+        userId: "pawan-001",
+        pinHash,
+        updatedAt: new Date().toISOString()
+      };
+
+      // Set Super Admin in local in-memory stores strictly by userId
+      customUsersStore["pawan-001"] = pawanProfile;
+      delete customUsersStore["pawan"];
+      delete customUsersStore["Pawan Kumar"];
+      saveUsersStore();
+
+      customCredsStore["pawan-001"] = pinHash;
+      delete customCredsStore["pawan"];
+      delete customCredsStore["Pawan Kumar"];
+      saveCredsStore();
+
+      // Clean legacy mock IDs
+      const legacyMockIds = ['u-1', 'u-2', 'u-3', 'u-4', 'u-5', 'u-6', 'u-7', 'u-8', 'u-2301', 'u-7857'];
+      for (const legId of legacyMockIds) {
+        delete customUsersStore[legId];
+        delete customCredsStore[legId];
+        deletedUserIds.add(legId.toLowerCase());
+        firestoreRestDeleteDoc("mfr_users", legId).catch(() => {});
+        firestoreRestDeleteDoc("mfr_user_credentials", legId).catch(() => {});
+      }
+
+      deletedUserIds.delete('pawan-001');
+      deletedUserIds.delete('pawan');
+      deletedUserIds.delete('pawan kumar');
+      saveDeletedUsers();
+
+      // Mirror to Firestore
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            for (const legId of legacyMockIds) {
+              await db.collection("mfr_users").doc(legId).delete().catch(() => {});
+              await db.collection("mfr_user_credentials").doc(legId).delete().catch(() => {});
+            }
+            await db.collection("mfr_users").doc("pawan-001").set(pawanProfile, { merge: true });
+            await db.collection("mfr_user_credentials").doc("pawan-001").set(credPayload, { merge: true });
+          }
+        } catch (e) {
+          adminSdkHasPermission = false;
+        }
+      }
+
+      await firestoreRestSetDoc("mfr_users", "pawan-001", pawanProfile).catch(() => {});
+      await firestoreRestSetDoc("mfr_user_credentials", "pawan-001", credPayload).catch(() => {});
+
+      console.log("[AUTH] Pawan Kumar configured as Super Admin (PIN: 1234). Legacy mock users purged.");
+    } catch (err) {
+      console.warn("[AUTH] Warning configuring Pawan Kumar super admin:", err);
+    }
+  }
+
+  app.listen(PORT, "0.0.0.0", async () => {
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    await initSystemState().catch(e => console.warn("Background system state init error:", e));
   });
 }
 

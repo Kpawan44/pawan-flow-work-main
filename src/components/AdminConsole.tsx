@@ -30,7 +30,8 @@ import {
   BellOff,
   MessageSquare,
   Send,
-  Share2
+  Share2,
+  AlertTriangle
 } from 'lucide-react';
 import { UserProfile, AuditLog, Department, JobCard, MaterialMovement, CompanyConfig, JobCardStatus } from '../types';
 import { getJobCardProcessMetrics } from '../lib/metrics';
@@ -47,7 +48,6 @@ import {
   downloadBackupAsJsonFile,
   DatabaseBackup 
 } from '../lib/backup';
-import { exportComprehensiveExcelBackup } from '../lib/excelExport';
 
 interface AdminConsoleProps {
   users: UserProfile[];
@@ -164,6 +164,7 @@ export default function AdminConsole({
   const [newUserDept, setNewUserDept] = useState<Department | 'Admin'>('Production');
   const [newUserRole, setNewUserRole] = useState<'staff' | 'admin' | 'super_admin'>('staff');
   const [newUserCanOutsource, setNewUserCanOutsource] = useState<boolean>(false);
+  const [newUserIsDeptHead, setNewUserIsDeptHead] = useState<boolean>(false);
   const [newUserAllowedDepts, setNewUserAllowedDepts] = useState<(Department | 'Admin')[]>([]);
   const [pinError, setPinError] = useState('');
 
@@ -228,6 +229,13 @@ export default function AdminConsole({
   } | null>(null);
   const [verificationInput, setVerificationInput] = useState('');
 
+  // --- FACTORY RESET SAFETY MODAL STATE ---
+  const [showFactoryResetModal, setShowFactoryResetModal] = useState<boolean>(false);
+  const [resetConfirmationText, setResetConfirmationText] = useState<string>('');
+  const [resetAdminPin, setResetAdminPin] = useState<string>('');
+  const [resetIsLoading, setResetIsLoading] = useState<boolean>(false);
+  const [resetErrorMessage, setResetErrorMessage] = useState<string>('');
+
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
     setTimeout(() => {
@@ -240,7 +248,12 @@ export default function AdminConsole({
     setConfirmDialog({ title, message, onConfirm, confirmText, cancelText, requireText });
   };
 
-  const isManager = currentUser?.role === 'admin' || currentUser?.role === 'super_admin';
+  const isManager = 
+    currentUser?.role === 'admin' || 
+    currentUser?.role === 'super_admin' || 
+    currentUser?.department === 'Admin' || 
+    currentUser?.name?.toLowerCase() === 'admin' || 
+    currentUser?.userId?.toLowerCase() === 'admin';
 
   // --- AUTO-BACKUP STATE AND HANDLERS ---
   const [autoBackupActive, setAutoBackupActive] = useState<boolean>(isAutoBackupEnabled());
@@ -520,19 +533,6 @@ export default function AdminConsole({
     }
     if (selectedUserIds.length === 0) return;
 
-    if (newRole === 'admin') {
-      for (const userId of selectedUserIds) {
-        const u = users.find(user => user.userId === userId);
-        if (u && u.department !== 'Admin') {
-          const otherDeptManager = (users || []).find(existing => existing.userId !== userId && existing.role === 'admin' && existing.department === u.department);
-          if (otherDeptManager) {
-            showToast(`Cannot upgrade '${u.name}' to manager. '${otherDeptManager.name}' is already registered as manager of ${u.department}.`, 'error');
-            return;
-          }
-        }
-      }
-    }
-
     showConfirm(
       "Bulk Update User Roles",
       `Are you sure you want to update the role of the ${selectedUserIds.length} selected users to ${newRole === 'super_admin' ? 'Super Admin' : newRole === 'admin' ? 'Admin Overseer' : 'Staff Operator'}?`,
@@ -618,14 +618,39 @@ export default function AdminConsole({
       }
     }
 
-    // Auto-generate a secure 4-digit PIN under the hood for backend compatibility
-    const generatedPin = Math.floor(1000 + Math.random() * 9000).toString();
+    // Validate 4-digit PIN format if entered
+    if (newUserPin && newUserPin.trim() && (newUserPin.trim().length !== 4 || !/^\d{4}$/.test(newUserPin.trim()))) {
+      const errorMsg = 'Security PIN must be exactly 4 numeric digits (e.g. 1234).';
+      setPinError(errorMsg);
+      showToast(errorMsg, 'error');
+      return;
+    }
 
-    // Enforce at most one manager per department
-    if (newUserRole === 'admin' && newUserDept !== 'Admin') {
-      const otherDeptManager = (users || []).find(u => u.role === 'admin' && u.department === newUserDept);
-      if (otherDeptManager) {
-        const errorMsg = `Only one Department Head is permitted for ${newUserDept}. '${otherDeptManager.name}' is already registered as manager.`;
+    // Use the entered 4-digit PIN or default to 1234
+    const userPin = (newUserPin && newUserPin.trim().length === 4) ? newUserPin.trim() : '1234';
+
+    // Enforce only one Super Admin across the entire system
+    if (newUserRole === 'super_admin') {
+      const existingSuperAdmin = (users || []).find(u => u.role === 'super_admin');
+      if (existingSuperAdmin) {
+        const errorMsg = `Only ONE Super Admin is permitted across the entire system. '${existingSuperAdmin.name}' is already the designated Super Admin.`;
+        setPinError(errorMsg);
+        showToast(errorMsg, 'error');
+        return;
+      }
+    }
+
+    // Enforce at most one ACTIVE Department Head per department
+    if (newUserIsDeptHead && newUserDept !== 'Admin') {
+      const otherDeptHead = (users || []).find(u => 
+        u.isDepartmentHead === true && 
+        u.department === newUserDept && 
+        u.active !== false && 
+        (u as any).status !== 'deleted' && 
+        !(u as any).deletedAt
+      );
+      if (otherDeptHead) {
+        const errorMsg = `Only one Department Head is permitted for ${newUserDept}. '${otherDeptHead.name}' is already registered as manager.`;
         setPinError(errorMsg);
         showToast(errorMsg, 'error');
         return;
@@ -643,26 +668,27 @@ export default function AdminConsole({
       allowedDepartments: allowedDepts,
       accessList: allowedDepts,
       role: newUserRole,
+      isDepartmentHead: newUserIsDeptHead,
       active: true,
       canOutsource: newUserCanOutsource,
-      createdAt: new Date().toISOString()
-    };
+      createdAt: new Date().toISOString(),
+      pin: userPin
+    } as any;
 
     await onSaveUser(newProfile);
 
-    // Securely hash and store PIN on the server via Admin SDK
     try {
-      await DBService.setUserPin(newUserId, generatedPin);
+      await DBService.setUserPin(newUserId, userPin);
     } catch (err: any) {
       console.warn("Could not set PIN via API:", err);
-      showToast(err.message || "User created, but PIN configuration failed. Please set PIN.", 'error');
     }
 
-    onLogAction('CREATE_USER', `Created new user account '${newProfile.name}' for department ${newProfile.department} with role ${newUserRole}${newUserCanOutsource ? ' [Outsource Authorized]' : ''}${newProfile.allowedDepartments?.length ? ` [Multi-Dept Allowed: ${newProfile.allowedDepartments.join(', ')}]` : ''}`);
+    onLogAction('CREATE_USER', `Created new user account '${newProfile.name}' for department ${newProfile.department} with role ${newUserRole}${newProfile.isDepartmentHead ? ' [Department Head]' : ''}${newUserCanOutsource ? ' [Outsource Authorized]' : ''}${newProfile.allowedDepartments?.length ? ` [Multi-Dept Allowed: ${newProfile.allowedDepartments.join(', ')}]` : ''}`);
     
     // Reset Form
     setNewUserName('');
     setNewUserPin('');
+    setNewUserIsDeptHead(false);
     setNewUserCanOutsource(false);
     setNewUserAllowedDepts([]);
     setShowAddForm(false);
@@ -1144,19 +1170,57 @@ export default function AdminConsole({
                 className="w-full bg-white dark:bg-slate-800 disabled:bg-slate-100 dark:disabled:bg-slate-900/50 disabled:text-slate-400 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-100 focus:outline-none"
               >
                 <option value="staff">Staff Operator (Privilege Tier 2)</option>
-                {currentUser?.role === 'super_admin' && (
+                {(currentUser?.role === 'super_admin' || currentUser?.department === 'Admin') && (
                   <>
                     <option value="admin">Admin Overseer / Dept Head (Privilege Tier 1)</option>
-                    <option value="super_admin">Super Admin Master (Privilege Tier 0)</option>
+                    {!users.some(u => u.role === 'super_admin') && (
+                      <option value="super_admin">Super Admin Master (Privilege Tier 0)</option>
+                    )}
                   </>
                 )}
               </select>
+              {users.some(u => u.role === 'super_admin') && (
+                <p className="text-[10px] text-purple-600 dark:text-purple-400 mt-1 font-sans">
+                  👑 System Super Admin is assigned to: <strong>{users.find(u => u.role === 'super_admin')?.name}</strong> (Only 1 allowed).
+                </p>
+              )}
               {currentUser?.role === 'admin' && (
                 <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1 font-sans">
                   Only Super Admins can assign manager roles.
                 </p>
               )}
             </div>
+
+            <div className="col-span-1 md:col-span-2">
+              <label className="block text-slate-400 font-medium mb-1">Security PIN (4 digits)</label>
+              <input
+                type="text"
+                maxLength={4}
+                placeholder="1234"
+                value={newUserPin}
+                onChange={e => setNewUserPin(e.target.value.replace(/\D/g, ''))}
+                className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6] font-mono tracking-widest text-center"
+              />
+              <p className="text-[10px] text-slate-400 mt-1 font-sans">
+                Set employee 4-digit login PIN (default: <strong>1234</strong>).
+              </p>
+            </div>
+
+            {(currentUser?.role === 'super_admin' || currentUser?.department === 'Admin') && newUserDept !== 'Admin' && (
+              <div className="col-span-1 md:col-span-2 pt-1">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={newUserIsDeptHead}
+                    onChange={e => setNewUserIsDeptHead(e.target.checked)}
+                    className="rounded border-slate-300 dark:border-slate-700 text-[#3B82F6] focus:ring-[#3B82F6] h-4 w-4"
+                  />
+                  <span className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                    Designate as Official Department Head / Line Manager for {newUserDept}
+                  </span>
+                </label>
+              </div>
+            )}
 
             <div className="col-span-1 md:col-span-2 pt-1">
               <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -2267,7 +2331,8 @@ export default function AdminConsole({
               <div className="flex flex-wrap gap-2.5 w-full sm:w-auto shrink-0">
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
+                    const { exportComprehensiveExcelBackup } = await import('../lib/excelExport');
                     exportComprehensiveExcelBackup(jobCards, movements, auditLogs);
                     showToast("Downloaded multi-sheet Excel backup workbook!", "success");
                     onLogAction('EXPORT_EXCEL_BACKUP', 'Downloaded complete 19-sheet Excel backup workbook.');
@@ -2416,30 +2481,17 @@ export default function AdminConsole({
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-rose-100/40 dark:border-rose-900/10">
               <div className="space-y-1">
-                <span className="text-xs font-bold text-slate-800 dark:text-slate-200">Reset System to Pre-Seeded Default State</span>
-                <p className="text-[10px] text-slate-400 dark:text-slate-500">Reinitializes Firestore and local storage using initial default factory datasets.</p>
+                <span className="text-xs font-bold text-slate-800 dark:text-slate-200">Permanent System Factory Reset</span>
+                <p className="text-[10px] text-slate-400 dark:text-slate-500">Permanently erases all operational collections, movements, job cards, credentials, and accounts.</p>
               </div>
 
               <button
                 type="button"
                 onClick={() => {
-                  showConfirm(
-                    "CRITICAL CONFIRMATION: Factory Reset System",
-                    "Are you sure you want to trigger a FULL SYSTEM RESET? This will permanently wipe all active job cards, custom material movements, notifications, audit logs, and user profiles, restoring everything to the default demo seed state.\n\nTo confirm, type FACTORY RESET below:",
-                    async () => {
-                      try {
-                        await DBService.factoryReset(currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
-                        showToast("System factory reset completed successfully! Re-seeded initial default datasets.", "success");
-                        if (onRefreshJobs) onRefreshJobs();
-                      } catch (err: any) {
-                        console.error("Factory Reset failed", err);
-                        showToast(`Factory Reset failed: ${err.message || String(err)}`, "error");
-                      }
-                    },
-                    "Reset System",
-                    "Cancel",
-                    "FACTORY_RESET"
-                  );
+                  setShowFactoryResetModal(true);
+                  setResetConfirmationText('');
+                  setResetAdminPin('');
+                  setResetErrorMessage('');
                 }}
                 className="w-full sm:w-auto flex items-center justify-center gap-1.5 bg-rose-600 hover:bg-rose-700 text-white font-sans font-bold text-xs py-2.5 px-4 rounded-xl shadow-sm transition border border-rose-750 cursor-pointer"
               >
@@ -3311,12 +3363,18 @@ export default function AdminConsole({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  if (confirmDeleteId) {
-                    onDeleteUser(confirmDeleteId, confirmDeleteName);
-                  }
+                onClick={async () => {
+                  const targetId = confirmDeleteId;
+                  const targetName = confirmDeleteName;
                   setConfirmDeleteId(null);
                   setConfirmDeleteName('');
+                  if (targetId) {
+                    try {
+                      await onDeleteUser(targetId, targetName);
+                    } catch (err: any) {
+                      console.error("Delete failed:", err);
+                    }
+                  }
                 }}
                 className="bg-red-600 text-white hover:bg-red-500 border border-red-700 px-4 py-2.5 rounded-lg transition shadow-sm cursor-pointer"
               >
@@ -3617,6 +3675,112 @@ export default function AdminConsole({
               >
                 <Check className="h-4 w-4" />
                 Save Department Authority
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FACTORY RESET DANGEROUS ACTION MODAL */}
+      {showFactoryResetModal && (
+        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-900 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3 text-rose-600 dark:text-rose-400">
+              <div className="p-3 bg-rose-100 dark:bg-rose-950/60 rounded-2xl">
+                <AlertTriangle className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="font-sans font-extrabold text-base text-slate-900 dark:text-white uppercase tracking-wider">
+                  Permanent Factory Reset
+                </h3>
+                <span className="text-[10px] font-mono text-rose-500 font-bold uppercase tracking-widest">
+                  IRREVERSIBLE DESTRUCTION
+                </span>
+              </div>
+            </div>
+
+            <div className="bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900/30 rounded-2xl p-4 text-xs text-rose-900 dark:text-rose-200 space-y-2 leading-relaxed">
+              <p className="font-bold">This will permanently and irreversibly erase:</p>
+              <ul className="list-disc list-inside space-y-1 text-[11px] font-medium text-rose-800 dark:text-rose-300">
+                <li>All user profiles & security credentials</li>
+                <li>All job cards & manufacturing progress</li>
+                <li>All material movements & store records</li>
+                <li>All outsource orders, items, and audit trails</li>
+              </ul>
+              <p className="text-[11px] pt-1 text-slate-600 dark:text-slate-400">The application will transition to a clean first-run state requiring a new Super Admin account.</p>
+            </div>
+
+            {resetErrorMessage && (
+              <div className="p-3 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/40 rounded-xl text-xs text-red-600 dark:text-red-400 font-semibold">
+                {resetErrorMessage}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Type <span className="font-mono text-rose-600 dark:text-rose-400 font-extrabold">FACTORY RESET</span> to confirm:
+                </label>
+                <input
+                  type="text"
+                  placeholder="FACTORY RESET"
+                  value={resetConfirmationText}
+                  onChange={e => setResetConfirmationText(e.target.value)}
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-white font-mono font-bold focus:outline-none focus:border-rose-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  Enter your current 4-digit Super Admin PIN:
+                </label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  placeholder="••••"
+                  value={resetAdminPin}
+                  onChange={e => setResetAdminPin(e.target.value)}
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-900 dark:text-white font-mono font-bold tracking-[0.3em] focus:outline-none focus:border-rose-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2.5 pt-2">
+              <button
+                type="button"
+                disabled={resetIsLoading}
+                onClick={() => setShowFactoryResetModal(false)}
+                className="flex-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold py-3 rounded-xl transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={resetConfirmationText !== 'FACTORY RESET' || resetAdminPin.length !== 4 || resetIsLoading}
+                onClick={async () => {
+                  setResetIsLoading(true);
+                  setResetErrorMessage('');
+                  try {
+                    await DBService.factoryReset(resetAdminPin);
+                    showToast("Factory reset completed successfully. Reloading system...", "success");
+                    setTimeout(() => {
+                      window.location.reload();
+                    }, 1000);
+                  } catch (err: any) {
+                    setResetErrorMessage(err.message || 'Factory reset failed');
+                    setResetIsLoading(false);
+                  }
+                }}
+                className="flex-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-bold py-3 rounded-xl shadow-md transition border border-rose-700 cursor-pointer flex items-center justify-center gap-2"
+              >
+                {resetIsLoading ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    <span>Erasing System...</span>
+                  </>
+                ) : (
+                  <span>PERMANENTLY DELETE EVERYTHING</span>
+                )}
               </button>
             </div>
           </div>

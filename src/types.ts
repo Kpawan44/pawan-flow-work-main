@@ -26,10 +26,10 @@ export interface UserProfile {
   role: UserRole;
   active: boolean;
   status?: 'active' | 'inactive';
+  isDepartmentHead?: boolean; // Dedicated flag for department manager / head
   createdAt: string;
+  updatedAt?: string;
   lastLogin?: string;
-  pin?: string;
-  pinHash?: string;
   canOutsource?: boolean; // Authorized Outsourcing Assignee
 }
 
@@ -325,6 +325,69 @@ export interface MaterialMovement {
   deletedByUserId?: string;
   deletedByUserName?: string;
   deletedDate?: string;
+}
+
+export type ProcessTransferType = 'Repacking' | 'Replating';
+
+export type ProcessTransferStatus = 
+  | 'Sent to Repacking'
+  | 'Received at Repacking'
+  | 'Repacking in Process'
+  | 'Repacking Completed'
+  | 'Sent to Replating'
+  | 'Received at Replating'
+  | 'Replating in Process'
+  | 'Replating Completed'
+  | 'Returned to Store';
+
+export interface ProcessTransfer {
+  transferId: string; // Firestore document ID
+  transferNo: string; // e.g. STP-000001, STP-000002
+  jobCardNo: string;
+  poNumber?: string;
+  orderNo?: string;
+  customer: string;
+  itemName: string;
+  itemCode?: string;
+  material?: string;
+  currentLocation?: string; // e.g. Rack / Bin from store
+  quantity: number;
+  unit: 'PCS' | 'KGS';
+  fromLocation: string; // 'Store'
+  toProcess: ProcessTransferType; // 'Repacking' | 'Replating'
+  status: ProcessTransferStatus;
+  transferDate: string;
+  transferTime: string;
+  createdBy: string;
+  createdByUserId: string;
+
+  // Lifecycle progression fields
+  receivedBy?: string;
+  receivedByUserId?: string;
+  receivedAt?: string;
+
+  inProcessBy?: string;
+  inProcessByUserId?: string;
+  inProcessAt?: string;
+
+  completedBy?: string;
+  completedByUserId?: string;
+  completedAt?: string;
+  completedQty?: number;
+  rejectionQty?: number;
+  rejectionReason?: string;
+
+  returnedBy?: string;
+  returnedByUserId?: string;
+  returnedAt?: string;
+  returnedQty?: number;
+  returnLocationBin?: string;
+  returnRackNo?: string;
+
+  remarks?: string;
+  idempotencyKey?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AppNotification {

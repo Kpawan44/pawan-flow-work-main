@@ -86,7 +86,7 @@ export default function Sidebar({
   return (
     <aside className="w-full h-full bg-[#0F172A] text-[#E2E8F0] flex flex-col border-r border-[#1E293B]">
       {/* Top Header Logo */}
-      <div className="p-5 border-b border-[#1E293B] flex items-center justify-between gap-2 text-ellipsis overflow-hidden">
+      <div className="p-5 pt-[max(env(safe-area-inset-top,0px),1.75rem)] lg:pt-5 border-b border-[#1E293B] flex items-center justify-between gap-2 text-ellipsis overflow-hidden">
         <div className="flex items-center gap-3 min-w-0">
           <AppLogo size="sm" />
           <div className="min-w-0">

@@ -6,11 +6,12 @@ import { JobCard } from '../types';
 interface ScannerModalProps {
   isOpen: boolean;
   onClose: () => void;
-  jobCards: JobCard[];
-  onSelectJobCard: (jobCardNo: string) => void;
+  jobCards?: JobCard[];
+  onSelectJobCard?: (jobCardNo: string) => void;
+  onScan?: (scannedText: string) => void;
 }
 
-export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCard }: ScannerModalProps) {
+export default function ScannerModal({ isOpen, onClose, jobCards = [], onSelectJobCard, onScan }: ScannerModalProps) {
   const [activeTab, setActiveTab] = useState<'camera' | 'simulator' | 'manual'>('camera');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [scanSuccessMsg, setScanSuccessMsg] = useState<string | null>(null);
@@ -47,13 +48,37 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
 
   // Safe stop camera helper
   const stopCamera = async () => {
-    if (qrCodeInstanceRef.current && qrCodeInstanceRef.current.isScanning) {
+    if (qrCodeInstanceRef.current) {
       try {
-        await qrCodeInstanceRef.current.stop();
+        if (qrCodeInstanceRef.current.isScanning) {
+          await qrCodeInstanceRef.current.stop();
+        }
+        await qrCodeInstanceRef.current.clear();
       } catch (err) {
-        console.warn("Error while stopping camera scanner", err);
+        console.warn("Error while stopping camera scanner:", err);
       }
+      qrCodeInstanceRef.current = null;
     }
+
+    // Explicitly release any media stream video tracks attached to the container
+    try {
+      const container = document.getElementById('qr-camera-stream');
+      if (container) {
+        const videos = container.querySelectorAll('video');
+        videos.forEach((video) => {
+          if (video.srcObject && video.srcObject instanceof MediaStream) {
+            video.srcObject.getTracks().forEach((track) => {
+              track.stop();
+            });
+            video.srcObject = null;
+          }
+        });
+        container.innerHTML = '';
+      }
+    } catch (e) {
+      console.warn("Error releasing video stream tracks:", e);
+    }
+
     setCameraInitialized(false);
     setTorchOn(false);
   };
@@ -63,15 +88,6 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
     if (!qrCodeInstanceRef.current) return;
     try {
       const newTorchState = !torchOn;
-      // Depending on the version of html5-qrcode, this might differ, 
-      // but standard approach is applying constraints.
-      // We need the video track to apply constraints.
-      // This is a simplified implementation.
-      // Since Html5Qrcode doesn't have a direct toggleTorch, 
-      // we assume it might work via applyVideoConstraints if the browser supports it.
-      // A more robust way would be to get the track from the instance.
-      
-      // Attempt using applyVideoConstraints
       await qrCodeInstanceRef.current.applyVideoConstraints({
         advanced: [{ torch: newTorchState } as any]
       });
@@ -85,13 +101,60 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
   const startCamera = async () => {
     setCameraError(null);
     setScanSuccessMsg(null);
+    setCameraInitialized(false);
+
     try {
-      // Stop existing scanning if any
+      // 1. Clean up any previous camera instance first
       await stopCamera();
 
-      // Ensure the target element exists before initialization
+      // 2. Request camera stream to trigger Android/Capacitor runtime permission prompt
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        try {
+          const testStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' }
+          });
+          // Immediately stop test tracks so Html5Qrcode gets exclusive camera lock
+          testStream.getTracks().forEach((track) => track.stop());
+        } catch (permErr: any) {
+          const pName = permErr.name || '';
+          const pMsg = permErr.message || String(permErr);
+          if (
+            pName === 'NotAllowedError' || 
+            pName === 'PermissionDeniedError' || 
+            pMsg.includes('Permission') || 
+            pMsg.includes('denied')
+          ) {
+            setCameraError(
+              "Camera permission is required to scan QR codes. Please allow Camera access in Android Settings."
+            );
+            return;
+          } else if (
+            pName === 'NotFoundError' || 
+            pName === 'DevicesNotFoundError' || 
+            pMsg.includes('not found')
+          ) {
+            setCameraError(
+              "No physical camera device was found on this system. Please use 'Scanner Sim' or 'Manual Match' tab instead."
+            );
+            return;
+          } else if (
+            pName === 'NotReadableError' || 
+            pName === 'TrackStartError' || 
+            pMsg.includes('in use')
+          ) {
+            setCameraError(
+              "Camera is currently in use by another application or locked. Please close other camera apps and retry."
+            );
+            return;
+          }
+          throw permErr;
+        }
+      }
+
+      // 3. Ensure target DOM element exists
       const element = document.getElementById('qr-camera-stream');
       if (!element) return;
+      element.innerHTML = '';
 
       const html5QrCode = new Html5Qrcode('qr-camera-stream');
       qrCodeInstanceRef.current = html5QrCode;
@@ -109,7 +172,7 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
           handleSuccessfulScan(decodedText);
         },
         () => {
-          // Silent callback for error scan to avoid console spam
+          // Silent callback for un-decoded video frames
         }
       );
       setCameraInitialized(true);
@@ -124,16 +187,29 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
         err.name === 'DevicesNotFoundError'
       ) {
         setCameraError(
-          "No physical webcam/camera device was found on this system. Please use the 'Scanner Sim' or 'Manual Match' tab instead."
+          "No physical camera device was found on this system. Please use 'Scanner Sim' or 'Manual Match' tab instead."
         );
-      } else if (errMsg.includes('NotAllowedError') || errMsg.includes('Permission denied') || err.name === 'NotAllowedError') {
+      } else if (
+        errMsg.includes('NotAllowedError') || 
+        errMsg.includes('Permission denied') || 
+        err.name === 'NotAllowedError' ||
+        err.name === 'PermissionDeniedError'
+      ) {
         setCameraError(
-          "Camera permission denied by the browser. Please grant camera permission or check your security frame policies."
+          "Camera permission is required to scan QR codes. Please allow Camera access in Android Settings."
+        );
+      } else if (
+        errMsg.includes('NotReadableError') ||
+        errMsg.includes('Could not start video source') ||
+        err.name === 'NotReadableError' ||
+        err.name === 'TrackStartError'
+      ) {
+        setCameraError(
+          "Camera is currently in use by another application or locked. Please close other camera apps and retry."
         );
       } else {
         setCameraError(
-          err.message || 
-          "Webcam permissions denied, or another application is using the camera. Please check your browser's frame security policies."
+          "Camera permission is required to scan QR codes. Please allow Camera access in Android Settings."
         );
       }
     }
@@ -143,6 +219,12 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
   const handleSuccessfulScan = (code: string) => {
     const trimmedCode = code.trim();
     if (!trimmedCode) return;
+
+    if (onScan) {
+      playBeep();
+      onScan(trimmedCode);
+      return;
+    }
 
     let matchedJob: JobCard | undefined;
 
@@ -254,28 +336,7 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
   // Manage Camera startup based on Tab Selection and Modal Open State
   useEffect(() => {
     if (isOpen) {
-      const checkCameraPresence = async () => {
-        try {
-          if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-            setActiveTab('simulator');
-            setCameraError("Camera APIs are blocked or not supported in this browser context (e.g., non-secure contexts or inside an iframe).");
-            return;
-          }
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const hasVideoInput = devices.some(device => device.kind === 'videoinput');
-          if (!hasVideoInput) {
-            setActiveTab('simulator');
-            setCameraError("No physical webcam/camera detected on this system. Defaulting to Scanner Simulator.");
-          }
-        } catch (e) {
-          console.warn("Failed to check camera presence:", e);
-        }
-      };
-
-      checkCameraPresence();
-
       if (activeTab === 'camera') {
-        // Wait a tick for DOM element to mount
         const timer = setTimeout(() => {
           startCamera();
         }, 150);
@@ -423,16 +484,24 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
                   <div className="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center p-6 text-center text-slate-300 gap-3 z-20">
                     <AlertCircle className="h-10 w-10 text-rose-500" />
                     <div>
-                      <h4 className="text-xs font-bold text-white uppercase tracking-wider">Webcam Access Blocked</h4>
-                      <p className="text-[10.5px] text-slate-400 mt-1.5 leading-relaxed">
+                      <h4 className="text-xs font-bold text-white uppercase tracking-wider">Camera Access</h4>
+                      <p className="text-[10.5px] text-slate-300 mt-1.5 leading-relaxed font-medium">
                         {cameraError}
                       </p>
-                      <button 
-                        onClick={startCamera}
-                        className="mt-4 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 text-[#818CF8] text-[10px] font-bold tracking-wide transition border border-[#818CF8]/20 cursor-pointer"
-                      >
-                        Try Re-initializing Camera
-                      </button>
+                      <div className="flex items-center justify-center gap-2 mt-4">
+                        <button 
+                          onClick={startCamera}
+                          className="px-3 py-1.5 rounded-lg bg-[#4F46E5] hover:bg-[#4338CA] text-white text-[11px] font-bold tracking-wide transition shadow-sm cursor-pointer"
+                        >
+                          Retry Camera
+                        </button>
+                        <button 
+                          onClick={() => setActiveTab('manual')}
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-750 text-slate-300 text-[11px] font-bold tracking-wide transition border border-slate-700 cursor-pointer"
+                        >
+                          Manual Match
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}

@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  pmw-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pmw-manufacturing-tracker
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - FIREBASE_PROJECT_ID=my-project-9ca72
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

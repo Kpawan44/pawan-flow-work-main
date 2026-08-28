@@ -30,18 +30,23 @@ import {
   Filter,
   User,
   Building,
-  FileText
+  FileText,
+  Send,
+  RotateCcw
 } from 'lucide-react';
-import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer } from '../types';
 import { DBService } from '../lib/firebase';
 import RawMaterialRequestModal, { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
+import StoreProcessTransferModal from './StoreProcessTransferModal';
+import ProcessTransferListView from './ProcessTransferListView';
 
 interface DepartmentOperationsProps {
   currentUser: UserProfile;
   jobCards: JobCard[];
   movements: MaterialMovement[];
+  processTransfers?: ProcessTransfer[];
   companyConfig?: CompanyConfig | null;
   onCreateJobCard: (job: any, initialMovementOverride?: any) => void;
   onUpdateJobCard: (jobCardNo: string, updates: Partial<JobCard>) => void;
@@ -76,6 +81,18 @@ interface DepartmentOperationsProps {
   onRejectMovement: (movementId: string, remarks: string) => void;
   onSelectJobCard: (jobCard: JobCard) => void;
   onQuickTransfer?: (jobCard: JobCard) => void;
+  onCreateProcessTransfer?: (transfer: any) => Promise<void>;
+  onReceiveProcessTransfer?: (transferId: string, remarks?: string) => Promise<void>;
+  onStartProcessTransfer?: (transferId: string, remarks?: string) => Promise<void>;
+  onCompleteProcessTransfer?: (
+    transferId: string, 
+    completedQty: number, 
+    rejectionQty: number, 
+    reason: string, 
+    bin: string, 
+    rack: string, 
+    remarks?: string
+  ) => Promise<void>;
 }
 
 export const PREDEFINED_RAW_MATERIALS = [
@@ -92,6 +109,7 @@ export default function DepartmentOperations({
   currentUser,
   jobCards,
   movements,
+  processTransfers = [],
   companyConfig,
   onCreateJobCard,
   onUpdateJobCard,
@@ -99,7 +117,11 @@ export default function DepartmentOperations({
   onAcceptMovement,
   onRejectMovement,
   onSelectJobCard,
-  onQuickTransfer
+  onQuickTransfer,
+  onCreateProcessTransfer,
+  onReceiveProcessTransfer,
+  onStartProcessTransfer,
+  onCompleteProcessTransfer
 }: DepartmentOperationsProps) {
   const isRawMaterialCompulsory = companyConfig?.requireRawMaterialForProduction !== false;
   
@@ -145,7 +167,9 @@ export default function DepartmentOperations({
 
   const activeDept = selectedDept;
 
-  const [activeSubView, setActiveSubView] = useState<'incoming' | 'incoming_store' | 'operations' | 'completed' | 'assembly'>('operations');
+  const [activeSubView, setActiveSubView] = useState<'incoming' | 'incoming_store' | 'operations' | 'completed' | 'assembly' | 'process_transfers' | 'repacking' | 'replating'>('operations');
+  const [showStoreProcessModal, setShowStoreProcessModal] = useState<boolean>(false);
+  const [preselectedStoreJobNo, setPreselectedStoreJobNo] = useState<string | null>(null);
 
   // Reset activeSubView if user switches department away
   useEffect(() => {
@@ -153,6 +177,15 @@ export default function DepartmentOperations({
       setActiveSubView('operations');
     }
     if (activeSubView === 'assembly' && activeDept !== 'Packing') {
+      setActiveSubView('operations');
+    }
+    if (activeSubView === 'process_transfers' && activeDept !== 'Store') {
+      setActiveSubView('operations');
+    }
+    if (activeSubView === 'repacking' && activeDept !== 'Packing') {
+      setActiveSubView('operations');
+    }
+    if (activeSubView === 'replating' && activeDept !== 'Plating') {
       setActiveSubView('operations');
     }
   }, [activeDept, activeSubView]);
@@ -2082,6 +2115,19 @@ Please adjust the quantity or request additional raw material issue.`);
                 <span>🧩 Assemble Multi-Item Product</span>
               </button>
             )}
+            {activeDept === 'Store' && (
+              <button
+                type="button"
+                onClick={() => {
+                  setPreselectedStoreJobNo(null);
+                  setShowStoreProcessModal(true);
+                }}
+                className="w-full sm:w-auto px-3.5 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-lg font-bold text-[11px] sm:text-xs uppercase tracking-wider transition-all flex items-center justify-center gap-2 shadow-sm border border-emerald-500/30 cursor-pointer min-h-[40px]"
+              >
+                <Send className="h-4 w-4" />
+                <span>Send for Process</span>
+              </button>
+            )}
             <div className="flex flex-col sm:flex-row bg-slate-950 p-1.5 sm:p-1 rounded-xl border border-slate-800 text-xs text-slate-400 w-full md:w-auto gap-1">
               <button
                 onClick={() => setActiveSubView('incoming')}
@@ -2111,6 +2157,22 @@ Please adjust the quantity or request additional raw material issue.`);
                   )}
                 </button>
               )}
+              {activeDept === 'Store' && (
+                <button
+                  onClick={() => setActiveSubView('process_transfers')}
+                  className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
+                    activeSubView === 'process_transfers' ? 'bg-emerald-900 text-emerald-100 border border-emerald-500/40 shadow-sm' : 'hover:text-white text-slate-400'
+                  }`}
+                >
+                  <RotateCcw className="h-3.5 w-3.5 text-emerald-300" />
+                  <span>Process Transfers</span>
+                  {(processTransfers || []).filter(t => t.status !== 'Returned to Store').length > 0 && (
+                    <span className="bg-emerald-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
+                      {(processTransfers || []).filter(t => t.status !== 'Returned to Store').length}
+                    </span>
+                  )}
+                </button>
+              )}
               <button
                 onClick={() => setActiveSubView('operations')}
                 className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
@@ -2120,17 +2182,49 @@ Please adjust the quantity or request additional raw material issue.`);
                 Active Floor Jobs
               </button>
               {activeDept === 'Packing' && (
+                <>
+                  <button
+                    onClick={() => setActiveSubView('repacking')}
+                    className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
+                      activeSubView === 'repacking' ? 'bg-pink-900 text-pink-100 border border-pink-500/40 shadow-sm' : 'hover:text-white text-slate-400'
+                    }`}
+                  >
+                    <PackageCheck className="h-3.5 w-3.5 text-pink-300" />
+                    <span>Repacking (Store)</span>
+                    {(processTransfers || []).filter(t => t.toProcess === 'Repacking' && t.status !== 'Returned to Store').length > 0 && (
+                      <span className="bg-pink-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
+                        {(processTransfers || []).filter(t => t.toProcess === 'Repacking' && t.status !== 'Returned to Store').length}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => setActiveSubView('assembly')}
+                    className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
+                      activeSubView === 'assembly' ? 'bg-purple-900 text-purple-100 border border-purple-500/40 shadow-sm' : 'hover:text-white text-slate-400'
+                    }`}
+                  >
+                    <Layers className="h-3.5 w-3.5 text-purple-300" />
+                    <span>🧩 Assembly Management</span>
+                    {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length > 0 && (
+                      <span className="bg-purple-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
+                        {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length}
+                      </span>
+                    )}
+                  </button>
+                </>
+              )}
+              {activeDept === 'Plating' && (
                 <button
-                  onClick={() => setActiveSubView('assembly')}
+                  onClick={() => setActiveSubView('replating')}
                   className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
-                    activeSubView === 'assembly' ? 'bg-purple-900 text-purple-100 border border-purple-500/40 shadow-sm' : 'hover:text-white text-slate-400'
+                    activeSubView === 'replating' ? 'bg-purple-900 text-purple-100 border border-purple-500/40 shadow-sm' : 'hover:text-white text-slate-400'
                   }`}
                 >
-                  <Layers className="h-3.5 w-3.5 text-purple-300" />
-                  <span>🧩 Assembly Management</span>
-                  {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length > 0 && (
+                  <Sparkles className="h-3.5 w-3.5 text-purple-300" />
+                  <span>Replating (Store)</span>
+                  {(processTransfers || []).filter(t => t.toProcess === 'Replating' && t.status !== 'Returned to Store').length > 0 && (
                     <span className="bg-purple-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
-                      {jobCards.filter(j => j.isAssemblyProduct || j.packingDetails?.isAssemblyProduct).length}
+                      {(processTransfers || []).filter(t => t.toProcess === 'Replating' && t.status !== 'Returned to Store').length}
                     </span>
                   )}
                 </button>
@@ -5935,6 +6029,21 @@ Please adjust the quantity or request additional raw material issue.`);
                                 Record Process Metrics
                               </button>
                             )}
+
+                            {activeDept === 'Store' && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setPreselectedStoreJobNo(job.jobCardNo);
+                                  setShowStoreProcessModal(true);
+                                }}
+                                className="bg-emerald-600 hover:bg-emerald-500 text-white text-[11.5px] font-bold py-1.5 px-3 rounded-md transition flex items-center gap-1 leading-none cursor-pointer"
+                                title="Send this store batch for Repacking or Replating"
+                              >
+                                <Send className="h-3.5 w-3.5" />
+                                <span>Send for Process</span>
+                              </button>
+                            )}
                           </div>
                         </div>
 
@@ -6578,6 +6687,90 @@ Please adjust the quantity or request additional raw material issue.`);
                   })}
                 </div>
               )}
+            </div>
+          )}
+
+          {/* B3. PROCESS TRANSFERS FOR STORE */}
+          {activeSubView === 'process_transfers' && activeDept === 'Store' && (
+            <div className="space-y-4">
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2 text-emerald-600 dark:text-emerald-400">
+                    <RotateCcw className="h-4 w-4" />
+                    <span>Store Process Transfers (Repacking & Replating)</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    Real-time tracking of internal material batches transferred from Store to downstream repacking or replating processes.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPreselectedStoreJobNo(null);
+                    setShowStoreProcessModal(true);
+                  }}
+                  className="px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-550 hover:to-teal-550 text-white rounded-xl text-xs font-extrabold shadow-sm active:scale-98 transition flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  <span>New Process Transfer</span>
+                </button>
+              </div>
+
+              <ProcessTransferListView
+                transfers={processTransfers || []}
+                currentUser={currentUser}
+                onReceive={onReceiveProcessTransfer || (async () => {})}
+                onStartProcess={onStartProcessTransfer || (async () => {})}
+                onCompleteAndReturn={onCompleteProcessTransfer || (async () => {})}
+              />
+            </div>
+          )}
+
+          {/* B4. REPACKING SUBVIEW FOR PACKING DEPARTMENT */}
+          {activeSubView === 'repacking' && activeDept === 'Packing' && (
+            <div className="space-y-4">
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
+                <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2 text-pink-600 dark:text-pink-400">
+                  <PackageCheck className="h-4 w-4" />
+                  <span>Repacking Queue (Transfers from Store)</span>
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Receive material from Store, perform custom repacking/boxing, and return completed batches back to Store stock.
+                </p>
+              </div>
+
+              <ProcessTransferListView
+                transfers={processTransfers || []}
+                processType="Repacking"
+                currentUser={currentUser}
+                onReceive={onReceiveProcessTransfer || (async () => {})}
+                onStartProcess={onStartProcessTransfer || (async () => {})}
+                onCompleteAndReturn={onCompleteProcessTransfer || (async () => {})}
+              />
+            </div>
+          )}
+
+          {/* B5. REPLATING SUBVIEW FOR PLATING DEPARTMENT */}
+          {activeSubView === 'replating' && activeDept === 'Plating' && (
+            <div className="space-y-4">
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
+                <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2 text-purple-600 dark:text-purple-400">
+                  <Sparkles className="h-4 w-4" />
+                  <span>Replating Queue (Transfers from Store)</span>
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Receive material from Store, perform surface replating/treatment, and return completed batches back to Store stock.
+                </p>
+              </div>
+
+              <ProcessTransferListView
+                transfers={processTransfers || []}
+                processType="Replating"
+                currentUser={currentUser}
+                onReceive={onReceiveProcessTransfer || (async () => {})}
+                onStartProcess={onStartProcessTransfer || (async () => {})}
+                onCompleteAndReturn={onCompleteProcessTransfer || (async () => {})}
+              />
             </div>
           )}
 
@@ -7653,6 +7846,34 @@ Please adjust the quantity or request additional raw material issue.`);
 
           </div>
         </div>
+      )}
+
+      {/* Store Process Transfer Modal (Repacking & Replating) */}
+      {showStoreProcessModal && (
+        <StoreProcessTransferModal
+          isOpen={showStoreProcessModal}
+          onClose={() => {
+            setShowStoreProcessModal(false);
+            setPreselectedStoreJobNo(null);
+          }}
+          jobCards={jobCards}
+          movements={movements}
+          processTransfers={processTransfers || []}
+          currentUser={currentUser}
+          preselectedJobCardNo={preselectedStoreJobNo}
+          onSubmit={async (data) => {
+            if (onCreateProcessTransfer) {
+              await onCreateProcessTransfer(data);
+            } else {
+              await DBService.createProcessTransfer({
+                ...data,
+                createdBy: currentUser.name,
+                createdByUserId: currentUser.userId,
+                fromLocation: 'Store'
+              }, currentUser.userId, currentUser.name);
+            }
+          }}
+        />
       )}
 
     </div>

@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">PMW Manufacturing Tracker</string>
-    <string name="title_activity_main">PMW Manufacturing Tracker</string>
-    <string name="package_name">com.pawan.pmwtracker</string>
-    <string name="custom_url_scheme">com.pawan.pmwtracker</string>
+    <string name="app_name">PMW Tracker</string>
+    <string name="title_activity_main">PMW Tracker</string>
+    <string name="package_name">com.pmw.tracker</string>
+    <string name="custom_url_scheme">com.pmw.tracker</string>
 </resources>
