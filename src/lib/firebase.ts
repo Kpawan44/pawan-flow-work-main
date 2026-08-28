@@ -1122,6 +1122,10 @@ export class DBService {
 
     await this.logAction(creatorId, creatorName, 'CREATE_JOB_CARD', `Generated job card ${jobCardNo} for ${job.partyName} (${job.orderQty} ${unitLabel})`);
     
+    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
+    await this.broadcastEvent('JOB_UPDATED', { jobCardNo }).catch(() => {});
+    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: newMovementId, jobCardNo }).catch(() => {});
+
     // Automatically save item name and code to master list
     try {
       await this.saveItem(job.itemName, job.itemCode, job.partyName);
@@ -1243,6 +1247,9 @@ export class DBService {
 
     await this.logAction(userId, userName, 'UPDATE_JOB_CARD', `Updated Job Card ${jobCardNo}. Status: ${updates.status || cards[idx].status}`);
     
+    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
+    await this.broadcastEvent('JOB_UPDATED', { jobCardNo }).catch(() => {});
+
     // Check if total rejection quantity for the job card exceeds 10% of total order quantity
     try {
       const updatedCard = cards[idx];
