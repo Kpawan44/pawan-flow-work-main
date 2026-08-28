@@ -3762,10 +3762,8 @@ export default function AdminConsole({
                   setResetErrorMessage('');
                   try {
                     await DBService.factoryReset(resetAdminPin);
-                    showToast("Factory reset completed successfully. Reloading system...", "success");
-                    setTimeout(() => {
-                      window.location.reload();
-                    }, 1000);
+                    showToast("Factory reset completed successfully. System ready for initial configuration.", "success");
+                    setShowFactoryResetModal(false);
                   } catch (err: any) {
                     setResetErrorMessage(err.message || 'Factory reset failed');
                     setResetIsLoading(false);

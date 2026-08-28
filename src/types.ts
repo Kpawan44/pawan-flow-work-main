@@ -457,6 +457,7 @@ export interface SyncQueueOperation {
 
 export interface SyncQueueItem {
   id: string;
+  generation?: string;
   action: string;
   description: string;
   timestamp: string;

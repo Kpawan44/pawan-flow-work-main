@@ -553,18 +553,18 @@ export default function App() {
   };
 
   // --- PER-COLLECTION REFRESH & INCREMENTAL SYNC ---
-  const refreshUsers = async () => {
+  const refreshUsers = async (forceFresh = true) => {
     try {
-      const u = await DBService.getUsers();
+      const u = await DBService.getUsers(forceFresh);
       setUsers(u);
     } catch (err) {
       console.error("Failed to refresh users", err);
     }
   };
 
-  const refreshJobCards = async () => {
+  const refreshJobCards = async (forceFresh = true) => {
     try {
-      const jc = await DBService.getJobCards();
+      const jc = await DBService.getJobCards(forceFresh);
       setJobCards(jc);
       setSelectedJob(prev => {
         if (!prev) return null;
@@ -650,9 +650,9 @@ export default function App() {
   const refreshAllStates = async () => {
     try {
       const [u, jc, mov, trans, n, logs, config] = await Promise.all([
-        DBService.getUsers(),
-        DBService.getJobCards(),
-        DBService.getMovements(),
+        DBService.getUsers(true),
+        DBService.getJobCards(true),
+        DBService.getMovements(true),
         DBService.getProcessTransfers(),
         DBService.getNotifications(),
         DBService.getAuditLogs(),
@@ -690,9 +690,79 @@ export default function App() {
     }
   };
 
+  // System generation check and cache invalidation
+  const checkSystemGeneration = async () => {
+    try {
+      const res = await fetch(`${getApiBaseUrl()}/api/system/state`);
+      if (res.ok) {
+        const state = await res.json();
+        if (state.success && state.factoryResetGeneration) {
+          const localGen = localStorage.getItem('mfr_system_generation');
+          if (localGen && localGen !== state.factoryResetGeneration) {
+            console.warn(`[SYSTEM] Generation mismatch (local: ${localGen}, server: ${state.factoryResetGeneration}). Purging client cache.`);
+            DBService.clearClientCaches(state.factoryResetGeneration);
+            setCurrentUser(null);
+            setUsers([]);
+            setJobCards([]);
+            setMovements([]);
+            setProcessTransfers([]);
+            setNotifications([]);
+            setAuditLogs([]);
+            if (state.activeUsersCount === 0) {
+              localStorage.setItem('mfr_is_first_run', 'true');
+              sessionStorage.setItem('mfr_is_first_run', 'true');
+            }
+            refreshAllStates();
+          } else {
+            localStorage.setItem('mfr_system_generation', state.factoryResetGeneration);
+            sessionStorage.setItem('mfr_system_generation', state.factoryResetGeneration);
+            if (state.activeUsersCount === 0 && !currentUser) {
+              localStorage.setItem('mfr_is_first_run', 'true');
+              sessionStorage.setItem('mfr_is_first_run', 'true');
+            }
+          }
+        }
+      }
+    } catch (_) {}
+  };
+
+  useEffect(() => {
+    checkSystemGeneration();
+    window.addEventListener('focus', checkSystemGeneration);
+    window.addEventListener('online', checkSystemGeneration);
+    return () => {
+      window.removeEventListener('focus', checkSystemGeneration);
+      window.removeEventListener('online', checkSystemGeneration);
+    };
+  }, []);
+
+  // Handle client-side authoritative factory reset event
+  useEffect(() => {
+    const handleResetEvent = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      const gen = customEvent.detail?.generation;
+      setCurrentUser(null);
+      setUsers([]);
+      setJobCards([]);
+      setMovements([]);
+      setProcessTransfers([]);
+      setNotifications([]);
+      setAuditLogs([]);
+      setSelectedJob(null);
+      localStorage.setItem('mfr_is_first_run', 'true');
+      sessionStorage.setItem('mfr_is_first_run', 'true');
+      if (gen) {
+        localStorage.setItem('mfr_system_generation', gen);
+        sessionStorage.setItem('mfr_system_generation', gen);
+      }
+    };
+    window.addEventListener('factory-reset-completed', handleResetEvent);
+    return () => window.removeEventListener('factory-reset-completed', handleResetEvent);
+  }, []);
+
   // Authentication state listener & initial users directory for login screen
   useEffect(() => {
-    refreshUsers();
+    refreshUsers(true);
 
     // Check for existing session in sessionStorage or localStorage on mount
     try {
@@ -1612,13 +1682,15 @@ export default function App() {
   const handleSaveUserProfile = async (profile: UserProfile) => {
     try {
       await DBService.saveUser(profile);
+      DBService.invalidateCache('mfr_users');
       const freshUsers = await DBService.getUsers(true);
       setUsers(freshUsers);
       showToast(`User '${profile.name}' created successfully!`, "success");
-      refreshAllStates();
+      await refreshAllStates();
     } catch (err: any) {
       console.error("Failed to save user profile", err);
       showToast(err instanceof Error ? err.message : "Failed to save user profile.", "error");
+      throw err;
     }
   };
 
@@ -2185,12 +2257,23 @@ export default function App() {
                 sessionStorage.setItem('mfr_auth_token', data.token);
                 localStorage.setItem('mfr_auth_token', data.token);
               }
+              if (data.user) {
+                sessionStorage.setItem('mfr_active_user_uid', data.user.userId);
+                sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(data.user));
+                localStorage.setItem('mfr_active_user_uid', data.user.userId);
+                localStorage.setItem('mfr_active_user_profile', JSON.stringify(data.user));
+                setCurrentUser(data.user);
+                setUsers([data.user]);
+              }
               localStorage.removeItem('mfr_is_first_run');
               sessionStorage.removeItem('mfr_is_first_run');
-              setCurrentUser(data.user);
-              setUsers([data.user]);
-              showToast(`Super Admin account '${data.user.name}' created successfully!`, 'success');
-              refreshAllStates();
+              showToast(`Super Admin account '${data.user?.name || loginName}' created successfully!`, 'success');
+              DBService.invalidateCache('mfr_users');
+              const fresh = await DBService.getUsers(true);
+              if (fresh && fresh.length > 0) {
+                setUsers(fresh);
+              }
+              await refreshAllStates();
             } catch (err: any) {
               setSetupAdminError(err.message || 'Initialization failed.');
             } finally {

@@ -182,150 +182,21 @@ export const db = dbInstance;
 export const auth = authInstance;
 
 // ============================================
-// MOCK STATE AND REALTIME STREAM DATABASE
+// EMPTY DATASET DEFAULTS (ZERO-RESURRECTION ARCHITECTURE)
 // ============================================
 
-const defaultSavedItems: SavedItem[] = [
-  {
-    id: 'item-1',
-    itemName: 'Grade 8 High-Tensile Bolt M12',
-    itemCode: 'BOLT-M12-G8',
-    partyName: 'Apex Engineering Solutions',
-    customerName: 'Apex Engineering Solutions',
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: 'item-2',
-    itemName: 'Engine Valve Gear Shaft',
-    itemCode: 'SHAFT-EVG-102',
-    partyName: 'Titan Dynamics Ltd',
-    customerName: 'Titan Dynamics Ltd',
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: 'item-3',
-    itemName: 'Industrial Galvanized Washer',
-    itemCode: 'WASH-GALV-50',
-    partyName: 'Apex Engineering Solutions',
-    customerName: 'Apex Engineering Solutions',
-    createdAt: new Date().toISOString()
-  }
-];
-
-const defaultJobCards: JobCard[] = [
-  {
-    jobCardNo: 'JC-1001',
-    orderNo: 'ORD-5001',
-    partyName: 'Apex Engineering Solutions',
-    itemName: 'Grade 8 High-Tensile Bolt M12',
-    itemCode: 'BOLT-M12-G8',
-    orderQty: 1200,
-    currentQty: 1200,
-    balanceQty: 1200,
-    currentDepartment: 'Production',
-    status: 'Pending',
-    heatTreatmentRequired: true,
-    createdBy: 'Dispatch Operator',
-    createdAt: new Date(Date.now() - 3600000 * 24 * 3).toISOString(), // 3 days ago
-    completed: false
-  },
-  {
-    jobCardNo: 'JC-1002',
-    orderNo: 'ORD-5002',
-    partyName: 'Precision Automotive Parts',
-    itemName: 'Engine Valve Gear Shaft',
-    itemCode: 'SHAFT-EVG-102',
-    orderQty: 500,
-    currentQty: 450,
-    balanceQty: 50,
-    currentDepartment: 'Heat Treatment',
-    status: 'In Process',
-    heatTreatmentRequired: true,
-    createdBy: 'Production Supervisor',
-    createdAt: new Date(Date.now() - 3600000 * 24 * 1.5).toISOString(),
-    completed: false
-  },
-  {
-    jobCardNo: 'JC-1003',
-    orderNo: 'ORD-5003',
-    partyName: 'Alpha Heavy Industries',
-    itemName: 'Industrial Galvanized Washer',
-    itemCode: 'WASH-GALV-50',
-    orderQty: 3000,
-    currentQty: 3000,
-    balanceQty: 0,
-    currentDepartment: 'Completed',
-    status: 'Completed',
-    heatTreatmentRequired: false,
-    createdBy: 'Quality Inspector',
-    createdAt: new Date(Date.now() - 3600000 * 24 * 5).toISOString(),
-    completed: true,
-    dispatchDetails: {
-      invoiceNo: 'INV-2026-001',
-      vehicleNo: 'MH-12-PQ-9876',
-      dispatchQty: 3000,
-      dispatchDate: new Date(Date.now() - 3600000 * 4).toISOString(),
-      remarks: 'Delivered in perfect condition. Inspection sign-off completed.'
-    }
-  }
-];
-
-const defaultMovements: MaterialMovement[] = [
-  {
-    movementId: 'M-2000',
-    jobCardNo: 'JC-1001',
-    fromDepartment: 'Dispatch',
-    toDepartment: 'Production',
-    quantity: 1200,
-    transferBy: 'Dispatch Operator',
-    transferDate: new Date(Date.now() - 3600000 * 24 * 3.1).toISOString(),
-    accepted: true,
-    acceptedBy: 'Production Supervisor',
-    acceptedDate: new Date(Date.now() - 3600000 * 24 * 3.0).toISOString(),
-    remarks: 'Initial raw material dispatch'
-  },
-  {
-    movementId: 'M-2001',
-    jobCardNo: 'JC-1002',
-    fromDepartment: 'Dispatch',
-    toDepartment: 'Production',
-    quantity: 500,
-    transferBy: 'Dispatch Operator',
-    transferDate: new Date(Date.now() - 3600000 * 24 * 1.4).toISOString(),
-    accepted: true,
-    acceptedBy: 'Production Supervisor',
-    acceptedDate: new Date(Date.now() - 3600000 * 24 * 1.3).toISOString(),
-    remarks: 'Dispatched raw material bars'
-  },
-  {
-    movementId: 'M-2002',
-    jobCardNo: 'JC-1002',
-    fromDepartment: 'Production',
-    toDepartment: 'Heat Treatment',
-    quantity: 450,
-    transferBy: 'Production Supervisor',
-    transferDate: new Date(Date.now() - 3600000 * 24 * 1.1).toISOString(),
-    accepted: true,
-    acceptedBy: 'Heat Treatment Lead',
-    acceptedDate: new Date(Date.now() - 3600000 * 24 * 1.0).toISOString(),
-    remarks: 'Produced with 50 KG scrap loss due to edge trimming.',
-    processDetails: {
-      operatorName: 'Suresh Patil'
-    }
-  }
-];
-
+const defaultSavedItems: SavedItem[] = [];
+const defaultJobCards: JobCard[] = [];
+const defaultMovements: MaterialMovement[] = [];
 const defaultNotifications: AppNotification[] = [];
-
 const defaultAuditLogs: AuditLog[] = [];
-
 const defaultOutsourceOrders: OutsourceOrder[] = [];
 
 const defaultCompanyConfig: CompanyConfig = {
-  companyName: 'Precision Metal Works',
-  details: 'Specialists in high-tensile fasteners, engine components, and industrial finishes.',
+  companyName: 'PMW Manufacturing Tracker',
+  details: 'Precision Metal Works Industrial Unit',
   phone: '+91 98765 43210',
-  address: 'Shed No. 12, Phase II, Industrial Area, Pune, MH, India',
+  address: 'Precision Metal Works Industrial Unit, Pune, MH, India',
   gstIn: '27AAAAA1111A1Z1',
   logoUrl: '',
   whatsappEnabled: true,
@@ -335,6 +206,7 @@ const defaultCompanyConfig: CompanyConfig = {
   updatedBy: 'System Init',
   updatedAt: new Date().toISOString()
 };
+
 
 
 // Helper to load or initialize local storage collections
@@ -383,6 +255,56 @@ export class DBService {
   private static isSeededInSession = false;
   private static memCache: Record<string, { data: any; timestamp: number }> = {};
   private static CACHE_TTL_MS = 20000; // 20s in-memory SWR cache
+  private static activeUnsubscribers: Set<() => void> = new Set();
+
+  static registerUnsubscriber(unsub: () => void): () => void {
+    this.activeUnsubscribers.add(unsub);
+    return () => {
+      this.activeUnsubscribers.delete(unsub);
+      try {
+        unsub();
+      } catch (_) {}
+    };
+  }
+
+  static unsubscribeAllListeners(): void {
+    for (const unsub of Array.from(this.activeUnsubscribers)) {
+      try {
+        unsub();
+      } catch (_) {}
+    }
+    this.activeUnsubscribers.clear();
+  }
+
+  static clearClientCaches(newGeneration?: string): void {
+    this.unsubscribeAllListeners();
+    this.memCache = {};
+
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k && (k.startsWith('mfr_') || k.startsWith('firebase:') || k.startsWith('firestore:'))) {
+          localStorage.removeItem(k);
+        }
+      }
+    } catch (_) {}
+
+    try {
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const k = sessionStorage.key(i);
+        if (k && (k.startsWith('mfr_') || k.startsWith('firebase:') || k.startsWith('firestore:'))) {
+          sessionStorage.removeItem(k);
+        }
+      }
+    } catch (_) {}
+
+    if (newGeneration) {
+      try {
+        localStorage.setItem('mfr_system_generation', newGeneration);
+        sessionStorage.setItem('mfr_system_generation', newGeneration);
+      } catch (_) {}
+    }
+  }
 
   static getFromMemCache<T>(key: string): T | null {
     const entry = this.memCache[key];
@@ -1033,12 +955,15 @@ export class DBService {
       const mem = this.getFromMemCache<JobCard[]>('mfr_job_cards');
       if (mem && mem.length > 0) return mem;
     }
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+    if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
         const querySnapshot = await getDocs(collection(db, 'mfr_job_cards'));
         const cards: JobCard[] = [];
         querySnapshot.forEach((docSnap) => {
-          cards.push(docSnap.data() as JobCard);
+          const data = docSnap.data() as JobCard;
+          if (data && data.jobCardNo) {
+            cards.push(data);
+          }
         });
         const sorted = cards.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         // Mirror to local cache on successful load
@@ -1049,7 +974,7 @@ export class DBService {
         handleFirestoreError(err, OperationType.LIST, 'mfr_job_cards');
       }
     }
-    const cached = getLocalStorageItem<JobCard[]>('mfr_job_cards', defaultJobCards);
+    const cached = getLocalStorageItem<JobCard[]>('mfr_job_cards', []);
     this.setMemCache('mfr_job_cards', cached);
     return cached;
   }
@@ -1468,7 +1393,7 @@ export class DBService {
     await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Deleted all job card entries, material movements, notifications, and Raw Material Store item records from database`);
   }
 
-  static async factoryReset(pin: string): Promise<{ success: boolean; resetOperationId?: string; message?: string }> {
+  static async factoryReset(pin: string): Promise<{ success: boolean; resetOperationId?: string; factoryResetGeneration?: string; activeUsersCount?: number; firstRun?: boolean; message?: string }> {
     const headers = await this.getAuthHeaders();
     const res = await fetch(`${getApiBaseUrl()}/api/admin/factory-reset`, {
       method: 'POST',
@@ -1481,42 +1406,26 @@ export class DBService {
       throw new Error(data.error || `Factory reset failed with status ${res.status}`);
     }
 
-    // ONLY after backend reports complete successful deletion & verification:
-    // Clean all PMW local caches and storage
-    const pmwStorageKeys = [
-      'mfr_sync_queue',
-      'mfr_job_cards',
-      'mfr_movements',
-      'mfr_process_transfers',
-      'mfr_notifications',
-      'mfr_items',
-      'mfr_audit_logs',
-      'mfr_company_config',
-      'mfr_outsource_orders',
-      'mfr_users',
-      'mfr_auth_token',
-      'mfr_current_user',
-      'mfr_browser_backups',
-      'mfr_auto_backup_enabled',
-      'mfr_last_backup_date',
-      'mfr_sheets_emulated_rows',
-      'mfr_force_offline'
-    ];
-
-    for (const key of pmwStorageKeys) {
-      try {
-        localStorage.removeItem(key);
-        sessionStorage.removeItem(key);
-      } catch (_) {}
-    }
+    const newGen = data.factoryResetGeneration || `gen-${Date.now()}`;
+    this.clearClientCaches(newGen);
 
     try {
       localStorage.setItem('mfr_is_first_run', 'true');
       sessionStorage.setItem('mfr_is_first_run', 'true');
+      localStorage.setItem('mfr_system_generation', newGen);
+      sessionStorage.setItem('mfr_system_generation', newGen);
     } catch (_) {}
 
-    this.memCache = {};
-    window.dispatchEvent(new CustomEvent('factory-reset-completed'));
+    // Invalidate / reset IndexedDB Firestore persistence if active
+    if (useRealFirebase && db) {
+      try {
+        const { terminate, clearIndexedDbPersistence } = await import('firebase/firestore');
+        await terminate(db).catch(() => {});
+        await clearIndexedDbPersistence(db).catch(() => {});
+      } catch (_) {}
+    }
+
+    window.dispatchEvent(new CustomEvent('factory-reset-completed', { detail: { generation: newGen, firstRun: true } }));
 
     return data;
   }
@@ -1527,12 +1436,15 @@ export class DBService {
       const mem = this.getFromMemCache<MaterialMovement[]>('mfr_movements');
       if (mem && mem.length > 0) return mem;
     }
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+    if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
         const querySnapshot = await getDocs(collection(db, 'mfr_movements'));
         const list: MaterialMovement[] = [];
         querySnapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as MaterialMovement);
+          const data = docSnap.data() as MaterialMovement;
+          if (data && data.movementId) {
+            list.push(data);
+          }
         });
         const sorted = list.sort((a, b) => new Date(b.transferDate).getTime() - new Date(a.transferDate).getTime());
         // Mirror to local cache on successful load
@@ -1543,7 +1455,7 @@ export class DBService {
         handleFirestoreError(err, OperationType.LIST, 'mfr_movements');
       }
     }
-    const cached = getLocalStorageItem<MaterialMovement[]>('mfr_movements', defaultMovements);
+    const cached = getLocalStorageItem<MaterialMovement[]>('mfr_movements', []);
     this.setMemCache('mfr_movements', cached);
     return cached;
   }
@@ -2110,13 +2022,15 @@ export class DBService {
 
   // --- NOTIFICATIONS ---
   static async getNotifications(): Promise<AppNotification[]> {
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+    if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
-        await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_notifications'));
         const list: AppNotification[] = [];
         querySnapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as AppNotification);
+          const data = docSnap.data() as AppNotification;
+          if (data && data.notificationId) {
+            list.push(data);
+          }
         });
         const sorted = list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         // Mirror to local cache on successful load
@@ -2126,7 +2040,7 @@ export class DBService {
         handleFirestoreError(err, OperationType.LIST, 'mfr_notifications');
       }
     }
-    return getLocalStorageItem<AppNotification[]>('mfr_notifications', defaultNotifications);
+    return getLocalStorageItem<AppNotification[]>('mfr_notifications', []);
   }
 
   static async createNotification(notif: Omit<AppNotification, 'notificationId' | 'read' | 'createdAt'>): Promise<AppNotification> {
@@ -2250,20 +2164,22 @@ export class DBService {
 
   // --- AUDIT LOGS ---
   static async getAuditLogs(): Promise<AuditLog[]> {
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+    if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
-        await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_audit_logs'));
         const list: AuditLog[] = [];
         querySnapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as AuditLog);
+          const data = docSnap.data() as AuditLog;
+          if (data && data.id) {
+            list.push(data);
+          }
         });
         return list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 500);
       } catch (err) {
         handleFirestoreError(err, OperationType.LIST, 'mfr_audit_logs');
       }
     }
-    return getLocalStorageItem<AuditLog[]>('mfr_audit_logs', defaultAuditLogs);
+    return getLocalStorageItem<AuditLog[]>('mfr_audit_logs', []);
   }
 
   static async logAction(userId: string, userName: string, action: string, details: string): Promise<void> {
@@ -2298,13 +2214,15 @@ export class DBService {
 
   // --- SAVED ITEMS ---
   static async getSavedItems(): Promise<SavedItem[]> {
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+    if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
-        await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_items'));
         const list: SavedItem[] = [];
         querySnapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as SavedItem);
+          const data = docSnap.data() as SavedItem;
+          if (data && data.id) {
+            list.push(data);
+          }
         });
         const sorted = list.sort((a, b) => new Date(b.createdAt || '').getTime() - new Date(a.createdAt || '').getTime());
         setLocalStorageItem('mfr_items', sorted);
@@ -2313,7 +2231,7 @@ export class DBService {
         handleFirestoreError(err, OperationType.LIST, 'mfr_items');
       }
     }
-    return getLocalStorageItem<SavedItem[]>('mfr_items', defaultSavedItems);
+    return getLocalStorageItem<SavedItem[]>('mfr_items', []);
   }
 
   static async saveItem(itemName: string, itemCode?: string, partyName?: string): Promise<SavedItem> {
@@ -2437,8 +2355,11 @@ export class DBService {
     );
     if (isDup) return;
 
+    const currentGen = localStorage.getItem('mfr_system_generation') || sessionStorage.getItem('mfr_system_generation') || '';
+
     const newItem: SyncQueueItem = {
       id: `sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      generation: currentGen,
       action,
       description,
       timestamp: new Date().toISOString(),
@@ -2456,6 +2377,17 @@ export class DBService {
     if (idx === -1) return false;
 
     const item = queue[idx];
+
+    // Generation protection: discard stale generation offline operations immediately
+    const currentGen = localStorage.getItem('mfr_system_generation') || sessionStorage.getItem('mfr_system_generation') || '';
+    if (item.generation && currentGen && item.generation !== currentGen) {
+      console.warn(`[SYNC_QUEUE] Dropping operation from stale generation (${item.generation} vs ${currentGen}): ${item.action}`);
+      const filtered = queue.filter(q => q.id !== id);
+      setLocalStorageItem('mfr_sync_queue', filtered);
+      window.dispatchEvent(new CustomEvent('sync-queue-updated'));
+      return false;
+    }
+
     item.status = 'pending';
     item.error = undefined;
     setLocalStorageItem('mfr_sync_queue', queue);
@@ -2547,13 +2479,15 @@ export class DBService {
 
   // --- OUTSOURCE ORDERS ---
   static async getOutsourceOrders(): Promise<OutsourceOrder[]> {
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
+    if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
-        await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_outsource_orders'));
         const list: OutsourceOrder[] = [];
         querySnapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as OutsourceOrder);
+          const data = docSnap.data() as OutsourceOrder;
+          if (data && data.orderId) {
+            list.push(data);
+          }
         });
         const sorted = list.sort((a, b) => new Date(b.orderedAt).getTime() - new Date(a.orderedAt).getTime());
         setLocalStorageItem('mfr_outsource_orders', sorted);
@@ -2562,7 +2496,7 @@ export class DBService {
         handleFirestoreError(err, OperationType.LIST, 'mfr_outsource_orders');
       }
     }
-    return getLocalStorageItem<OutsourceOrder[]>('mfr_outsource_orders', defaultOutsourceOrders);
+    return getLocalStorageItem<OutsourceOrder[]>('mfr_outsource_orders', []);
   }
 
   static async createOutsourceOrder(
@@ -2875,11 +2809,11 @@ export class DBService {
 
     connect();
 
-    return () => {
+    return this.registerUnsubscriber(() => {
       isClosed = true;
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (es) es.close();
-    };
+    });
   }
 
   static async broadcastEvent(type: string, payload?: any): Promise<void> {
@@ -2908,7 +2842,7 @@ export class DBService {
             // Logged/handled via handleFirestoreError
           }
         });
-        return unsub;
+        return this.registerUnsubscriber(unsub);
       } catch (err) {
         console.error(`Failed to register Firestore real-time listener for ${collectionName}:`, err);
       }
@@ -2921,9 +2855,9 @@ export class DBService {
       }
     };
     window.addEventListener('mock-db-update', handler);
-    return () => {
+    return this.registerUnsubscriber(() => {
       window.removeEventListener('mock-db-update', handler);
-    };
+    });
   }
 
   static subscribeMovementsIncremental(
@@ -2955,7 +2889,7 @@ export class DBService {
             handleFirestoreError(err, OperationType.GET, 'mfr_movements');
           } catch (e) {}
         });
-        return unsub;
+        return this.registerUnsubscriber(unsub);
       } catch (err) {
         console.error("Failed to register movements incremental listener:", err);
       }
@@ -2968,9 +2902,9 @@ export class DBService {
       }
     };
     window.addEventListener('mock-db-update', handler);
-    return () => {
+    return this.registerUnsubscriber(() => {
       window.removeEventListener('mock-db-update', handler);
-    };
+    });
   }
 
   static subscribeAuditLogsIncremental(
@@ -3002,7 +2936,7 @@ export class DBService {
             handleFirestoreError(err, OperationType.GET, 'mfr_audit_logs');
           } catch (e) {}
         });
-        return unsub;
+        return this.registerUnsubscriber(unsub);
       } catch (err) {
         console.error("Failed to register audit logs incremental listener:", err);
       }
@@ -3015,9 +2949,9 @@ export class DBService {
       }
     };
     window.addEventListener('mock-db-update', handler);
-    return () => {
+    return this.registerUnsubscriber(() => {
       window.removeEventListener('mock-db-update', handler);
-    };
+    });
   }
 
   // ==========================================================
@@ -3323,7 +3257,7 @@ export class DBService {
             handleFirestoreError(err, OperationType.GET, 'mfr_process_transfers');
           } catch (e) {}
         });
-        return unsub;
+        return this.registerUnsubscriber(unsub);
       } catch (err) {
         console.error("Failed to register process transfers incremental listener:", err);
       }
@@ -3336,9 +3270,9 @@ export class DBService {
       }
     };
     window.addEventListener('mock-db-update', handler);
-    return () => {
+    return this.registerUnsubscriber(() => {
       window.removeEventListener('mock-db-update', handler);
-    };
+    });
   }
 }
 
