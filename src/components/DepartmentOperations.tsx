@@ -156,14 +156,19 @@ export default function DepartmentOperations({
   }, [currentUser]);
 
   const [selectedDept, setSelectedDept] = useState<Department>(() => {
-    return userDepts[0] || 'Dispatch';
+    if (currentUser.department && (currentUser.department as string) !== 'Admin' && ALL_WORKBENCH_DEPTS.includes(currentUser.department as Department)) {
+      return currentUser.department as Department;
+    }
+    return userDepts[0] || 'Production';
   });
 
   useEffect(() => {
-    if (!userDepts.includes(selectedDept)) {
+    if (currentUser.department && (currentUser.department as string) !== 'Admin' && ALL_WORKBENCH_DEPTS.includes(currentUser.department as Department)) {
+      setSelectedDept(currentUser.department as Department);
+    } else if (!userDepts.includes(selectedDept)) {
       setSelectedDept(userDepts[0] || 'Dispatch');
     }
-  }, [userDepts]);
+  }, [currentUser.department, currentUser.userId, userDepts]);
 
   const activeDept = selectedDept;
 

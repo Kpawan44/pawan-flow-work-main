@@ -1187,6 +1187,7 @@ export default function App() {
       setLoginPin('');
       setSelectedLoginUser(null);
       await DBService.logAction(authenticatedUid, authenticatedProfile.name, 'USER_LOGIN', `Logged in via security PIN.`);
+      await refreshAllStates();
     } catch (err: any) {
       console.warn("Authentication error:", err);
       if (auth) {
