@@ -950,6 +950,35 @@ export class DBService {
       const mem = this.getFromMemCache<JobCard[]>('mfr_job_cards');
       if (mem && mem.length > 0) return mem;
     }
+
+    // Read local tombstones for immediate filter
+    const localTombs = new Set(getLocalStorageItem<string[]>('mfr_deleted_job_cards', []).map(t => t.toLowerCase().trim()));
+
+    // 1. Authoritative API Fetch
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/job-cards`, { headers, signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success && Array.isArray(resData.jobCards)) {
+          const activeList: JobCard[] = resData.jobCards.filter((c: any) => {
+            if (!c || !c.jobCardNo) return false;
+            const jcNo = String(c.jobCardNo).toLowerCase().trim();
+            return !localTombs.has(jcNo);
+          });
+          setLocalStorageItem('mfr_job_cards', activeList);
+          this.setMemCache('mfr_job_cards', activeList);
+          return activeList;
+        }
+      }
+    } catch (apiErr) {
+      // API unavailable or offline; fall through to direct Firestore or cache
+    }
+
+    // 2. Direct Firestore Fast Fetch
     if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
         const querySnapshot = await getDocs(collection(db, 'mfr_job_cards'));
@@ -957,11 +986,13 @@ export class DBService {
         querySnapshot.forEach((docSnap) => {
           const data = docSnap.data() as JobCard;
           if (data && data.jobCardNo) {
-            cards.push(data);
+            const jcNo = String(data.jobCardNo).toLowerCase().trim();
+            if (!localTombs.has(jcNo) && (data as any).active !== false && (data as any).status !== 'deleted' && !(data as any).deletedAt) {
+              cards.push(data);
+            }
           }
         });
         const sorted = cards.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        // Mirror to local cache on successful load
         setLocalStorageItem('mfr_job_cards', sorted);
         this.setMemCache('mfr_job_cards', sorted);
         return sorted;
@@ -969,7 +1000,10 @@ export class DBService {
         handleFirestoreError(err, OperationType.LIST, 'mfr_job_cards');
       }
     }
-    const cached = getLocalStorageItem<JobCard[]>('mfr_job_cards', []);
+
+    // 3. Fall back to local storage cache
+    const cached = getLocalStorageItem<JobCard[]>('mfr_job_cards', [])
+      .filter(c => c && c.jobCardNo && !localTombs.has(String(c.jobCardNo).toLowerCase().trim()) && (c as any).active !== false && (c as any).status !== 'deleted' && !(c as any).deletedAt);
     this.setMemCache('mfr_job_cards', cached);
     return cached;
   }
@@ -1296,24 +1330,77 @@ export class DBService {
 
   static async deleteJobCard(jobCardNo: string, userId: string, userName: string): Promise<void> {
     await this.verifyAdmin(userId);
-    // 1. Write to physical Firestore first
-    if (useRealFirebase && db) {
+
+    // 1. Invalidate client caches and record local tombstone immediately (0ms instant UI update)
+    this.invalidateCache('mfr_job_cards');
+    this.invalidateCache('mfr_movements');
+    this.invalidateCache('mfr_notifications');
+
+    const upperNo = jobCardNo.toUpperCase();
+    const localTombs = getLocalStorageItem<string[]>('mfr_deleted_job_cards', []);
+    if (!localTombs.includes(upperNo)) {
+      localTombs.push(upperNo);
+      setLocalStorageItem('mfr_deleted_job_cards', localTombs);
+    }
+
+    const cachedCards = getLocalStorageItem<JobCard[]>('mfr_job_cards', []);
+    const updatedCards = cachedCards.filter(c => c.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
+    setLocalStorageItem('mfr_job_cards', updatedCards);
+    this.setMemCache('mfr_job_cards', updatedCards);
+
+    const cachedMovements = getLocalStorageItem<MaterialMovement[]>('mfr_movements', []);
+    const updatedMovements = cachedMovements.filter(m => m.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
+    setLocalStorageItem('mfr_movements', updatedMovements);
+    this.setMemCache('mfr_movements', updatedMovements);
+
+    const cachedNotifications = getLocalStorageItem<any[]>('mfr_notifications', []);
+    const updatedNotifications = cachedNotifications.filter(n => !n.message?.toLowerCase().includes(jobCardNo.toLowerCase()));
+    setLocalStorageItem('mfr_notifications', updatedNotifications);
+    this.setMemCache('mfr_notifications', updatedNotifications);
+
+    // 2. Authoritative API Deletion
+    let apiDeleted = false;
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/job-cards/${encodeURIComponent(jobCardNo)}`, {
+        method: 'DELETE',
+        headers
+      });
+      if (res.ok) {
+        const resData = await res.json().catch(() => ({}));
+        if (resData.success) {
+          apiDeleted = true;
+        }
+      }
+    } catch (apiErr) {
+      // Fall through to direct Firestore
+    }
+
+    // 3. Direct Physical Firestore fallback with tombstone creation
+    if (!apiDeleted && useRealFirebase && db) {
       try {
-        const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
+        const refUpper = doc(db, 'mfr_job_cards', upperNo);
+        const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
+        
+        // Write tombstone
+        const tombRef = doc(db, 'mfr_deleted_job_cards', upperNo);
+        await setDoc(tombRef, {
+          jobCardNo: upperNo,
+          deletedAt: new Date().toISOString(),
+          deletedBy: userId,
+          deletedByName: userName,
+          tombstone: true
+        });
+
         const snapUpper = await getDoc(refUpper);
         if (snapUpper.exists()) {
           await deleteDoc(refUpper);
-        } else {
-          const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
-          const snapAsIs = await getDoc(refAsIs);
-          if (snapAsIs.exists()) {
-            await deleteDoc(refAsIs);
-          } else {
-            // Default fallback
-            await deleteDoc(refUpper);
-          }
         }
-        
+        const snapAsIs = await getDoc(refAsIs);
+        if (snapAsIs.exists()) {
+          await deleteDoc(refAsIs);
+        }
+
         // Cascade delete movements from Firestore
         const movementsSnap = await getDocs(query(collection(db, 'mfr_movements'), where('jobCardNo', '==', jobCardNo)));
         for (const docSnap of movementsSnap.docs) {
@@ -1329,49 +1416,56 @@ export class DBService {
           }
         }
       } catch (err: any) {
-        handleFirestoreError(err, OperationType.DELETE, `mfr_job_cards/${jobCardNo.toUpperCase()}`);
-        const shouldThrow = err && (
-          err.code === 'permission-denied' || 
-          err.code === 'invalid-argument' || 
-          (err.message && (
-            err.message.toLowerCase().includes('permission') || 
-            err.message.toLowerCase().includes('denied')
-          ))
-        );
-        if (shouldThrow) {
-          throw err;
-        }
+        handleFirestoreError(err, OperationType.DELETE, `mfr_job_cards/${upperNo}`);
       }
     }
 
-    // 2. Update Local Storage offline cache second
-    const cards = await this.getJobCards();
-    const updatedCards = cards.filter(c => c.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
-    setLocalStorageItem('mfr_job_cards', updatedCards);
-
-    // Cascade delete movements from local storage
-    const movements = await this.getMovements();
-    const updatedMovements = movements.filter(m => m.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
-    setLocalStorageItem('mfr_movements', updatedMovements);
-
-    // Cascade delete notifications from local storage
-    const notifications = await this.getNotifications();
-    const updatedNotifications = notifications.filter(n => !n.message.toLowerCase().includes(jobCardNo.toLowerCase()));
-    setLocalStorageItem('mfr_notifications', updatedNotifications);
+    // 4. Broadcast instant cross-device SSE synchronization
+    await this.broadcastEvent('JOB_UPDATED').catch(() => {});
+    await this.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
 
     await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Deleted Job Card: ${jobCardNo} and all related material transitions/notifications`);
   }
 
   static async deleteAllJobCards(userId: string, userName: string): Promise<void> {
     await this.verifyAdmin(userId);
-    // 1. Update Local Storage offline cache first
+
+    // 1. Invalidate caches and clear Local Storage offline caches
+    this.invalidateCache('mfr_job_cards');
+    this.invalidateCache('mfr_movements');
+    this.invalidateCache('mfr_notifications');
+    this.invalidateCache('mfr_items');
+
     setLocalStorageItem('mfr_job_cards', []);
     setLocalStorageItem('mfr_movements', []);
     setLocalStorageItem('mfr_notifications', []);
     setLocalStorageItem('mfr_items', []);
 
-    // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
+    this.setMemCache('mfr_job_cards', []);
+    this.setMemCache('mfr_movements', []);
+    this.setMemCache('mfr_notifications', []);
+    this.setMemCache('mfr_items', []);
+
+    // 2. Authoritative API Deletion
+    let apiPurged = false;
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/job-cards/delete-all`, {
+        method: 'POST',
+        headers
+      });
+      if (res.ok) {
+        const resData = await res.json().catch(() => ({}));
+        if (resData.success) {
+          apiPurged = true;
+        }
+      }
+    } catch (apiErr) {
+      // Fall through to direct Firestore
+    }
+
+    // 3. Physical Firestore fallback
+    if (!apiPurged && useRealFirebase && db) {
       try {
         const collectionsToPurge = ['mfr_job_cards', 'mfr_movements', 'mfr_notifications', 'mfr_items'];
         for (const colName of collectionsToPurge) {
@@ -1384,6 +1478,10 @@ export class DBService {
         handleFirestoreError(err, OperationType.DELETE, 'mfr_job_cards');
       }
     }
+
+    // 4. Broadcast instant cross-device SSE synchronization
+    await this.broadcastEvent('ALL_UPDATED').catch(() => {});
+    await this.broadcastEvent('JOB_UPDATED').catch(() => {});
 
     await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Deleted all job card entries, material movements, notifications, and Raw Material Store item records from database`);
   }
@@ -2403,6 +2501,27 @@ export class DBService {
               if (uData && (uData.active === false || uData.status === 'deleted' || uData.deletedAt)) {
                 continue;
               }
+            }
+          }
+          if (op.collection === 'mfr_job_cards') {
+            // Guard: Never allow queued operations to recreate a deleted/tombstoned job card
+            const tombDocSnap = await getDoc(doc(db, 'mfr_deleted_job_cards', op.docId)).catch(() => null);
+            if (tombDocSnap && tombDocSnap.exists()) {
+              continue;
+            }
+            const localTombs = getLocalStorageItem<string[]>('mfr_deleted_job_cards', []);
+            if (localTombs.map(t => t.toLowerCase().trim()).includes(op.docId.toLowerCase().trim())) {
+              continue;
+            }
+            const jcDocSnap = await getDoc(doc(db, 'mfr_job_cards', op.docId)).catch(() => null);
+            if (jcDocSnap && jcDocSnap.exists()) {
+              const jData = jcDocSnap.data();
+              if (jData && (jData.active === false || jData.status === 'deleted' || jData.deletedAt)) {
+                continue;
+              }
+            } else if (op.operation === 'update') {
+              // If document was already deleted on server, drop update operation
+              continue;
             }
           }
           if (op.operation === 'set') {

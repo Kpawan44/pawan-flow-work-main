@@ -2100,6 +2100,205 @@ async function startServer() {
   });
 
   // ----------------------------------------------------
+  // SERVER-AUTHORITATIVE JOB CARDS CRUD & TOMBSTONE PROPAGATION
+  // ----------------------------------------------------
+  app.get("/api/job-cards", requireFirebaseAuth, async (req, res) => {
+    try {
+      let cards: any[] = [];
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            const snap = await dbAdmin.collection("mfr_job_cards").get();
+            cards = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+          }
+        } catch (adminErr) {}
+      }
+      if (cards.length === 0) {
+        const restResult = await firestoreRestQueryAll("mfr_job_cards");
+        if (Array.isArray(restResult)) {
+          cards = restResult;
+        }
+      }
+
+      // Check tombstoned job cards
+      const deletedIds = new Set<string>();
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            const tombSnap = await dbAdmin.collection("mfr_deleted_job_cards").get();
+            tombSnap.docs.forEach(d => {
+              deletedIds.add(d.id.toLowerCase().trim());
+              const dData = d.data();
+              if (dData && dData.jobCardNo) deletedIds.add(String(dData.jobCardNo).toLowerCase().trim());
+            });
+          }
+        } catch (tErr) {}
+      }
+      if (deletedIds.size === 0) {
+        const restTombs = await firestoreRestQueryAll("mfr_deleted_job_cards");
+        if (Array.isArray(restTombs)) {
+          restTombs.forEach((d: any) => {
+            if (d.id) deletedIds.add(String(d.id).toLowerCase().trim());
+            if (d.jobCardNo) deletedIds.add(String(d.jobCardNo).toLowerCase().trim());
+          });
+        }
+      }
+
+      const activeCards = cards
+        .filter((c: any) => {
+          if (!c || !c.jobCardNo) return false;
+          const jcNo = String(c.jobCardNo).toLowerCase().trim();
+          if (deletedIds.has(jcNo)) return false;
+          if (c.active === false || c.status === "deleted" || c.deletedAt) return false;
+          return true;
+        })
+        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+
+      return res.json({ success: true, jobCards: activeCards });
+    } catch (err: any) {
+      console.error("[JOB_CARDS] Error fetching job cards:", err);
+      return res.status(500).json({ success: false, error: "Failed to retrieve job cards" });
+    }
+  });
+
+  app.delete("/api/job-cards/:jobCardNo", requireFirebaseAuth, async (req, res) => {
+    try {
+      const requester = (req as any).user;
+      if (!requester || (requester.role !== "super_admin" && requester.role !== "admin")) {
+        return res.status(403).json({ success: false, error: "Forbidden: Only Administrators can delete Job Cards." });
+      }
+
+      const jobCardNo = decodeURIComponent(req.params.jobCardNo).trim();
+      if (!jobCardNo) {
+        return res.status(400).json({ success: false, error: "Job Card number is required." });
+      }
+
+      const upperId = jobCardNo.toUpperCase();
+      const asIsId = jobCardNo;
+      const lowerId = jobCardNo.toLowerCase();
+
+      const tombstonePayload = {
+        jobCardNo: upperId,
+        deletedAt: new Date().toISOString(),
+        deletedBy: requester.userId || requester.name || "admin",
+        deletedByName: requester.name || "Administrator",
+        tombstone: true
+      };
+
+      // 1. Write tombstone to Firestore
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            await dbAdmin.collection("mfr_deleted_job_cards").doc(upperId).set(tombstonePayload);
+            if (upperId !== asIsId) {
+              await dbAdmin.collection("mfr_deleted_job_cards").doc(asIsId).set(tombstonePayload);
+            }
+          }
+        } catch (e) {}
+      }
+      await firestoreRestSetDoc("mfr_deleted_job_cards", upperId, tombstonePayload).catch(() => {});
+      if (upperId !== asIsId) {
+        await firestoreRestSetDoc("mfr_deleted_job_cards", asIsId, tombstonePayload).catch(() => {});
+      }
+
+      // 2. Delete Job Card and cascade related documents from Firestore
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            await dbAdmin.collection("mfr_job_cards").doc(upperId).delete().catch(() => {});
+            await dbAdmin.collection("mfr_job_cards").doc(asIsId).delete().catch(() => {});
+
+            // Cascade delete movements
+            const movSnap = await dbAdmin.collection("mfr_movements").where("jobCardNo", "==", jobCardNo).get().catch(() => null);
+            if (movSnap && !movSnap.empty) {
+              const batch = dbAdmin.batch();
+              movSnap.docs.forEach(d => batch.delete(d.ref));
+              await batch.commit().catch(() => {});
+            }
+            if (upperId !== asIsId) {
+              const movUpperSnap = await dbAdmin.collection("mfr_movements").where("jobCardNo", "==", upperId).get().catch(() => null);
+              if (movUpperSnap && !movUpperSnap.empty) {
+                const batch = dbAdmin.batch();
+                movUpperSnap.docs.forEach(d => batch.delete(d.ref));
+                await batch.commit().catch(() => {});
+              }
+            }
+
+            // Cascade delete notifications mentioning this job card
+            const notifSnap = await dbAdmin.collection("mfr_notifications").get().catch(() => null);
+            if (notifSnap && !notifSnap.empty) {
+              const batch = dbAdmin.batch();
+              notifSnap.docs.forEach(d => {
+                const nData = d.data();
+                if (nData.message && nData.message.toLowerCase().includes(lowerId)) {
+                  batch.delete(d.ref);
+                }
+              });
+              await batch.commit().catch(() => {});
+            }
+          }
+        } catch (e) {}
+      }
+      await firestoreRestDeleteDoc("mfr_job_cards", upperId).catch(() => {});
+      await firestoreRestDeleteDoc("mfr_job_cards", asIsId).catch(() => {});
+
+      // 3. Broadcast SSE Event for Instant Cross-User & Cross-Device Synchronization
+      broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: upperId });
+      broadcastRealtimeEvent("MOVEMENT_UPDATED");
+
+      return res.json({ success: true, message: `Job Card ${jobCardNo} deleted successfully.` });
+    } catch (err: any) {
+      console.error("[JOB_CARDS] Error deleting job card:", err);
+      return res.status(500).json({ success: false, error: "Failed to delete job card" });
+    }
+  });
+
+  app.post("/api/job-cards/delete-all", requireFirebaseAuth, async (req, res) => {
+    try {
+      const requester = (req as any).user;
+      if (!requester || (requester.role !== "super_admin" && requester.role !== "admin")) {
+        return res.status(403).json({ success: false, error: "Forbidden: Only Administrators can purge all Job Cards." });
+      }
+
+      const collectionsToPurge = ["mfr_job_cards", "mfr_movements", "mfr_notifications", "mfr_process_transfers", "mfr_outsource_orders"];
+      for (const col of collectionsToPurge) {
+        if (adminSdkHasPermission !== false) {
+          try {
+            const dbAdmin = getFirestoreAdmin();
+            if (dbAdmin) {
+              const snap = await dbAdmin.collection(col).get();
+              if (!snap.empty) {
+                const batch = dbAdmin.batch();
+                snap.docs.forEach(d => batch.delete(d.ref));
+                await batch.commit().catch(() => {});
+              }
+            }
+          } catch (e) {}
+        }
+        const restDocs = await firestoreRestQueryAll(col);
+        if (Array.isArray(restDocs)) {
+          await Promise.all(restDocs.map((doc: any) => {
+            const docId = doc.id || (doc.name ? doc.name.split("/").pop() : "");
+            return docId ? firestoreRestDeleteDoc(col, docId) : Promise.resolve(true);
+          }));
+        }
+      }
+
+      broadcastRealtimeEvent("ALL_UPDATED");
+      broadcastRealtimeEvent("JOB_UPDATED");
+
+      return res.json({ success: true, message: "All Job Cards and related data purged successfully." });
+    } catch (err: any) {
+      console.error("[JOB_CARDS] Error purging job cards:", err);
+      return res.status(500).json({ success: false, error: "Failed to purge job cards" });
+    }
+  });
+
+  // ----------------------------------------------------
   // SERVER-AUTHORITATIVE MATERIAL MOVEMENT & TRANSACTION ENDPOINT
   // ----------------------------------------------------
   const VALID_MANUFACTURING_DEPARTMENTS = [
