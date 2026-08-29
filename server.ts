@@ -2360,6 +2360,48 @@ async function startServer() {
     }
   });
 
+  // POST /api/notifications — Authoritative Server Notification Dispatch
+  app.post("/api/notifications", async (req, res) => {
+    try {
+      const { notificationId, id, department, title, message, userId, read, createdAt } = req.body || {};
+      if (!title || !message) {
+        return res.status(400).json({ success: false, error: "Title and message are required." });
+      }
+
+      const notifId = notificationId || id || `N-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const now = createdAt || new Date().toISOString();
+      const notifData = {
+        notificationId: notifId,
+        department: department || "All",
+        title,
+        message,
+        userId: userId || "all",
+        read: read || false,
+        createdAt: now
+      };
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            await dbAdmin.collection("mfr_notifications").doc(notifId).set(notifData);
+            broadcastRealtimeEvent("NOTIFICATION_UPDATED", { notificationId: notifId });
+            return res.json({ success: true, notificationId: notifId });
+          }
+        } catch (adminErr) {
+          console.warn("[NOTIFICATION] Admin SDK write failed, falling back to REST:", adminErr);
+        }
+      }
+
+      await firestoreRestSetDoc("mfr_notifications", notifId, notifData);
+      broadcastRealtimeEvent("NOTIFICATION_UPDATED", { notificationId: notifId });
+      return res.json({ success: true, notificationId: notifId });
+    } catch (err: any) {
+      console.error("[NOTIFICATION] Failed to create notification:", err);
+      return res.status(500).json({ success: false, error: err.message || "Failed to create notification" });
+    }
+  });
+
   app.post("/api/inventory/movement", requireFirebaseAuth, async (req, res) => {
     try {
       const authUid = (req as any).authUid;

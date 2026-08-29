@@ -2261,12 +2261,30 @@ export class DBService {
     setLocalStorageItem('mfr_notifications', list);
     this.setMemCache('mfr_notifications', list);
 
-    // 2. Write to physical Firestore
-    if (useRealFirebase && db && auth?.currentUser) {
-      try {
-        await setDoc(doc(db, 'mfr_notifications', newId), sanitizeForFirestore(newNotif));
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `mfr_notifications/${newId}`);
+    // 2. Send to backend server endpoint for secure authoritative notification dispatch
+    const apiBase = getApiBaseUrl();
+    try {
+      fetch(`${apiBase}/api/notifications`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newNotif)
+      }).catch(async () => {
+        // Direct client fallback ONLY if client is actively authenticated in Firebase Auth
+        if (useRealFirebase && db && auth?.currentUser) {
+          try {
+            await setDoc(doc(db, 'mfr_notifications', newId), sanitizeForFirestore(newNotif));
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, `mfr_notifications/${newId}`);
+          }
+        }
+      });
+    } catch (_) {
+      if (useRealFirebase && db && auth?.currentUser) {
+        try {
+          await setDoc(doc(db, 'mfr_notifications', newId), sanitizeForFirestore(newNotif));
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `mfr_notifications/${newId}`);
+        }
       }
     }
 
@@ -2297,10 +2315,11 @@ export class DBService {
     if (idx >= 0) {
       list[idx].read = true;
       setLocalStorageItem('mfr_notifications', list);
+      this.setMemCache('mfr_notifications', list);
     }
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
         await updateDoc(doc(db, 'mfr_notifications', id), { read: true });
       } catch (err) {
@@ -2321,9 +2340,10 @@ export class DBService {
       return n;
     });
     setLocalStorageItem('mfr_notifications', updated);
+    this.setMemCache('mfr_notifications', updated);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
         for (const n of list) {
           if (!n) continue;
@@ -2350,9 +2370,10 @@ export class DBService {
       return notifDept !== department && notifDept !== 'All';
     });
     setLocalStorageItem('mfr_notifications', remaining);
+    this.setMemCache('mfr_notifications', remaining);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
         for (const n of list) {
           if (!n) continue;
