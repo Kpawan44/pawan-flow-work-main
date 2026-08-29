@@ -6,11 +6,12 @@ const config: CapacitorConfig = {
   webDir: 'dist',
   server: {
     androidScheme: 'https',
-    cleartext: false,
+    cleartext: true,
     allowNavigation: [
       'https://pmw-tracker-928410476586.asia-south1.run.app',
       '*.googleapis.com',
-      '*.firebaseio.com'
+      '*.firebaseio.com',
+      '*'
     ]
   }
 };
