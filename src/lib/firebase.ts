@@ -1044,7 +1044,7 @@ export class DBService {
 
     const newJob: JobCard = {
       ...job,
-      status: job.status || (job.currentDepartment === 'Production' ? 'Pending' : 'Pending Acceptance'),
+      status: job.status || 'Pending Acceptance',
       createdBy: creatorName,
       createdByUserId: creatorId,
       jobCardNo,
@@ -1057,14 +1057,13 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     cards.unshift(newJob);
     setLocalStorageItem('mfr_job_cards', cards);
+    this.setMemCache('mfr_job_cards', cards);
 
     // Spawn an initial Material Movement
     const movements = await this.getMovements();
     const newMovementId = `M-${2000 + movements.length + 1}`;
     
     const unitLabel = job.unit || 'KG';
-    const isDirectProductionReady = newJob.status === 'Pending' || newJob.status === 'In Process';
-    const isDefaultAccepted = isDirectProductionReady && newJob.status !== 'Pending Acceptance';
     const defaultMovement: MaterialMovement = isPurchase ? {
       movementId: newMovementId,
       jobCardNo,
@@ -1079,13 +1078,11 @@ export class DBService {
       movementId: newMovementId,
       jobCardNo,
       fromDepartment: 'Dispatch',
-      toDepartment: 'Production',
+      toDepartment: (job.currentDepartment as Department) || 'Production',
       quantity: job.orderQty,
       transferBy: creatorName,
       transferDate: new Date().toISOString(),
-      accepted: isDefaultAccepted,
-      acceptedBy: isDefaultAccepted ? creatorName : undefined,
-      acceptedDate: isDefaultAccepted ? new Date().toISOString() : undefined,
+      accepted: false,
       remarks: 'Order registered. Dispatching raw material and job ticket to Production.'
     };
 
@@ -1096,16 +1093,17 @@ export class DBService {
 
     movements.unshift(initialMovement);
     setLocalStorageItem('mfr_movements', movements);
+    this.setMemCache('mfr_movements', movements);
     
     // Send notifications to corresponding department
     await this.createNotification({
-      department: isPurchase ? 'Store' : 'Production',
+      department: isPurchase ? 'Store' : ((job.currentDepartment as Department) || 'Production'),
       title: isPurchase ? 'New Purchase Inward Receipt' : 'New Production Queue Item',
       message: isPurchase
         ? `New Purchase Inward ${jobCardNo} generated for supplier ${job.partyName}. Quantity: ${job.currentQty} ${unitLabel}. Pending Store acceptance.`
         : `Job Card ${jobCardNo} generated for ${job.partyName}. Quantity: ${job.orderQty} ${unitLabel}. Pending material acceptance.`,
       userId: isPurchase ? 'all_store' : 'all_production'
-    });
+    }).catch(() => {});
 
     // 2. Write to physical Firestore
     await this.tryPhysicalWrite(
@@ -1116,8 +1114,8 @@ export class DBService {
         { collection: 'mfr_movements', docId: newMovementId, data: initialMovement, operation: 'set' }
       ],
       async () => {
-        await setDoc(doc(db, 'mfr_job_cards', jobCardNo), newJob);
-        await setDoc(doc(db, 'mfr_movements', newMovementId), initialMovement);
+        await setDoc(doc(db, 'mfr_job_cards', jobCardNo), sanitizeForFirestore(newJob));
+        await setDoc(doc(db, 'mfr_movements', newMovementId), sanitizeForFirestore(initialMovement));
       }
     );
 
@@ -2522,8 +2520,9 @@ export class DBService {
         await this.addToSyncQueue(action, description, operations);
         return;
       }
-      // Execute physical write asynchronously in background so caller gets instantaneous local response
-      physicalWriteFn().catch(async (err: any) => {
+      try {
+        await physicalWriteFn();
+      } catch (err: any) {
         handleFirestoreError(err, OperationType.WRITE, operations[0]?.collection || 'unknown');
         
         const errorMessage = err instanceof Error ? err.message : String(err);
@@ -2538,7 +2537,7 @@ export class DBService {
         if (isOffline) {
           await this.addToSyncQueue(action, description, operations);
         }
-      });
+      }
     } else {
       if (this.isOfflineMode()) {
         await this.addToSyncQueue(action, description, operations);
@@ -3245,6 +3244,10 @@ export class DBService {
               isInitial = false;
               const all: MaterialMovement[] = [];
               snapshot.forEach(d => all.push(d.data() as MaterialMovement));
+              
+              if (process.env.NODE_ENV !== 'production') {
+                console.log(`[Firestore Movements Snapshot] Initial load: ${all.length} movements.`);
+              }
               onInitial(all);
             } else {
               const changes = snapshot.docChanges().map(change => ({
@@ -3252,6 +3255,16 @@ export class DBService {
                 doc: change.doc.data() as MaterialMovement
               }));
               if (changes.length > 0) {
+                if (process.env.NODE_ENV !== 'production') {
+                  console.log(`[Firestore Movements Stream] Received ${changes.length} change(s):`, changes.map(c => ({
+                    type: c.type,
+                    id: c.doc.movementId,
+                    job: c.doc.jobCardNo,
+                    from: c.doc.fromDepartment,
+                    to: c.doc.toDepartment,
+                    accepted: c.doc.accepted
+                  })));
+                }
                 onChanges(changes);
               }
             }
@@ -3306,7 +3319,7 @@ export class DBService {
     const list = movementsList || getLocalStorageItem<MaterialMovement[]>('mfr_movements', []);
     return list.filter(m => {
       // 1. Exclude tombstoned/deleted movements
-      if (m.deletedDate) return false;
+      if (m.deletedDate || (m as any).status === 'deleted') return false;
 
       // 2. Special Issue Request from Raw Material Store to Production
       if (m.isIssueRequest && m.fromDepartment === 'Raw Material Store' && m.toDepartment === 'Production') {
@@ -3319,25 +3332,43 @@ export class DBService {
       }
 
       // 4. Standard Department Incoming Transfer (Authoritative Department Inbox)
+      // Belongs strictly to RECEIVING DEPARTMENT, regardless of creator user ID
       return m.toDepartment === department && !m.accepted;
     });
+  }
+
+  static subscribeIncomingTransfers(
+    toDepartment: Department,
+    onInitial: (transfers: MaterialMovement[]) => void,
+    onChanges?: (changes: { type: 'added' | 'modified' | 'removed'; doc: MaterialMovement }[]) => void
+  ): () => void {
+    const computeAndNotify = (allMovements: MaterialMovement[]) => {
+      const incoming = this.getDepartmentIncomingTransfers(toDepartment, allMovements);
+      onInitial(incoming);
+    };
+
+    return this.subscribeMovementsIncremental(
+      (allMovements) => computeAndNotify(allMovements),
+      (changes) => {
+        if (onChanges) {
+          const relevantChanges = changes.filter(c => 
+            c.doc.toDepartment === toDepartment || 
+            (c.doc.isIssueRequest && c.doc.fromDepartment === 'Raw Material Store' && toDepartment === 'Production')
+          );
+          if (relevantChanges.length > 0) {
+            onChanges(relevantChanges);
+          }
+        }
+        this.getMovements(true).then(all => computeAndNotify(all));
+      }
+    );
   }
 
   static subscribeDepartmentIncomingTransfers(
     department: Department,
     onUpdate: (transfers: MaterialMovement[]) => void
   ): () => void {
-    const computeAndNotify = (allMovements: MaterialMovement[]) => {
-      const incoming = this.getDepartmentIncomingTransfers(department, allMovements);
-      onUpdate(incoming);
-    };
-
-    return this.subscribeMovementsIncremental(
-      (allMovements) => computeAndNotify(allMovements),
-      (_changes) => {
-        this.getMovements(true).then(all => computeAndNotify(all));
-      }
-    );
+    return this.subscribeIncomingTransfers(department, onUpdate);
   }
 
   static subscribeAuditLogsIncremental(
