@@ -1716,123 +1716,174 @@ export class DBService {
     extraFields?: { allottedLocation?: string; rackNo?: string; quantity?: number; issueStatus?: 'Issued' | 'Rejected' }
   ): Promise<void> {
     const list = await this.getMovements();
-    const idx = list.findIndex(m => m.movementId === movementId);
-    if (idx === -1) throw new Error(`Movement ${movementId} not found`);
-    const mov = list[idx];
+    const localIdx = list.findIndex(m => m.movementId === movementId);
+    let localMov = localIdx >= 0 ? list[localIdx] : null;
 
-    const isRawMaterialStoreIssuing = mov.isIssueRequest && 
-                                      mov.fromDepartment === 'Raw Material Store' && 
-                                      mov.toDepartment === 'Production' && 
-                                      extraFields?.issueStatus === 'Issued';
+    let targetJobCardNo = localMov?.jobCardNo || '';
+    let isAlreadyAccepted = false;
+    let finalMovement: MaterialMovement | null = null;
+    let finalJobCardUpdates: Partial<JobCard> | null = null;
+    let targetJcDocId = '';
+    const nowIso = new Date().toISOString();
 
-    if (isRawMaterialStoreIssuing) {
-      mov.accepted = false;
-      if (remarks) mov.remarks = remarks;
-      if (extraFields?.allottedLocation !== undefined) mov.allottedLocation = extraFields.allottedLocation;
-      if (extraFields?.rackNo !== undefined) mov.rackNo = extraFields.rackNo;
-      if (extraFields?.quantity !== undefined) mov.quantity = extraFields.quantity;
-      if (extraFields?.issueStatus !== undefined) mov.issueStatus = extraFields.issueStatus;
-    } else {
-      mov.accepted = true;
-      mov.acceptedBy = acceptedByName;
-      mov.acceptedDate = new Date().toISOString();
-      if (remarks) mov.remarks = remarks;
-      if (extraFields?.allottedLocation !== undefined) mov.allottedLocation = extraFields.allottedLocation;
-      if (extraFields?.rackNo !== undefined) mov.rackNo = extraFields.rackNo;
-      if (extraFields?.quantity !== undefined) mov.quantity = extraFields.quantity;
-      if (extraFields?.issueStatus !== undefined) mov.issueStatus = extraFields.issueStatus;
-      else if (mov.isIssueRequest) mov.issueStatus = 'Issued';
-    }
-
-    // Track modification in the perfect audit trail
-    mov.modifiedByUserId = acceptedByUserId;
-    mov.modifiedByUserName = acceptedByName;
-    mov.modifiedDate = new Date().toISOString();
-    mov.modifiedAction = 'ACCEPT';
-
-    // 1. Update Local Storage offline cache first
-    setLocalStorageItem('mfr_movements', list);
-
-    // 2. Write to physical Firestore using Atomic Transaction when online
+    // 1. Physical Firestore Atomic Transaction (When Online)
     if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
         await runTransaction(db, async (transaction) => {
+          // ==========================================
+          // PHASE 1: ALL READS & VALIDATIONS
+          // ==========================================
           const movRef = doc(db, 'mfr_movements', movementId);
-          transaction.set(movRef, mov);
+          const movSnap = await transaction.get(movRef);
 
-          if (!mov.jobCardNo.startsWith('STOCK-IN-')) {
-            const jcUpperRef = doc(db, 'mfr_job_cards', mov.jobCardNo.toUpperCase());
-            let jcSnap = await transaction.get(jcUpperRef);
-            let targetJcRef = jcUpperRef;
-            if (!jcSnap.exists()) {
-              const jcAsIsRef = doc(db, 'mfr_job_cards', mov.jobCardNo);
-              const asIsSnap = await transaction.get(jcAsIsRef);
-              if (asIsSnap.exists()) {
-                jcSnap = asIsSnap;
+          let currentMovData: MaterialMovement;
+          if (movSnap.exists()) {
+            currentMovData = movSnap.data() as MaterialMovement;
+          } else if (localMov) {
+            currentMovData = localMov;
+          } else {
+            throw new Error(`Movement ${movementId} not found in database.`);
+          }
+
+          // IDEMPOTENCY: If already accepted on server, exit safely without error
+          if (currentMovData.accepted && currentMovData.issueStatus !== 'Rejected') {
+            isAlreadyAccepted = true;
+            finalMovement = currentMovData;
+            return;
+          }
+
+          // Validation
+          if (currentMovData.deletedDate || (currentMovData as any).status === 'deleted') {
+            throw new Error(`Movement ${movementId} has been cancelled or deleted.`);
+          }
+
+          targetJobCardNo = currentMovData.jobCardNo;
+
+          // Read Job Card snapshot (ALL READS BEFORE ANY WRITES)
+          let jcSnap: any = null;
+          let targetJcRef: any = null;
+
+          if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
+            const jcUpperRef = doc(db, 'mfr_job_cards', targetJobCardNo.toUpperCase());
+            const snapUpper = await transaction.get(jcUpperRef);
+            if (snapUpper.exists()) {
+              jcSnap = snapUpper;
+              targetJcRef = jcUpperRef;
+              targetJcDocId = targetJobCardNo.toUpperCase();
+            } else {
+              const jcAsIsRef = doc(db, 'mfr_job_cards', targetJobCardNo);
+              const snapAsIs = await transaction.get(jcAsIsRef);
+              if (snapAsIs.exists()) {
+                jcSnap = snapAsIs;
                 targetJcRef = jcAsIsRef;
+                targetJcDocId = targetJobCardNo;
               }
             }
+          }
 
-            if (jcSnap.exists()) {
-              const jcData = jcSnap.data() as JobCard;
-              const nextVersion = (jcData.version || 1) + 1;
-              const nowIso = new Date().toISOString();
+          // Compute In-Memory New Movement State
+          const isRawMaterialStoreIssuing = currentMovData.isIssueRequest && 
+                                            currentMovData.fromDepartment === 'Raw Material Store' && 
+                                            currentMovData.toDepartment === 'Production' && 
+                                            extraFields?.issueStatus === 'Issued';
 
-              if (mov.toDepartment === 'Completed') {
-                const newBalance = Math.max(0, (jcData.orderQty || 0) - mov.quantity);
-                transaction.update(targetJcRef, {
-                  status: 'Completed',
-                  completed: true,
-                  currentQty: mov.quantity,
-                  balanceQty: newBalance,
-                  version: nextVersion,
-                  updatedAt: nowIso,
-                  updatedBy: acceptedByName || acceptedByUserId
-                });
-              } else {
-                const targetStatus = mov.toDepartment === 'Production' ? 'Pending' : 'In Process';
-                const updates: any = {
-                  status: targetStatus,
-                  currentDepartment: mov.toDepartment,
-                  currentQty: mov.quantity,
-                  version: nextVersion,
-                  updatedAt: nowIso,
-                  updatedBy: acceptedByName || acceptedByUserId
+          const updatedMov: MaterialMovement = {
+            ...currentMovData,
+            modifiedByUserId: acceptedByUserId,
+            modifiedByUserName: acceptedByName,
+            modifiedDate: nowIso,
+            modifiedAction: 'ACCEPT'
+          };
+
+          if (isRawMaterialStoreIssuing) {
+            updatedMov.accepted = false;
+            if (remarks) updatedMov.remarks = remarks;
+            if (extraFields?.allottedLocation !== undefined) updatedMov.allottedLocation = extraFields.allottedLocation;
+            if (extraFields?.rackNo !== undefined) updatedMov.rackNo = extraFields.rackNo;
+            if (extraFields?.quantity !== undefined) updatedMov.quantity = extraFields.quantity;
+            if (extraFields?.issueStatus !== undefined) updatedMov.issueStatus = extraFields.issueStatus;
+          } else {
+            updatedMov.accepted = true;
+            updatedMov.acceptedBy = acceptedByName || acceptedByUserId;
+            updatedMov.acceptedDate = nowIso;
+            if (remarks) updatedMov.remarks = remarks;
+            if (extraFields?.allottedLocation !== undefined) updatedMov.allottedLocation = extraFields.allottedLocation;
+            if (extraFields?.rackNo !== undefined) updatedMov.rackNo = extraFields.rackNo;
+            if (extraFields?.quantity !== undefined) updatedMov.quantity = extraFields.quantity;
+            if (extraFields?.issueStatus !== undefined) updatedMov.issueStatus = extraFields.issueStatus;
+            else if (currentMovData.isIssueRequest) updatedMov.issueStatus = 'Issued';
+          }
+
+          finalMovement = updatedMov;
+
+          // Compute In-Memory New Job Card State
+          if (jcSnap && jcSnap.exists()) {
+            const jcData = jcSnap.data() as JobCard;
+            const nextVersion = (jcData.version || 1) + 1;
+
+            if (currentMovData.toDepartment === 'Completed') {
+              const newBalance = Math.max(0, (jcData.orderQty || 0) - (updatedMov.quantity || currentMovData.quantity));
+              finalJobCardUpdates = {
+                status: 'Completed',
+                completed: true,
+                currentQty: updatedMov.quantity || currentMovData.quantity,
+                balanceQty: newBalance,
+                version: nextVersion,
+                updatedAt: nowIso,
+                updatedBy: acceptedByName || acceptedByUserId
+              };
+            } else {
+              const targetStatus = currentMovData.toDepartment === 'Production' ? 'Pending' : 'In Process';
+              const jcUpdates: any = {
+                status: targetStatus,
+                currentDepartment: currentMovData.toDepartment,
+                currentQty: updatedMov.quantity || currentMovData.quantity,
+                version: nextVersion,
+                updatedAt: nowIso,
+                updatedBy: acceptedByName || acceptedByUserId
+              };
+
+              if (currentMovData.toDepartment === 'Store' && extraFields) {
+                jcUpdates.storeDetails = {
+                  ...(jcData?.storeDetails || {}),
+                  locationBin: extraFields.allottedLocation || jcData?.storeDetails?.locationBin || '',
+                  rackNo: extraFields.rackNo || jcData?.storeDetails?.rackNo || ''
                 };
-
-                if (mov.toDepartment === 'Store' && extraFields) {
-                  updates.storeDetails = {
-                    ...(jcData?.storeDetails || {}),
-                    locationBin: extraFields.allottedLocation || jcData?.storeDetails?.locationBin || '',
-                    rackNo: extraFields.rackNo || jcData?.storeDetails?.rackNo || ''
-                  };
-                }
-
-                if (mov.fromDepartment === 'Raw Material Store' && mov.isIssueRequest) {
-                  const prevIssuedQty = jcData?.rawMaterialStoreDetails?.issuedQty || 0;
-                  const prevRequestedQty = jcData?.rawMaterialStoreDetails?.requestedQty || 0;
-                  const newThisIssue = extraFields?.quantity || (mov as any).requestedQty || 0;
-                  const newThisReq = (mov as any).requestedQty || 0;
-
-                  updates.rawMaterialStoreDetails = {
-                    ...(jcData?.rawMaterialStoreDetails || {}),
-                    materialCode: (mov as any).processDetails?.rawMaterialCode || jcData?.rawMaterialStoreDetails?.materialCode || '',
-                    materialName: (mov as any).processDetails?.rawMaterialName || jcData?.rawMaterialStoreDetails?.materialName || '',
-                    requestedQty: prevRequestedQty > 0 ? (prevRequestedQty + newThisReq) : newThisReq,
-                    issuedQty: extraFields?.issueStatus === 'Issued' ? (prevIssuedQty + newThisIssue) : prevIssuedQty,
-                    issueStatus: extraFields?.issueStatus || 'Issued',
-                    remarks: remarks || mov.remarks || '',
-                    binLocation: extraFields?.allottedLocation || '',
-                    rejectionReason: extraFields?.issueStatus === 'Rejected' ? remarks : ''
-                  };
-                  if (extraFields?.issueStatus === 'Issued') {
-                    updates.currentQty = (jcData?.currentQty || 0) + newThisIssue;
-                  }
-                }
-
-                transaction.update(targetJcRef, updates);
               }
+
+              if (currentMovData.fromDepartment === 'Raw Material Store' && currentMovData.isIssueRequest) {
+                const prevIssuedQty = jcData?.rawMaterialStoreDetails?.issuedQty || 0;
+                const prevRequestedQty = jcData?.rawMaterialStoreDetails?.requestedQty || 0;
+                const newThisIssue = extraFields?.quantity || (currentMovData as any).requestedQty || 0;
+                const newThisReq = (currentMovData as any).requestedQty || 0;
+
+                jcUpdates.rawMaterialStoreDetails = {
+                  ...(jcData?.rawMaterialStoreDetails || {}),
+                  materialCode: (currentMovData as any).processDetails?.rawMaterialCode || jcData?.rawMaterialStoreDetails?.materialCode || '',
+                  materialName: (currentMovData as any).processDetails?.rawMaterialName || jcData?.rawMaterialStoreDetails?.materialName || '',
+                  requestedQty: prevRequestedQty > 0 ? (prevRequestedQty + newThisReq) : newThisReq,
+                  issuedQty: extraFields?.issueStatus === 'Issued' ? (prevIssuedQty + newThisIssue) : prevIssuedQty,
+                  issueStatus: extraFields?.issueStatus || 'Issued',
+                  remarks: remarks || currentMovData.remarks || '',
+                  binLocation: extraFields?.allottedLocation || '',
+                  rejectionReason: extraFields?.issueStatus === 'Rejected' ? remarks : ''
+                };
+                if (extraFields?.issueStatus === 'Issued') {
+                  jcUpdates.currentQty = (jcData?.currentQty || 0) + newThisIssue;
+                }
+              }
+
+              finalJobCardUpdates = jcUpdates;
             }
+          }
+
+          // ==========================================
+          // PHASE 2: ALL WRITES (NO READS AFTER THIS)
+          // ==========================================
+          transaction.set(movRef, sanitizeForFirestore(updatedMov), { merge: true });
+
+          if (targetJcRef && finalJobCardUpdates) {
+            transaction.update(targetJcRef, sanitizeForFirestore(finalJobCardUpdates));
           }
         });
       } catch (txnErr) {
@@ -1842,143 +1893,154 @@ export class DBService {
       }
     }
 
-    // Update the corresponding job card status
-    // If sent to 'Completed', process job card closure
-    if (!mov.jobCardNo.startsWith('STOCK-IN-')) {
-      if (mov.toDepartment === 'Completed') {
-        const cards = await this.getJobCards();
-        const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === mov!.jobCardNo.toLowerCase());
-        if (cardIdx >= 0) {
-          const card = cards[cardIdx];
-          const newBalance = Math.max(0, card.orderQty - mov!.quantity);
-          await this.updateJobCard(mov!.jobCardNo, {
-            status: 'Completed',
-            completed: true,
-            currentQty: mov!.quantity,
-            balanceQty: newBalance
-          }, acceptedByUserId, acceptedByName);
-          
-          await this.createNotification({
-            department: 'Dispatch',
-            title: 'Dispatch Completed',
-            message: `Job ${mov!.jobCardNo} is fully completed with Final Dispatched Quantity of ${mov!.quantity} KG (Balance: ${newBalance} KG).`,
-            userId: 'all_dispatch'
-          });
-        }
-      } else {
-        // Set to appropriate state inside the target department
-        // If entering Production, start as Pending to let them initiate the run, otherwise In Process.
-        const targetStatus = mov.toDepartment === 'Production' ? 'Pending' : 'In Process';
-        
-        const jobCards = await this.getJobCards();
-        const jobCard = jobCards.find(c => c.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
-        
-        const updates: any = {
-          status: targetStatus,
-          currentDepartment: mov.toDepartment,
-          currentQty: mov.quantity
-        };
+    if (isAlreadyAccepted) {
+      return;
+    }
 
-        if (mov.toDepartment === 'Store' && extraFields) {
-          updates.storeDetails = {
-            ...(jobCard?.storeDetails || {}),
-            locationBin: extraFields.allottedLocation || jobCard?.storeDetails?.locationBin || '',
-            rackNo: extraFields.rackNo || jobCard?.storeDetails?.rackNo || ''
-          };
-        }
+    // ==========================================
+    // PHASE 3: POST-COMMIT LOCAL STATE, AUDIT LOG & SSE
+    // ==========================================
+    const currentMovements = await this.getMovements();
+    const updatedMov = finalMovement || {
+      ...localMov!,
+      accepted: true,
+      acceptedBy: acceptedByName || acceptedByUserId,
+      acceptedDate: nowIso,
+      modifiedByUserId: acceptedByUserId,
+      modifiedByUserName: acceptedByName,
+      modifiedDate: nowIso,
+      modifiedAction: 'ACCEPT'
+    };
 
-        if (mov.fromDepartment === 'Raw Material Store' && mov.isIssueRequest) {
-          const prevIssuedQty = jobCard?.rawMaterialStoreDetails?.issuedQty || 0;
-          const prevRequestedQty = jobCard?.rawMaterialStoreDetails?.requestedQty || 0;
-          const newThisIssue = extraFields?.quantity || (mov as any).requestedQty || 0;
-          const newThisReq = (mov as any).requestedQty || 0;
+    const movListIdx = currentMovements.findIndex(m => m.movementId === movementId);
+    if (movListIdx >= 0) {
+      currentMovements[movListIdx] = updatedMov;
+    } else {
+      currentMovements.unshift(updatedMov);
+    }
+    setLocalStorageItem('mfr_movements', currentMovements);
+    this.setMemCache('mfr_movements', currentMovements);
 
-          updates.rawMaterialStoreDetails = {
-            ...(jobCard?.rawMaterialStoreDetails || {}),
-            materialCode: (mov as any).processDetails?.rawMaterialCode || jobCard?.rawMaterialStoreDetails?.materialCode || '',
-            materialName: (mov as any).processDetails?.rawMaterialName || jobCard?.rawMaterialStoreDetails?.materialName || '',
-            requestedQty: prevRequestedQty > 0 ? (prevRequestedQty + newThisReq) : newThisReq,
-            issuedQty: extraFields?.issueStatus === 'Issued' ? (prevIssuedQty + newThisIssue) : prevIssuedQty,
-            issueStatus: extraFields?.issueStatus || 'Issued',
-            remarks: remarks || mov.remarks || '',
-            binLocation: extraFields?.allottedLocation || '',
-            rejectionReason: extraFields?.issueStatus === 'Rejected' ? remarks : ''
-          };
-          if (extraFields?.issueStatus === 'Issued') {
-            updates.currentQty = (jobCard?.currentQty || 0) + newThisIssue;
-          }
-        }
-
-        await this.updateJobCard(mov.jobCardNo, updates, acceptedByUserId, acceptedByName);
-
-        await this.createNotification({
-          department: mov.fromDepartment,
-          title: 'Material Accepted',
-          message: `${acceptedByName} accepted ${mov.quantity} KG for Job Card ${mov.jobCardNo} at ${mov.toDepartment}.`,
-          userId: 'previous_dept'
-        });
+    // Update local job cards list
+    if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
+      const cards = await this.getJobCards();
+      const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === targetJobCardNo.toLowerCase());
+      if (cardIdx >= 0) {
+        const existingCard = cards[cardIdx];
+        const updatedCard = {
+          ...existingCard,
+          ...(finalJobCardUpdates || {
+            currentDepartment: updatedMov.toDepartment,
+            status: updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process'),
+            currentQty: updatedMov.quantity,
+            version: (existingCard.version || 1) + 1,
+            updatedAt: nowIso,
+            updatedBy: acceptedByName || acceptedByUserId
+          })
+        } as JobCard;
+        cards[cardIdx] = updatedCard;
+        setLocalStorageItem('mfr_job_cards', cards);
+        this.setMemCache('mfr_job_cards', cards);
       }
     }
 
+    // Audit Logging
     await this.logAction(
       acceptedByUserId, 
       acceptedByName, 
       'ACCEPT_MATERIAL', 
-      `User ${acceptedByName} (ID: ${acceptedByUserId}) accepted/modified material movement ${movementId}: Confirmed transfer of ${mov.quantity} KG for ${mov.jobCardNo} at ${mov.toDepartment}.`
+      `User ${acceptedByName} (ID: ${acceptedByUserId}) accepted material movement ${movementId}: Confirmed transfer of ${updatedMov.quantity} KG for ${updatedMov.jobCardNo} at ${updatedMov.toDepartment}.`
     );
-    
-    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
-    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId, jobCardNo: mov.jobCardNo }).catch(() => {});
-    await this.broadcastEvent('JOB_UPDATED', { jobCardNo: mov.jobCardNo }).catch(() => {});
+
+    // Notification to previous department
+    if (updatedMov.fromDepartment) {
+      await this.createNotification({
+        department: updatedMov.fromDepartment,
+        title: 'Material Accepted',
+        message: `${acceptedByName} accepted ${updatedMov.quantity} KG for Job Card ${updatedMov.jobCardNo} at ${updatedMov.toDepartment}.`,
+        userId: `all_${updatedMov.fromDepartment.toLowerCase().replace(/\s+/g, '_')}`
+      }).catch(() => {});
+    }
+
+    // Broadcast SSE Events AFTER COMMIT
+    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId, jobCardNo: updatedMov.jobCardNo }).catch(() => {});
+    if (targetJobCardNo) {
+      await this.broadcastEvent('JOB_UPDATED', { jobCardNo: targetJobCardNo }).catch(() => {});
+    }
 
     // Log to Google Sheets
-    logMaterialMovementToSheets(mov).catch(err => console.warn('Google Sheets movement log failed:', err));
+    logMaterialMovementToSheets(updatedMov).catch(err => console.warn('Google Sheets movement log failed:', err));
   }
 
   static async rejectMovement(movementId: string, rejectedByUserId: string, rejectedByName: string, remarks: string): Promise<void> {
-    // 1. Remove from Local Storage list first
     const list = await this.getMovements();
     const idx = list.findIndex(m => m.movementId === movementId);
-    if (idx === -1) throw new Error(`Movement ${movementId} not found`);
-    const mov = list[idx];
-    
-    // Track deletion/rejection info before we splice it out of active list
-    mov.deletedByUserId = rejectedByUserId;
-    mov.deletedByUserName = rejectedByName;
-    mov.deletedDate = new Date().toISOString();
+    const localMov = idx >= 0 ? list[idx] : null;
 
-    list.splice(idx, 1);
-    setLocalStorageItem('mfr_movements', list);
+    let targetJobCardNo = localMov?.jobCardNo || '';
+    let finalJobCardUpdates: Partial<JobCard> | null = null;
+    const nowIso = new Date().toISOString();
 
-    // 2. Write to physical Firestore using Atomic Transaction when online
+    // 1. Physical Firestore Atomic Transaction (When Online)
     if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
         await runTransaction(db, async (transaction) => {
+          // ==========================================
+          // PHASE 1: ALL READS & VALIDATIONS
+          // ==========================================
           const movRef = doc(db, 'mfr_movements', movementId);
-          transaction.delete(movRef);
+          const movSnap = await transaction.get(movRef);
 
-          const jcUpperRef = doc(db, 'mfr_job_cards', mov.jobCardNo.toUpperCase());
-          let jcSnap = await transaction.get(jcUpperRef);
-          let targetJcRef = jcUpperRef;
-          if (!jcSnap.exists()) {
-            const jcAsIsRef = doc(db, 'mfr_job_cards', mov.jobCardNo);
-            const asIsSnap = await transaction.get(jcAsIsRef);
-            if (asIsSnap.exists()) {
-              jcSnap = asIsSnap;
-              targetJcRef = jcAsIsRef;
+          let currentMovData: MaterialMovement;
+          if (movSnap.exists()) {
+            currentMovData = movSnap.data() as MaterialMovement;
+          } else if (localMov) {
+            currentMovData = localMov;
+          } else {
+            return;
+          }
+
+          targetJobCardNo = currentMovData.jobCardNo;
+
+          // Read Job Card snapshot
+          let jcSnap: any = null;
+          let targetJcRef: any = null;
+
+          if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
+            const jcUpperRef = doc(db, 'mfr_job_cards', targetJobCardNo.toUpperCase());
+            const snapUpper = await transaction.get(jcUpperRef);
+            if (snapUpper.exists()) {
+              jcSnap = snapUpper;
+              targetJcRef = jcUpperRef;
+            } else {
+              const jcAsIsRef = doc(db, 'mfr_job_cards', targetJobCardNo);
+              const snapAsIs = await transaction.get(jcAsIsRef);
+              if (snapAsIs.exists()) {
+                jcSnap = snapAsIs;
+                targetJcRef = jcAsIsRef;
+              }
             }
           }
 
-          if (jcSnap.exists()) {
+          if (jcSnap && jcSnap.exists()) {
             const jcData = jcSnap.data() as JobCard;
             const nextVersion = (jcData.version || 1) + 1;
-            transaction.update(targetJcRef, {
+            finalJobCardUpdates = {
               status: 'Rejected',
-              currentDepartment: mov.fromDepartment,
+              currentDepartment: currentMovData.fromDepartment,
               version: nextVersion,
-              updatedAt: new Date().toISOString(),
+              updatedAt: nowIso,
               updatedBy: rejectedByName || rejectedByUserId
-            });
+            };
+          }
+
+          // ==========================================
+          // PHASE 2: ALL WRITES
+          // ==========================================
+          transaction.delete(movRef);
+
+          if (targetJcRef && finalJobCardUpdates) {
+            transaction.update(targetJcRef, sanitizeForFirestore(finalJobCardUpdates));
           }
         });
       } catch (txnErr) {
@@ -1988,37 +2050,63 @@ export class DBService {
       }
     }
 
-    // Revert Job Card department to previous and mark status 'Rejected'
-    await this.updateJobCard(mov.jobCardNo, {
-      status: 'Rejected',
-      currentDepartment: mov.fromDepartment
-    }, rejectedByUserId, rejectedByName);
+    // ==========================================
+    // PHASE 3: POST-COMMIT LOCAL STATE, AUDIT & SSE
+    // ==========================================
+    const currentList = await this.getMovements();
+    const updatedList = currentList.filter(m => m.movementId !== movementId);
+    setLocalStorageItem('mfr_movements', updatedList);
+    this.setMemCache('mfr_movements', updatedList);
 
-    // Create alarm notification for sender
-    await this.createNotification({
-      department: mov.fromDepartment,
-      title: '⚠️ Material Rejected',
-      message: `${rejectedByName} rejected Job Card ${mov.jobCardNo} movement. Remarks: "${remarks}"`,
-      userId: `all_${mov.fromDepartment.toLowerCase().replace(' ', '_')}`
-    });
+    if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
+      const cards = await this.getJobCards();
+      const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === targetJobCardNo.toLowerCase());
+      if (cardIdx >= 0) {
+        cards[cardIdx] = {
+          ...cards[cardIdx],
+          status: 'Rejected',
+          currentDepartment: localMov ? localMov.fromDepartment : cards[cardIdx].currentDepartment,
+          version: (cards[cardIdx].version || 1) + 1,
+          updatedAt: nowIso,
+          updatedBy: rejectedByName || rejectedByUserId
+        };
+        setLocalStorageItem('mfr_job_cards', cards);
+        this.setMemCache('mfr_job_cards', cards);
+      }
+    }
 
+    // Notification for sender
+    if (localMov?.fromDepartment) {
+      await this.createNotification({
+        department: localMov.fromDepartment,
+        title: '⚠️ Material Rejected',
+        message: `${rejectedByName} rejected Job Card ${targetJobCardNo} movement. Remarks: "${remarks}"`,
+        userId: `all_${localMov.fromDepartment.toLowerCase().replace(/\s+/g, '_')}`
+      }).catch(() => {});
+    }
+
+    // Audit Log
     await this.logAction(
       rejectedByUserId, 
       rejectedByName, 
       'REJECT_MATERIAL', 
-      `User ${rejectedByName} (ID: ${rejectedByUserId}) rejected/deleted material movement ${movementId}: Sent ${mov.quantity} KG of Job Card ${mov.jobCardNo} back to ${mov.fromDepartment} from ${mov.toDepartment}. Reason: "${remarks}"`
+      `User ${rejectedByName} (ID: ${rejectedByUserId}) rejected/deleted material movement ${movementId}: Sent ${localMov?.quantity || 0} KG of Job Card ${targetJobCardNo} back to ${localMov?.fromDepartment || 'origin'} from ${localMov?.toDepartment || 'destination'}. Reason: "${remarks}"`
     );
-    
-    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
-    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId, jobCardNo: mov.jobCardNo }).catch(() => {});
-    await this.broadcastEvent('JOB_UPDATED', { jobCardNo: mov.jobCardNo }).catch(() => {});
-    
+
+    // Broadcast SSE Events
+    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId, jobCardNo: targetJobCardNo }).catch(() => {});
+    if (targetJobCardNo) {
+      await this.broadcastEvent('JOB_UPDATED', { jobCardNo: targetJobCardNo }).catch(() => {});
+    }
+
     // Log to Google Sheets
-    logMaterialMovementToSheets({
-      ...mov,
-      accepted: false,
-      remarks: `REJECTED: ${remarks}`
-    }).catch(err => console.warn('Google Sheets movement log failed:', err));
+    if (localMov) {
+      logMaterialMovementToSheets({
+        ...localMov,
+        accepted: false,
+        remarks: `REJECTED: ${remarks}`
+      }).catch(err => console.warn('Google Sheets movement log failed:', err));
+    }
   }
 
   static async updateMovement(movementId: string, quantity: number, remarks: string, userId: string, userName: string): Promise<void> {
@@ -3686,53 +3774,6 @@ export class DBService {
     }
 
     return updated;
-  }
-
-  static subscribeProcessTransfersIncremental(
-    onInitial: (transfers: ProcessTransfer[]) => void,
-    onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: ProcessTransfer }[]) => void
-  ): () => void {
-    if (useRealFirebase && db) {
-      try {
-        let isInitial = true;
-        const unsub = onSnapshot(collection(db, 'mfr_process_transfers'), (snapshot) => {
-          if (isInitial) {
-            isInitial = false;
-            const all: ProcessTransfer[] = [];
-            snapshot.forEach(d => all.push(d.data() as ProcessTransfer));
-            onInitial(all);
-          } else {
-            const changes = snapshot.docChanges().map(change => ({
-              type: change.type as 'added' | 'modified' | 'removed',
-              doc: change.doc.data() as ProcessTransfer
-            }));
-            if (changes.length > 0) {
-              onChanges(changes);
-            }
-          }
-        }, (err) => {
-          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
-          console.error("Firestore watch failed for process transfers:", err);
-          try {
-            handleFirestoreError(err, OperationType.GET, 'mfr_process_transfers');
-          } catch (e) {}
-        });
-        return this.registerUnsubscriber(unsub);
-      } catch (err) {
-        console.error("Failed to register process transfers incremental listener:", err);
-      }
-    }
-
-    const handler = (e: Event) => {
-      const customEvent = e as CustomEvent;
-      if (customEvent.detail && customEvent.detail.collection === 'mfr_process_transfers') {
-        this.getProcessTransfers().then(onInitial);
-      }
-    };
-    window.addEventListener('mock-db-update', handler);
-    return this.registerUnsubscriber(() => {
-      window.removeEventListener('mock-db-update', handler);
-    });
   }
 }
 
