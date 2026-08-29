@@ -2259,11 +2259,12 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     list.unshift(newNotif);
     setLocalStorageItem('mfr_notifications', list);
+    this.setMemCache('mfr_notifications', list);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
-        await setDoc(doc(db, 'mfr_notifications', newId), newNotif);
+        await setDoc(doc(db, 'mfr_notifications', newId), sanitizeForFirestore(newNotif));
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, `mfr_notifications/${newId}`);
       }
@@ -2277,9 +2278,10 @@ export class DBService {
     const list = await this.getNotifications();
     const filtered = list.filter(n => n.notificationId !== id);
     setLocalStorageItem('mfr_notifications', filtered);
+    this.setMemCache('mfr_notifications', filtered);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
         await deleteDoc(doc(db, 'mfr_notifications', id));
       } catch (err) {
@@ -2400,14 +2402,36 @@ export class DBService {
 
     logs.unshift(newLog);
     setLocalStorageItem('mfr_audit_logs', logs.slice(0, 500)); // keep last 500 logs
+    this.setMemCache('mfr_audit_logs', logs.slice(0, 500));
 
-    if (useRealFirebase && db) {
-      setDoc(doc(db, 'mfr_audit_logs', newId), newLog).catch(err => {
-        handleFirestoreError(err, OperationType.WRITE, `mfr_audit_logs/${newId}`);
+    // 1. Post to authoritative backend server endpoint
+    const apiBase = getApiBaseUrl();
+    try {
+      fetch(`${apiBase}/api/audit-logs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newLog)
+      }).catch(async () => {
+        // 2. Direct client fallback ONLY if client is actively authenticated in Firebase Auth
+        if (useRealFirebase && db && auth?.currentUser) {
+          try {
+            await setDoc(doc(db, 'mfr_audit_logs', newId), sanitizeForFirestore(newLog));
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, `mfr_audit_logs/${newId}`);
+          }
+        }
       });
+    } catch (_) {
+      if (useRealFirebase && db && auth?.currentUser) {
+        try {
+          await setDoc(doc(db, 'mfr_audit_logs', newId), sanitizeForFirestore(newLog));
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `mfr_audit_logs/${newId}`);
+        }
+      }
     }
 
-    // Log to Google Sheets asynchronously in background
+    // 3. Log to Google Sheets asynchronously in background
     logActionToSheets(newLog).catch(err => console.warn('Google Sheets action log failed:', err));
   }
 

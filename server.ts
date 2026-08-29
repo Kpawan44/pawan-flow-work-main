@@ -2321,6 +2321,45 @@ async function startServer() {
     "Completed"
   ];
 
+  // POST /api/audit-logs — Authoritative Server Audit Logging
+  app.post("/api/audit-logs", async (req, res) => {
+    try {
+      const { id, userId, userName, action, details, timestamp } = req.body || {};
+      if (!action || !details) {
+        return res.status(400).json({ success: false, error: "Action and details are required." });
+      }
+
+      const auditId = id || `AL-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const now = timestamp || new Date().toISOString();
+      const auditData = {
+        id: auditId,
+        timestamp: now,
+        userId: userId || "system",
+        userName: userName || "System",
+        action,
+        details
+      };
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            await dbAdmin.collection("mfr_audit_logs").doc(auditId).set(auditData);
+            return res.json({ success: true, id: auditId });
+          }
+        } catch (adminErr) {
+          console.warn("[AUDIT] Admin SDK write failed, falling back to REST:", adminErr);
+        }
+      }
+
+      await firestoreRestSetDoc("mfr_audit_logs", auditId, auditData);
+      return res.json({ success: true, id: auditId });
+    } catch (err: any) {
+      console.error("[AUDIT] Failed to write audit log:", err);
+      return res.status(500).json({ success: false, error: err.message || "Failed to write audit log" });
+    }
+  });
+
   app.post("/api/inventory/movement", requireFirebaseAuth, async (req, res) => {
     try {
       const authUid = (req as any).authUid;
