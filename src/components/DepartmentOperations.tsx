@@ -682,8 +682,14 @@ export default function DepartmentOperations({
         heatTreatmentRequired: processType === 'Purchase' ? false : htRequired,
         currentQty: numQty,
         currentDepartment: processType === 'Purchase' ? 'Purchase' : 'Production',
-        status: 'Pending',
+        status: 'Pending Acceptance',
         processType
+      }, {
+        fromDepartment: 'Dispatch',
+        toDepartment: processType === 'Purchase' ? 'Purchase' : 'Production',
+        quantity: numQty,
+        accepted: false,
+        remarks: dispatchRemarks?.trim() || 'Order booked by Dispatch. Raw material and job ticket sent to Production Incoming Ingress.'
       });
 
       // Reset
@@ -713,11 +719,16 @@ export default function DepartmentOperations({
         heatTreatmentRequired: item.htRequired,
         currentQty: item.orderQty,
         currentDepartment: 'Production',
-        status: 'Pending',
+        status: 'Pending Acceptance',
         processType: 'Manufacturing'
       }));
 
-      onCreateJobCard(jobs);
+      onCreateJobCard(jobs, {
+        fromDepartment: 'Dispatch',
+        toDepartment: 'Production',
+        accepted: false,
+        remarks: dispatchRemarks?.trim() || 'Order booked by Dispatch. Raw material and job ticket sent to Production Incoming Ingress.'
+      });
 
       // Reset
       setMultiItems([]);

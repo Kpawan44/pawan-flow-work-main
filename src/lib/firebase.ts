@@ -1064,6 +1064,7 @@ export class DBService {
     
     const unitLabel = job.unit || 'KG';
     const isDirectProductionReady = newJob.status === 'Pending' || newJob.status === 'In Process';
+    const isDefaultAccepted = isDirectProductionReady && newJob.status !== 'Pending Acceptance';
     const defaultMovement: MaterialMovement = isPurchase ? {
       movementId: newMovementId,
       jobCardNo,
@@ -1082,9 +1083,9 @@ export class DBService {
       quantity: job.orderQty,
       transferBy: creatorName,
       transferDate: new Date().toISOString(),
-      accepted: isDirectProductionReady,
-      acceptedBy: isDirectProductionReady ? creatorName : undefined,
-      acceptedDate: isDirectProductionReady ? new Date().toISOString() : undefined,
+      accepted: isDefaultAccepted,
+      acceptedBy: isDefaultAccepted ? creatorName : undefined,
+      acceptedDate: isDefaultAccepted ? new Date().toISOString() : undefined,
       remarks: 'Order registered. Dispatching raw material and job ticket to Production.'
     };
 
