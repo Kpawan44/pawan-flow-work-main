@@ -234,10 +234,10 @@ function setLocalStorageItem<T>(key: string, value: T) {
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined' && Boolean(
     (window as any).Capacitor?.isNativePlatform?.() ||
-    window.location.protocol === 'capacitor:' ||
-    window.location.protocol === 'file:' ||
-    (typeof navigator !== 'undefined' && navigator.userAgent.toLowerCase().includes('electron')) ||
-    (window.location.hostname === 'localhost' && window.location.port !== '3000' && window.location.port !== '5173')
+    window.location?.protocol === 'capacitor:' ||
+    window.location?.protocol === 'file:' ||
+    (typeof navigator !== 'undefined' && navigator.userAgent?.toLowerCase?.()?.includes('electron')) ||
+    (window.location?.hostname === 'localhost' && window.location?.port !== '3000' && window.location?.port !== '5173')
   )) {
     return 'https://pmw-tracker-928410476586.asia-south1.run.app';
   }
@@ -2967,23 +2967,46 @@ export class DBService {
 
   // Realtime subscription emulation & Live Firestore triggers
   static subscribeToUpdates(collectionName: string, callback: () => void): () => void {
-    if (useRealFirebase && db) {
-      try {
-        const unsub = onSnapshot(collection(db, collectionName), () => {
-          callback();
-        }, (err) => {
-          if (err?.code === 'permission-denied') return;
-          console.error(`Firestore watch failed for collection [${collectionName}]: `, err);
-          try {
-            handleFirestoreError(err, OperationType.GET, collectionName);
-          } catch (e) {
-            // Logged/handled via handleFirestoreError
-          }
-        });
-        return this.registerUnsubscriber(unsub);
-      } catch (err) {
-        console.error(`Failed to register Firestore real-time listener for ${collectionName}:`, err);
+    let currentFirestoreUnsub: (() => void) | null = null;
+    let isDisposed = false;
+    let retryTimer: any = null;
+
+    const startListener = () => {
+      if (isDisposed) return;
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+        currentFirestoreUnsub = null;
       }
+
+      if (useRealFirebase && db) {
+        try {
+          currentFirestoreUnsub = onSnapshot(collection(db, collectionName), () => {
+            if (isDisposed) return;
+            callback();
+          }, (err) => {
+            if (isDisposed) return;
+            console.warn(`[Firestore Watch ${collectionName}] Connection state notice:`, err?.code || err?.message);
+            if (retryTimer) clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => {
+              if (!isDisposed) startListener();
+            }, 3000);
+          });
+        } catch (err) {
+          console.error(`Failed to register Firestore real-time listener for ${collectionName}:`, err);
+        }
+      }
+    };
+
+    startListener();
+
+    let unsubAuth: (() => void) | null = null;
+    if (useRealFirebase && auth) {
+      unsubAuth = onAuthStateChanged(auth, (authUser) => {
+        if (isDisposed) return;
+        if (authUser) {
+          startListener();
+        }
+      });
     }
 
     const handler = (e: Event) => {
@@ -2993,7 +3016,16 @@ export class DBService {
       }
     };
     window.addEventListener('mock-db-update', handler);
+
     return this.registerUnsubscriber(() => {
+      isDisposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+      }
+      if (unsubAuth) {
+        try { unsubAuth(); } catch (_) {}
+      }
       window.removeEventListener('mock-db-update', handler);
     });
   }
@@ -3002,66 +3034,101 @@ export class DBService {
     onInitial: (jobCards: JobCard[]) => void,
     onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: JobCard }[]) => void
   ): () => void {
-    if (useRealFirebase && db) {
-      try {
-        let isInitial = true;
-        const unsub = onSnapshot(collection(db, 'mfr_job_cards'), (snapshot) => {
-          const localTombs = new Set(getLocalStorageItem<string[]>('mfr_deleted_job_cards', []).map(t => t.toLowerCase().trim()));
-          if (isInitial) {
-            isInitial = false;
-            const all: JobCard[] = [];
-            snapshot.forEach(d => {
-              const data = d.data() as JobCard;
-              if (data && data.jobCardNo) {
-                const jcNo = String(data.jobCardNo).toLowerCase().trim();
-                if (!localTombs.has(jcNo) && (data as any).active !== false && (data as any).status !== 'deleted' && !(data as any).deletedAt) {
-                  all.push(data);
-                }
-              }
-            });
-            const sorted = all.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-            onInitial(sorted);
-          } else {
-            const changes = snapshot.docChanges().map(change => {
-              const docData = change.doc.data() as JobCard;
-              return {
-                type: change.type as 'added' | 'modified' | 'removed',
-                doc: docData
-              };
-            }).filter(c => {
-              if (!c.doc || !c.doc.jobCardNo) return false;
-              const jcNo = String(c.doc.jobCardNo).toLowerCase().trim();
-              if (localTombs.has(jcNo)) return false;
-              if ((c.doc as any).active === false || (c.doc as any).status === 'deleted' || (c.doc as any).deletedAt) {
-                return false;
-              }
-              return true;
-            });
-            if (changes.length > 0) {
-              onChanges(changes);
-            }
-          }
-        }, (err) => {
-          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
-          console.error("Firestore watch failed for job cards:", err);
-          try {
-            handleFirestoreError(err, OperationType.GET, 'mfr_job_cards');
-          } catch (e) {}
-        });
-        return this.registerUnsubscriber(unsub);
-      } catch (err) {
-        console.error("Failed to register job cards incremental listener:", err);
+    let currentFirestoreUnsub: (() => void) | null = null;
+    let isDisposed = false;
+    let retryTimer: any = null;
+
+    const startListener = () => {
+      if (isDisposed) return;
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+        currentFirestoreUnsub = null;
       }
+
+      if (useRealFirebase && db) {
+        try {
+          let isInitial = true;
+          currentFirestoreUnsub = onSnapshot(collection(db, 'mfr_job_cards'), (snapshot) => {
+            if (isDisposed) return;
+            const localTombs = new Set(getLocalStorageItem<string[]>('mfr_deleted_job_cards', []).map(t => t.toLowerCase().trim()));
+            if (isInitial) {
+              isInitial = false;
+              const all: JobCard[] = [];
+              snapshot.forEach(d => {
+                const data = d.data() as JobCard;
+                if (data && data.jobCardNo) {
+                  const jcNo = String(data.jobCardNo).toLowerCase().trim();
+                  if (!localTombs.has(jcNo) && (data as any).active !== false && (data as any).status !== 'deleted' && !(data as any).deletedAt) {
+                    all.push(data);
+                  }
+                }
+              });
+              const sorted = all.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+              onInitial(sorted);
+            } else {
+              const changes = snapshot.docChanges().map(change => {
+                const docData = change.doc.data() as JobCard;
+                return {
+                  type: change.type as 'added' | 'modified' | 'removed',
+                  doc: docData
+                };
+              }).filter(c => {
+                if (!c.doc || !c.doc.jobCardNo) return false;
+                const jcNo = String(c.doc.jobCardNo).toLowerCase().trim();
+                if (localTombs.has(jcNo)) return false;
+                if ((c.doc as any).active === false || (c.doc as any).status === 'deleted' || (c.doc as any).deletedAt) {
+                  return false;
+                }
+                return true;
+              });
+              if (changes.length > 0) {
+                onChanges(changes);
+              }
+            }
+          }, (err) => {
+            if (isDisposed) return;
+            console.warn("[Firestore Watch mfr_job_cards] Connection state notice:", err?.code || err?.message);
+            if (retryTimer) clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => {
+              if (!isDisposed) startListener();
+            }, 3000);
+          });
+        } catch (err) {
+          console.error("Failed to register job cards incremental listener:", err);
+        }
+      }
+    };
+
+    startListener();
+
+    let unsubAuth: (() => void) | null = null;
+    if (useRealFirebase && auth) {
+      unsubAuth = onAuthStateChanged(auth, (authUser) => {
+        if (isDisposed) return;
+        if (authUser) {
+          console.info(`[Auth Lifecycle] Firebase Auth confirmed for UID [${authUser.uid}]. Refreshing Job Cards subscription stream.`);
+          startListener();
+        }
+      });
     }
 
     const handler = (e: Event) => {
       const customEvent = e as CustomEvent;
       if (customEvent.detail && customEvent.detail.collection === 'mfr_job_cards') {
-        this.getJobCards().then(onInitial);
+        this.getJobCards(true).then(onInitial);
       }
     };
     window.addEventListener('mock-db-update', handler);
+
     return this.registerUnsubscriber(() => {
+      isDisposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+      }
+      if (unsubAuth) {
+        try { unsubAuth(); } catch (_) {}
+      }
       window.removeEventListener('mock-db-update', handler);
     });
   }
@@ -3070,45 +3137,79 @@ export class DBService {
     onInitial: (movements: MaterialMovement[]) => void,
     onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: MaterialMovement }[]) => void
   ): () => void {
-    if (useRealFirebase && db) {
-      try {
-        let isInitial = true;
-        const unsub = onSnapshot(collection(db, 'mfr_movements'), (snapshot) => {
-          if (isInitial) {
-            isInitial = false;
-            const all: MaterialMovement[] = [];
-            snapshot.forEach(d => all.push(d.data() as MaterialMovement));
-            onInitial(all);
-          } else {
-            const changes = snapshot.docChanges().map(change => ({
-              type: change.type as 'added' | 'modified' | 'removed',
-              doc: change.doc.data() as MaterialMovement
-            }));
-            if (changes.length > 0) {
-              onChanges(changes);
-            }
-          }
-        }, (err) => {
-          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
-          console.error("Firestore watch failed for movements:", err);
-          try {
-            handleFirestoreError(err, OperationType.GET, 'mfr_movements');
-          } catch (e) {}
-        });
-        return this.registerUnsubscriber(unsub);
-      } catch (err) {
-        console.error("Failed to register movements incremental listener:", err);
+    let currentFirestoreUnsub: (() => void) | null = null;
+    let isDisposed = false;
+    let retryTimer: any = null;
+
+    const startListener = () => {
+      if (isDisposed) return;
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+        currentFirestoreUnsub = null;
       }
+
+      if (useRealFirebase && db) {
+        try {
+          let isInitial = true;
+          currentFirestoreUnsub = onSnapshot(collection(db, 'mfr_movements'), (snapshot) => {
+            if (isDisposed) return;
+            if (isInitial) {
+              isInitial = false;
+              const all: MaterialMovement[] = [];
+              snapshot.forEach(d => all.push(d.data() as MaterialMovement));
+              onInitial(all);
+            } else {
+              const changes = snapshot.docChanges().map(change => ({
+                type: change.type as 'added' | 'modified' | 'removed',
+                doc: change.doc.data() as MaterialMovement
+              }));
+              if (changes.length > 0) {
+                onChanges(changes);
+              }
+            }
+          }, (err) => {
+            if (isDisposed) return;
+            console.warn("[Firestore Watch mfr_movements] Connection state notice:", err?.code || err?.message);
+            if (retryTimer) clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => {
+              if (!isDisposed) startListener();
+            }, 3000);
+          });
+        } catch (err) {
+          console.error("Failed to register movements incremental listener:", err);
+        }
+      }
+    };
+
+    startListener();
+
+    let unsubAuth: (() => void) | null = null;
+    if (useRealFirebase && auth) {
+      unsubAuth = onAuthStateChanged(auth, (authUser) => {
+        if (isDisposed) return;
+        if (authUser) {
+          startListener();
+        }
+      });
     }
 
     const handler = (e: Event) => {
       const customEvent = e as CustomEvent;
       if (customEvent.detail && customEvent.detail.collection === 'mfr_movements') {
-        this.getMovements().then(onInitial);
+        this.getMovements(true).then(onInitial);
       }
     };
     window.addEventListener('mock-db-update', handler);
+
     return this.registerUnsubscriber(() => {
+      isDisposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+      }
+      if (unsubAuth) {
+        try { unsubAuth(); } catch (_) {}
+      }
       window.removeEventListener('mock-db-update', handler);
     });
   }
@@ -3146,7 +3247,7 @@ export class DBService {
     return this.subscribeMovementsIncremental(
       (allMovements) => computeAndNotify(allMovements),
       (_changes) => {
-        this.getMovements().then(all => computeAndNotify(all));
+        this.getMovements(true).then(all => computeAndNotify(all));
       }
     );
   }
@@ -3155,35 +3256,60 @@ export class DBService {
     onInitial: (logs: AuditLog[]) => void,
     onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: AuditLog }[]) => void
   ): () => void {
-    if (useRealFirebase && db) {
-      try {
-        let isInitial = true;
-        const unsub = onSnapshot(collection(db, 'mfr_audit_logs'), (snapshot) => {
-          if (isInitial) {
-            isInitial = false;
-            const all: AuditLog[] = [];
-            snapshot.forEach(d => all.push(d.data() as AuditLog));
-            onInitial(all);
-          } else {
-            const changes = snapshot.docChanges().map(change => ({
-              type: change.type as 'added' | 'modified' | 'removed',
-              doc: change.doc.data() as AuditLog
-            }));
-            if (changes.length > 0) {
-              onChanges(changes);
-            }
-          }
-        }, (err) => {
-          if (err?.code === 'permission-denied' && !auth?.currentUser) return;
-          console.error("Firestore watch failed for audit logs:", err);
-          try {
-            handleFirestoreError(err, OperationType.GET, 'mfr_audit_logs');
-          } catch (e) {}
-        });
-        return this.registerUnsubscriber(unsub);
-      } catch (err) {
-        console.error("Failed to register audit logs incremental listener:", err);
+    let currentFirestoreUnsub: (() => void) | null = null;
+    let isDisposed = false;
+    let retryTimer: any = null;
+
+    const startListener = () => {
+      if (isDisposed) return;
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+        currentFirestoreUnsub = null;
       }
+
+      if (useRealFirebase && db) {
+        try {
+          let isInitial = true;
+          currentFirestoreUnsub = onSnapshot(collection(db, 'mfr_audit_logs'), (snapshot) => {
+            if (isDisposed) return;
+            if (isInitial) {
+              isInitial = false;
+              const all: AuditLog[] = [];
+              snapshot.forEach(d => all.push(d.data() as AuditLog));
+              onInitial(all);
+            } else {
+              const changes = snapshot.docChanges().map(change => ({
+                type: change.type as 'added' | 'modified' | 'removed',
+                doc: change.doc.data() as AuditLog
+              }));
+              if (changes.length > 0) {
+                onChanges(changes);
+              }
+            }
+          }, (err) => {
+            if (isDisposed) return;
+            console.warn("[Firestore Watch mfr_audit_logs] Connection state notice:", err?.code || err?.message);
+            if (retryTimer) clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => {
+              if (!isDisposed) startListener();
+            }, 3000);
+          });
+        } catch (err) {
+          console.error("Failed to register audit logs incremental listener:", err);
+        }
+      }
+    };
+
+    startListener();
+
+    let unsubAuth: (() => void) | null = null;
+    if (useRealFirebase && auth) {
+      unsubAuth = onAuthStateChanged(auth, (authUser) => {
+        if (isDisposed) return;
+        if (authUser) {
+          startListener();
+        }
+      });
     }
 
     const handler = (e: Event) => {
@@ -3193,7 +3319,97 @@ export class DBService {
       }
     };
     window.addEventListener('mock-db-update', handler);
+
     return this.registerUnsubscriber(() => {
+      isDisposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+      }
+      if (unsubAuth) {
+        try { unsubAuth(); } catch (_) {}
+      }
+      window.removeEventListener('mock-db-update', handler);
+    });
+  }
+
+  static subscribeProcessTransfersIncremental(
+    onInitial: (transfers: ProcessTransfer[]) => void,
+    onChanges: (changes: { type: 'added' | 'modified' | 'removed'; doc: ProcessTransfer }[]) => void
+  ): () => void {
+    let currentFirestoreUnsub: (() => void) | null = null;
+    let isDisposed = false;
+    let retryTimer: any = null;
+
+    const startListener = () => {
+      if (isDisposed) return;
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+        currentFirestoreUnsub = null;
+      }
+
+      if (useRealFirebase && db) {
+        try {
+          let isInitial = true;
+          currentFirestoreUnsub = onSnapshot(collection(db, 'mfr_process_transfers'), (snapshot) => {
+            if (isDisposed) return;
+            if (isInitial) {
+              isInitial = false;
+              const all: ProcessTransfer[] = [];
+              snapshot.forEach(d => all.push(d.data() as ProcessTransfer));
+              onInitial(all);
+            } else {
+              const changes = snapshot.docChanges().map(change => ({
+                type: change.type as 'added' | 'modified' | 'removed',
+                doc: change.doc.data() as ProcessTransfer
+              }));
+              if (changes.length > 0) {
+                onChanges(changes);
+              }
+            }
+          }, (err) => {
+            if (isDisposed) return;
+            console.warn("[Firestore Watch mfr_process_transfers] Connection state notice:", err?.code || err?.message);
+            if (retryTimer) clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => {
+              if (!isDisposed) startListener();
+            }, 3000);
+          });
+        } catch (err) {
+          console.error("Failed to register process transfers incremental listener:", err);
+        }
+      }
+    };
+
+    startListener();
+
+    let unsubAuth: (() => void) | null = null;
+    if (useRealFirebase && auth) {
+      unsubAuth = onAuthStateChanged(auth, (authUser) => {
+        if (isDisposed) return;
+        if (authUser) {
+          startListener();
+        }
+      });
+    }
+
+    const handler = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail && customEvent.detail.collection === 'mfr_process_transfers') {
+        this.getProcessTransfers().then(onInitial);
+      }
+    };
+    window.addEventListener('mock-db-update', handler);
+
+    return this.registerUnsubscriber(() => {
+      isDisposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (currentFirestoreUnsub) {
+        try { currentFirestoreUnsub(); } catch (_) {}
+      }
+      if (unsubAuth) {
+        try { unsubAuth(); } catch (_) {}
+      }
       window.removeEventListener('mock-db-update', handler);
     });
   }

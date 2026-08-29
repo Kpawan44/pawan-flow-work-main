@@ -859,6 +859,8 @@ export default function App() {
                 sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(userProfile));
                 localStorage.setItem('mfr_active_user_uid', firebaseUser.uid);
                 localStorage.setItem('mfr_active_user_profile', JSON.stringify(userProfile));
+                DBService.invalidateCache();
+                refreshAllStates();
               }
             } else {
               // Profile not found in database for this Firebase UID
@@ -870,6 +872,7 @@ export default function App() {
               localStorage.removeItem('mfr_active_user_uid');
               localStorage.removeItem('mfr_active_user_profile');
               localStorage.removeItem('mfr_auth_token');
+              DBService.invalidateCache();
             }
           } catch (err) {
             console.error("Auth state synchronization error:", err);
@@ -889,6 +892,7 @@ export default function App() {
           // Only clear if neither storage has a profile
           if (!sessionStorage.getItem('mfr_active_user_profile') && !localStorage.getItem('mfr_active_user_profile')) {
             setCurrentUser(null);
+            DBService.invalidateCache();
           }
         }
       });
@@ -1282,6 +1286,7 @@ export default function App() {
     if (currentUser) {
       DBService.logAction(currentUser.userId, currentUser.name, 'USER_LOGOUT', 'Logged out of terminal');
     }
+    DBService.invalidateCache();
     setCurrentUser(null);
     sessionStorage.removeItem('mfr_active_user_uid');
     sessionStorage.removeItem('mfr_active_user_profile');
