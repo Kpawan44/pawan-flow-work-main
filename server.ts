@@ -988,6 +988,7 @@ async function startServer() {
 
       let decodedUid: string | null = null;
       let tokenGeneration: string | null = null;
+      let verifiedSessionPayload: any = null;
 
       // 1. Try Firebase Admin ID Token verification if available
       if (adminSdkHasPermission !== false) {
@@ -1018,6 +1019,7 @@ async function startServer() {
               if (payload && (payload.uid || payload.userId) && (!payload.exp || payload.exp > Date.now())) {
                 decodedUid = payload.uid || payload.userId;
                 tokenGeneration = payload.gen || null;
+                verifiedSessionPayload = payload;
               }
             }
           }
@@ -1076,6 +1078,19 @@ async function startServer() {
       }
       if (!userData) {
         userData = customUsersStore[decodedUid] || Object.values(customUsersStore).find((u: any) => u?.userId?.toLowerCase() === decodedUid?.toLowerCase());
+      }
+
+      // 3. Fallback to verified HMAC session token payload
+      if (!userData && verifiedSessionPayload && verifiedSessionPayload.department) {
+        userData = {
+          userId: decodedUid,
+          name: verifiedSessionPayload.name || decodedUid,
+          department: verifiedSessionPayload.department || "Production",
+          role: verifiedSessionPayload.role || "staff",
+          allowedDepartments: verifiedSessionPayload.allowedDepartments || [verifiedSessionPayload.department],
+          accessList: verifiedSessionPayload.accessList || [],
+          active: true
+        };
       }
 
       if (!userData) {
@@ -2163,6 +2178,215 @@ async function startServer() {
     }
   });
 
+  // POST /api/job-cards — Authoritative Server Job Card Creation
+  app.post("/api/job-cards", requireFirebaseAuth, async (req, res) => {
+    try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      if (!authUid || !requester) {
+        return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
+      }
+
+      const { jobCard, initialMovement: customInitialMovement } = req.body || {};
+      if (!jobCard || !jobCard.jobCardNo || !jobCard.partyName || !jobCard.orderQty) {
+        return res.status(400).json({ success: false, error: "jobCardNo, partyName, and orderQty are required." });
+      }
+
+      const authoritativeUserId = authUid;
+      const authoritativeUserName = requester.name || requester.userId || "Authorized User";
+      const now = new Date().toISOString();
+      const upperJobNo = jobCard.jobCardNo.toUpperCase().trim();
+      const isPurchase = jobCard.purchaseDetails && Object.keys(jobCard.purchaseDetails).length > 0;
+      const unitLabel = jobCard.unit || 'KG';
+
+      const newJob = {
+        ...jobCard,
+        jobCardNo: upperJobNo,
+        status: jobCard.status || 'Pending Acceptance',
+        createdBy: authoritativeUserName,
+        createdByUserId: authoritativeUserId,
+        balanceQty: jobCard.orderQty,
+        version: 1,
+        createdAt: now,
+        completed: false
+      };
+
+      const movId = `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const defaultMovement = isPurchase ? {
+        movementId: movId,
+        jobCardNo: upperJobNo,
+        fromDepartment: 'Purchase',
+        toDepartment: jobCard.currentDepartment || 'Store',
+        quantity: Number(jobCard.currentQty || jobCard.orderQty),
+        transferBy: authoritativeUserName,
+        transferDate: now,
+        accepted: false,
+        initiatedByUserId: authoritativeUserId,
+        initiatedByUserName: authoritativeUserName,
+        remarks: jobCard.purchaseDetails?.remarks || `Material inwarded from Supplier: ${jobCard.purchaseDetails?.supplierName || jobCard.partyName}. Total Received: ${jobCard.purchaseDetails?.receivedQty || jobCard.orderQty} ${unitLabel}, Sent to ${jobCard.currentDepartment || 'Store'}: ${jobCard.currentQty || jobCard.orderQty} ${unitLabel}.`
+      } : {
+        movementId: movId,
+        jobCardNo: upperJobNo,
+        fromDepartment: 'Dispatch',
+        toDepartment: jobCard.currentDepartment || 'Production',
+        quantity: Number(jobCard.orderQty),
+        transferBy: authoritativeUserName,
+        transferDate: now,
+        accepted: false,
+        initiatedByUserId: authoritativeUserId,
+        initiatedByUserName: authoritativeUserName,
+        remarks: 'Order registered. Dispatching raw material and job ticket to Production.'
+      };
+
+      const initialMovement = {
+        ...defaultMovement,
+        ...(customInitialMovement || {})
+      };
+
+      const notifId = `N-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const targetDept = isPurchase ? 'Store' : (jobCard.currentDepartment || 'Production');
+      const notifData = {
+        notificationId: notifId,
+        department: targetDept,
+        title: isPurchase ? 'New Purchase Inward Receipt' : 'New Production Queue Item',
+        message: isPurchase
+          ? `New Purchase Inward ${upperJobNo} generated for supplier ${jobCard.partyName}. Quantity: ${jobCard.currentQty || jobCard.orderQty} ${unitLabel}. Pending Store acceptance.`
+          : `Job Card ${upperJobNo} generated for ${jobCard.partyName}. Quantity: ${jobCard.orderQty} ${unitLabel}. Pending material acceptance.`,
+        userId: isPurchase ? 'all_store' : 'all_production',
+        read: false,
+        createdAt: now
+      };
+
+      const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const auditData = {
+        id: auditId,
+        timestamp: now,
+        userId: authoritativeUserId,
+        userName: authoritativeUserName,
+        action: "CREATE_JOB_CARD",
+        details: `Generated job card ${upperJobNo} for ${jobCard.partyName} (${jobCard.orderQty} ${unitLabel})`
+      };
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            await dbAdmin.collection("mfr_job_cards").doc(upperJobNo).set(newJob);
+            await dbAdmin.collection("mfr_movements").doc(initialMovement.movementId).set(initialMovement);
+            await dbAdmin.collection("mfr_notifications").doc(notifId).set(notifData);
+            await dbAdmin.collection("mfr_audit_logs").doc(auditId).set(auditData);
+          }
+        } catch (e) {
+          console.warn("[JOB_CARDS] Admin SDK write failed, falling back to REST:", e);
+        }
+      }
+
+      await Promise.all([
+        firestoreRestSetDoc("mfr_job_cards", upperJobNo, newJob),
+        firestoreRestSetDoc("mfr_movements", initialMovement.movementId, initialMovement),
+        firestoreRestSetDoc("mfr_notifications", notifId, notifData),
+        firestoreRestSetDoc("mfr_audit_logs", auditId, auditData)
+      ]);
+
+      broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: upperJobNo });
+      broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: initialMovement.movementId, jobCardNo: upperJobNo });
+      broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
+
+      return res.json({
+        success: true,
+        jobCard: newJob,
+        movement: initialMovement
+      });
+    } catch (err: any) {
+      console.error("[JOB_CARDS] Error creating job card:", err);
+      return res.status(500).json({ success: false, error: err.message || "Failed to create job card" });
+    }
+  });
+
+  // PUT /api/job-cards/:jobCardNo — Authoritative Server Job Card Update
+  app.put("/api/job-cards/:jobCardNo", requireFirebaseAuth, async (req, res) => {
+    try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      if (!authUid || !requester) {
+        return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
+      }
+
+      const rawJobCardNo = decodeURIComponent(req.params.jobCardNo).trim();
+      const upperId = rawJobCardNo.toUpperCase();
+      const updates = req.body || {};
+      const authoritativeUserId = authUid;
+      const authoritativeUserName = requester.name || requester.userId || "Authorized User";
+      const now = new Date().toISOString();
+
+      let updatedCard: any = null;
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            const jcRef = dbAdmin.collection("mfr_job_cards").doc(upperId);
+            const snap = await jcRef.get();
+            if (!snap.exists) {
+              return res.status(404).json({ success: false, error: `Job card ${rawJobCardNo} not found.` });
+            }
+            const existing = snap.data() as any;
+            const nextVersion = (existing.version || 1) + 1;
+            updatedCard = {
+              ...existing,
+              ...updates,
+              version: nextVersion,
+              updatedAt: now,
+              updatedBy: authoritativeUserName,
+              updatedByUserId: authoritativeUserId
+            };
+            await jcRef.set(updatedCard);
+          }
+        } catch (e) {
+          console.warn("[JOB_CARDS] Admin SDK update failed, falling back to REST:", e);
+        }
+      }
+
+      if (!updatedCard) {
+        let existing = await firestoreRestGetDoc("mfr_job_cards", upperId);
+        if (!existing) {
+          existing = await firestoreRestGetDoc("mfr_job_cards", rawJobCardNo);
+        }
+        if (!existing) {
+          return res.status(404).json({ success: false, error: `Job card ${rawJobCardNo} not found.` });
+        }
+        const nextVersion = (existing.version || 1) + 1;
+        updatedCard = {
+          ...existing,
+          ...updates,
+          version: nextVersion,
+          updatedAt: now,
+          updatedBy: authoritativeUserName,
+          updatedByUserId: authoritativeUserId
+        };
+        await firestoreRestSetDoc("mfr_job_cards", upperId, updatedCard);
+      }
+
+      const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const auditData = {
+        id: auditId,
+        timestamp: now,
+        userId: authoritativeUserId,
+        userName: authoritativeUserName,
+        action: "UPDATE_JOB_CARD",
+        details: `Updated Job Card ${upperId} (Version ${updatedCard.version})`
+      };
+      await firestoreRestSetDoc("mfr_audit_logs", auditId, auditData);
+
+      broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: upperId });
+
+      return res.json({ success: true, jobCard: updatedCard });
+    } catch (err: any) {
+      console.error("[JOB_CARDS] Error updating job card:", err);
+      return res.status(500).json({ success: false, error: err.message || "Failed to update job card" });
+    }
+  });
+
   app.delete("/api/job-cards/:jobCardNo", requireFirebaseAuth, async (req, res) => {
     try {
       const requester = (req as any).user;
@@ -2754,6 +2978,507 @@ async function startServer() {
       console.error("[INVENTORY] Material transaction error:", err);
       const status = err.statusCode || (err.message && err.message.includes("Insufficient") ? 400 : (err.message && err.message.includes("not found") ? 404 : 400));
       return res.status(status).json({ success: false, error: err.message || "Material movement transaction failed." });
+    }
+  });
+
+  // POST /api/movements/:movementId/accept — Authoritative Atomic Material Acceptance
+  app.post("/api/movements/:movementId/accept", requireFirebaseAuth, async (req, res) => {
+    try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      const movementId = req.params.movementId;
+      const { remarks, allottedLocation, rackNo, quantity, issueStatus } = req.body || {};
+
+      if (!authUid || !requester) {
+        return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
+      }
+
+      if (!movementId) {
+        return res.status(400).json({ success: false, error: "Movement ID is required." });
+      }
+
+      const authoritativeUserId = authUid;
+      const authoritativeUserName = requester.name || requester.userId || "Authorized User";
+      const now = new Date().toISOString();
+
+      let finalMovement: any = null;
+      let finalJobCard: any = null;
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const movRef = db.collection("mfr_movements").doc(movementId);
+
+            const txResult = await db.runTransaction(async (transaction) => {
+              // ============================================================
+              // PHASE 1: ALL TRANSACTION READS (STRICTLY BEFORE ANY WRITES)
+              // ============================================================
+              const movSnap = await transaction.get(movRef);
+              if (!movSnap.exists) {
+                const err: any = new Error(`Movement ${movementId} not found.`);
+                err.statusCode = 404;
+                throw err;
+              }
+
+              const movData = movSnap.data() as any;
+              if (movData.deletedDate || movData.status === 'deleted') {
+                const err: any = new Error(`Movement ${movementId} has been cancelled or deleted.`);
+                err.statusCode = 400;
+                throw err;
+              }
+
+              // Idempotency: if already accepted and not rejected
+              if (movData.accepted && movData.issueStatus !== 'Rejected') {
+                return { isCached: true, movement: movData, jobCard: null };
+              }
+
+              // Department authorization verification
+              const userRole = String(requester.role || "staff").toLowerCase();
+              const userDept = String(requester.department || "").toLowerCase();
+              const allowedDepts: string[] = [
+                ...(Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : []),
+                ...(Array.isArray(requester.accessList) ? requester.accessList : [])
+              ].map((d: string) => String(d).toLowerCase());
+
+              const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
+              const targetDept = (movData.toDepartment || "").trim();
+              const isTargetAuthorized = isSuperOrAdmin || 
+                userDept === targetDept.toLowerCase() ||
+                allowedDepts.includes(targetDept.toLowerCase());
+
+              if (!isTargetAuthorized) {
+                const err: any = new Error(`Forbidden: User '${authoritativeUserName}' (${requester.department}) is not authorized to accept material transfers for '${targetDept}'.`);
+                err.statusCode = 403;
+                throw err;
+              }
+
+              const targetJobCardNo = movData.jobCardNo || '';
+              let jcSnap: any = null;
+              let jcRef: any = null;
+
+              if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
+                const jcUpperRef = db.collection("mfr_job_cards").doc(targetJobCardNo.toUpperCase());
+                const snapUpper = await transaction.get(jcUpperRef);
+                if (snapUpper.exists) {
+                  jcSnap = snapUpper;
+                  jcRef = jcUpperRef;
+                } else {
+                  const jcExactRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
+                  const snapExact = await transaction.get(jcExactRef);
+                  if (snapExact.exists) {
+                    jcSnap = snapExact;
+                    jcRef = jcExactRef;
+                  }
+                }
+              }
+
+              // ============================================================
+              // PHASE 2: ALL TRANSACTION WRITES (ONLY AFTER ALL READS DONE)
+              // ============================================================
+              const isRawMaterialStoreIssuing = movData.isIssueRequest && 
+                                                movData.fromDepartment === 'Raw Material Store' && 
+                                                movData.toDepartment === 'Production' && 
+                                                issueStatus === 'Issued';
+
+              const updatedMov: any = {
+                ...movData,
+                modifiedByUserId: authoritativeUserId,
+                modifiedByUserName: authoritativeUserName,
+                modifiedDate: now,
+                modifiedAction: 'ACCEPT'
+              };
+
+              if (isRawMaterialStoreIssuing) {
+                updatedMov.accepted = false;
+                if (remarks) updatedMov.remarks = remarks;
+                if (allottedLocation !== undefined) updatedMov.allottedLocation = allottedLocation;
+                if (rackNo !== undefined) updatedMov.rackNo = rackNo;
+                if (quantity !== undefined) updatedMov.quantity = Number(quantity);
+                if (issueStatus !== undefined) updatedMov.issueStatus = issueStatus;
+              } else {
+                updatedMov.accepted = true;
+                updatedMov.acceptedBy = authoritativeUserName;
+                updatedMov.acceptedByUserId = authoritativeUserId;
+                updatedMov.acceptedDate = now;
+                if (remarks) updatedMov.remarks = remarks;
+                if (allottedLocation !== undefined) updatedMov.allottedLocation = allottedLocation;
+                if (rackNo !== undefined) updatedMov.rackNo = rackNo;
+                if (quantity !== undefined) updatedMov.quantity = Number(quantity);
+                if (issueStatus !== undefined) updatedMov.issueStatus = issueStatus;
+                else if (movData.isIssueRequest) updatedMov.issueStatus = 'Issued';
+              }
+
+              transaction.set(movRef, updatedMov);
+
+              let updatedJobCard: any = null;
+              if (jcSnap && jcSnap.exists && jcRef) {
+                const jcData = jcSnap.data() as any;
+                const nextVersion = (jcData.version || 1) + 1;
+                const nextStatus = updatedMov.toDepartment === 'Production' 
+                  ? 'Pending' 
+                  : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
+
+                updatedJobCard = {
+                  ...jcData,
+                  currentDepartment: updatedMov.toDepartment,
+                  status: nextStatus,
+                  currentQty: updatedMov.quantity || jcData.currentQty,
+                  version: nextVersion,
+                  updatedAt: now,
+                  updatedBy: authoritativeUserName,
+                  updatedByUserId: authoritativeUserId
+                };
+                transaction.set(jcRef, updatedJobCard);
+              }
+
+              // Audit Log (Immutable)
+              const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+              const auditRef = db.collection("mfr_audit_logs").doc(auditId);
+              const auditData = {
+                id: auditId,
+                timestamp: now,
+                userId: authoritativeUserId,
+                userName: authoritativeUserName,
+                action: "ACCEPT_MATERIAL",
+                details: `User ${authoritativeUserName} accepted material movement ${movementId}: Confirmed transfer of ${updatedMov.quantity} KG for ${updatedMov.jobCardNo} at ${updatedMov.toDepartment}.`
+              };
+              transaction.set(auditRef, auditData);
+
+              // Notification to sender department
+              if (updatedMov.fromDepartment) {
+                const notifId = `N-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+                const notifRef = db.collection("mfr_notifications").doc(notifId);
+                const notifData = {
+                  notificationId: notifId,
+                  department: updatedMov.fromDepartment,
+                  title: 'Material Accepted',
+                  message: `${authoritativeUserName} accepted ${updatedMov.quantity} KG for Job Card ${updatedMov.jobCardNo} at ${updatedMov.toDepartment}.`,
+                  userId: `all_${updatedMov.fromDepartment.toLowerCase().replace(/\s+/g, '_')}`,
+                  read: false,
+                  createdAt: now
+                };
+                transaction.set(notifRef, notifData);
+              }
+
+              return {
+                isCached: false,
+                movement: updatedMov,
+                jobCard: updatedJobCard
+              };
+            });
+
+            finalMovement = txResult.movement;
+            finalJobCard = txResult.jobCard;
+          }
+        } catch (adminErr: any) {
+          if (adminErr.statusCode) {
+            return res.status(adminErr.statusCode).json({ success: false, error: adminErr.message });
+          }
+          console.warn("[ACCEPT MOVEMENT] Admin SDK failed, falling back to REST:", adminErr);
+        }
+      }
+
+      // REST Fallback if Admin SDK is offline
+      if (!finalMovement) {
+        const movData = await firestoreRestGetDoc("mfr_movements", movementId);
+        if (!movData) {
+          return res.status(404).json({ success: false, error: `Movement ${movementId} not found.` });
+        }
+
+        const userRole = String(requester.role || "staff").toLowerCase();
+        const userDept = String(requester.department || "").toLowerCase();
+        const allowedDepts: string[] = [
+          ...(Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : []),
+          ...(Array.isArray(requester.accessList) ? requester.accessList : [])
+        ].map((d: string) => String(d).toLowerCase());
+
+        const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
+        const targetDept = (movData.toDepartment || "").trim();
+        const isTargetAuthorized = isSuperOrAdmin || 
+          userDept === targetDept.toLowerCase() ||
+          allowedDepts.includes(targetDept.toLowerCase());
+
+        if (!isTargetAuthorized) {
+          return res.status(403).json({
+            success: false,
+            error: `Forbidden: User '${authoritativeUserName}' is not authorized to accept material transfers for '${targetDept}'.`
+          });
+        }
+
+        const updatedMov: any = {
+          ...movData,
+          accepted: true,
+          acceptedBy: authoritativeUserName,
+          acceptedByUserId: authoritativeUserId,
+          acceptedDate: now,
+          modifiedByUserId: authoritativeUserId,
+          modifiedByUserName: authoritativeUserName,
+          modifiedDate: now,
+          modifiedAction: 'ACCEPT'
+        };
+        if (remarks) updatedMov.remarks = remarks;
+        if (quantity !== undefined) updatedMov.quantity = Number(quantity);
+
+        await firestoreRestSetDoc("mfr_movements", movementId, updatedMov);
+        finalMovement = updatedMov;
+
+        const targetJobCardNo = movData.jobCardNo || '';
+        if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
+          let jcData = await firestoreRestGetDoc("mfr_job_cards", targetJobCardNo.toUpperCase());
+          let activeJobId = targetJobCardNo.toUpperCase();
+          if (!jcData) {
+            jcData = await firestoreRestGetDoc("mfr_job_cards", targetJobCardNo);
+            activeJobId = targetJobCardNo;
+          }
+          if (jcData) {
+            const nextStatus = updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
+            const updatedJc = {
+              ...jcData,
+              currentDepartment: updatedMov.toDepartment,
+              status: nextStatus,
+              currentQty: updatedMov.quantity || jcData.currentQty,
+              version: (jcData.version || 1) + 1,
+              updatedAt: now,
+              updatedBy: authoritativeUserName,
+              updatedByUserId: authoritativeUserId
+            };
+            await firestoreRestSetDoc("mfr_job_cards", activeJobId, updatedJc);
+            finalJobCard = updatedJc;
+          }
+        }
+      }
+
+      broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId, jobCardNo: finalMovement?.jobCardNo });
+      if (finalMovement?.jobCardNo) {
+        broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: finalMovement.jobCardNo });
+      }
+      broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
+
+      return res.json({
+        success: true,
+        movement: finalMovement,
+        jobCard: finalJobCard
+      });
+    } catch (err: any) {
+      console.error("[ACCEPT MOVEMENT] Error:", err);
+      const status = err.statusCode || 500;
+      return res.status(status).json({ success: false, error: err.message || "Failed to accept material transfer." });
+    }
+  });
+
+  // POST /api/movements/:movementId/reject — Authoritative Atomic Material Rejection
+  app.post("/api/movements/:movementId/reject", requireFirebaseAuth, async (req, res) => {
+    try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      const movementId = req.params.movementId;
+      const { remarks } = req.body || {};
+
+      if (!authUid || !requester) {
+        return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
+      }
+
+      const authoritativeUserId = authUid;
+      const authoritativeUserName = requester.name || requester.userId || "Authorized User";
+      const now = new Date().toISOString();
+
+      let finalMovement: any = null;
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const db = getFirestoreAdmin();
+          if (db) {
+            const movRef = db.collection("mfr_movements").doc(movementId);
+
+            const txResult = await db.runTransaction(async (transaction) => {
+              // --- 1. ALL READS FIRST ---
+              const movSnap = await transaction.get(movRef);
+              if (!movSnap.exists) {
+                const err: any = new Error(`Movement ${movementId} not found.`);
+                err.statusCode = 404;
+                throw err;
+              }
+
+              const movData = movSnap.data() as any;
+              const targetJobCardNo = movData.jobCardNo || '';
+              let jcSnap: any = null;
+              let jcRef: any = null;
+
+              if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
+                const jcUpperRef = db.collection("mfr_job_cards").doc(targetJobCardNo.toUpperCase());
+                const snapUpper = await transaction.get(jcUpperRef);
+                if (snapUpper.exists) {
+                  jcSnap = snapUpper;
+                  jcRef = jcUpperRef;
+                } else {
+                  const jcExactRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
+                  const snapExact = await transaction.get(jcExactRef);
+                  if (snapExact.exists) {
+                    jcSnap = snapExact;
+                    jcRef = jcExactRef;
+                  }
+                }
+              }
+
+              // --- 2. ALL WRITES ---
+              const updatedMov: any = {
+                ...movData,
+                accepted: false,
+                issueStatus: 'Rejected',
+                rejectionRemarks: remarks || '',
+                rejectedBy: authoritativeUserName,
+                rejectedByUserId: authoritativeUserId,
+                rejectedDate: now,
+                modifiedByUserId: authoritativeUserId,
+                modifiedByUserName: authoritativeUserName,
+                modifiedDate: now,
+                modifiedAction: 'REJECT'
+              };
+              transaction.set(movRef, updatedMov);
+
+              if (jcSnap && jcSnap.exists && jcRef) {
+                const jcData = jcSnap.data() as any;
+                const updatedJc = {
+                  ...jcData,
+                  status: 'Pending Acceptance',
+                  remarks: `Transfer rejected from ${movData.fromDepartment} to ${movData.toDepartment}. Reason: ${remarks || 'Rejected'}`,
+                  updatedAt: now,
+                  updatedBy: authoritativeUserName,
+                  updatedByUserId: authoritativeUserId
+                };
+                transaction.set(jcRef, updatedJc);
+              }
+
+              const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+              const auditRef = db.collection("mfr_audit_logs").doc(auditId);
+              const auditData = {
+                id: auditId,
+                timestamp: now,
+                userId: authoritativeUserId,
+                userName: authoritativeUserName,
+                action: "REJECT_MATERIAL",
+                details: `User ${authoritativeUserName} rejected material movement ${movementId} for ${movData.jobCardNo}. Reason: ${remarks || 'None'}`
+              };
+              transaction.set(auditRef, auditData);
+
+              if (movData.fromDepartment) {
+                const notifId = `N-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+                const notifRef = db.collection("mfr_notifications").doc(notifId);
+                const notifData = {
+                  notificationId: notifId,
+                  department: movData.fromDepartment,
+                  title: 'Material Transfer Rejected',
+                  message: `${authoritativeUserName} rejected transfer for Job Card ${movData.jobCardNo}. Reason: ${remarks || 'Rejected'}`,
+                  userId: `all_${movData.fromDepartment.toLowerCase().replace(/\s+/g, '_')}`,
+                  read: false,
+                  createdAt: now
+                };
+                transaction.set(notifRef, notifData);
+              }
+
+              return { movement: updatedMov };
+            });
+
+            finalMovement = txResult.movement;
+          }
+        } catch (adminErr: any) {
+          if (adminErr.statusCode) {
+            return res.status(adminErr.statusCode).json({ success: false, error: adminErr.message });
+          }
+          console.warn("[REJECT MOVEMENT] Admin SDK failed, falling back to REST:", adminErr);
+        }
+      }
+
+      if (!finalMovement) {
+        const movData = await firestoreRestGetDoc("mfr_movements", movementId);
+        if (!movData) return res.status(404).json({ success: false, error: `Movement ${movementId} not found.` });
+
+        const updatedMov = {
+          ...movData,
+          accepted: false,
+          issueStatus: 'Rejected',
+          rejectionRemarks: remarks || '',
+          rejectedBy: authoritativeUserName,
+          rejectedByUserId: authoritativeUserId,
+          rejectedDate: now,
+          modifiedAction: 'REJECT'
+        };
+        await firestoreRestSetDoc("mfr_movements", movementId, updatedMov);
+        finalMovement = updatedMov;
+      }
+
+      broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId, jobCardNo: finalMovement?.jobCardNo });
+      broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
+
+      return res.json({ success: true, movement: finalMovement });
+    } catch (err: any) {
+      console.error("[REJECT MOVEMENT] Error:", err);
+      const status = err.statusCode || 500;
+      return res.status(status).json({ success: false, error: err.message || "Failed to reject material transfer." });
+    }
+  });
+
+  // POST /api/movements — Authoritative Movement Creation
+  app.post("/api/movements", requireFirebaseAuth, async (req, res) => {
+    try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      if (!authUid || !requester) {
+        return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
+      }
+
+      const { movement } = req.body || {};
+      if (!movement || !movement.jobCardNo || !movement.fromDepartment || !movement.toDepartment || !movement.quantity) {
+        return res.status(400).json({ success: false, error: "jobCardNo, fromDepartment, toDepartment, and quantity are required." });
+      }
+
+      const authoritativeUserId = authUid;
+      const authoritativeUserName = requester.name || requester.userId || "Authorized User";
+      const now = new Date().toISOString();
+      const movId = movement.movementId || `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+      const newMov = {
+        ...movement,
+        movementId: movId,
+        transferDate: now,
+        accepted: false,
+        transferBy: authoritativeUserName,
+        initiatedByUserId: authoritativeUserId,
+        initiatedByUserName: authoritativeUserName
+      };
+
+      if (adminSdkHasPermission !== false) {
+        try {
+          const dbAdmin = getFirestoreAdmin();
+          if (dbAdmin) {
+            await dbAdmin.collection("mfr_movements").doc(movId).set(newMov);
+          }
+        } catch (e) {
+          console.warn("[MOVEMENTS] Admin SDK write failed, falling back to REST:", e);
+        }
+      }
+
+      await firestoreRestSetDoc("mfr_movements", movId, newMov);
+
+      const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const auditData = {
+        id: auditId,
+        timestamp: now,
+        userId: authoritativeUserId,
+        userName: authoritativeUserName,
+        action: "MATERIAL_TRANSFER",
+        details: `Dispatched ${newMov.quantity} KG for ${newMov.jobCardNo} from ${newMov.fromDepartment} to ${newMov.toDepartment}`
+      };
+      await firestoreRestSetDoc("mfr_audit_logs", auditId, auditData);
+
+      broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: movId, jobCardNo: newMov.jobCardNo });
+      broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
+
+      return res.json({ success: true, movement: newMov });
+    } catch (err: any) {
+      console.error("[MOVEMENTS] Error creating movement:", err);
+      return res.status(500).json({ success: false, error: err.message || "Failed to create movement." });
     }
   });
 
@@ -3366,6 +4091,36 @@ async function startServer() {
         receivedByUserId: userId || "user",
         receivedAt: nowIso,
         remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}Received: ${remarks}` : currentData.remarks,
+        updatedAt: nowIso
+      };
+
+      await firestoreRestSetDoc("mfr_process_transfers", id, updates);
+      return res.json({ success: true, transfer: updates });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // POST /api/process-transfers/:id/start
+  app.post("/api/process-transfers/:id/start", async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { userId, userName, remarks } = req.body;
+      const nowIso = new Date().toISOString();
+
+      let currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
+      if (!currentData) {
+        return res.status(404).json({ success: false, error: "Transfer not found" });
+      }
+
+      const newStatus = currentData.toProcess === "Repacking" ? "Repacking in Process" : "Replating in Process";
+      const updates = {
+        ...currentData,
+        status: newStatus,
+        inProcessBy: userName || "Operator",
+        inProcessByUserId: userId || "user",
+        inProcessAt: nowIso,
+        remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}In-Process: ${remarks}` : currentData.remarks,
         updatedAt: nowIso
       };
 

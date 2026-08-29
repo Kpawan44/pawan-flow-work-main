@@ -1094,30 +1094,39 @@ export class DBService {
     movements.unshift(initialMovement);
     setLocalStorageItem('mfr_movements', movements);
     this.setMemCache('mfr_movements', movements);
-    
-    // Send notifications to corresponding department
-    await this.createNotification({
-      department: isPurchase ? 'Store' : ((job.currentDepartment as Department) || 'Production'),
-      title: isPurchase ? 'New Purchase Inward Receipt' : 'New Production Queue Item',
-      message: isPurchase
-        ? `New Purchase Inward ${jobCardNo} generated for supplier ${job.partyName}. Quantity: ${job.currentQty} ${unitLabel}. Pending Store acceptance.`
-        : `Job Card ${jobCardNo} generated for ${job.partyName}. Quantity: ${job.orderQty} ${unitLabel}. Pending material acceptance.`,
-      userId: isPurchase ? 'all_store' : 'all_production'
-    }).catch(() => {});
 
-    // 2. Write to physical Firestore
-    await this.tryPhysicalWrite(
-      'Create Job Card',
-      `Create Job Card ${jobCardNo} for ${job.partyName} (${job.orderQty} ${unitLabel})`,
-      [
-        { collection: 'mfr_job_cards', docId: jobCardNo, data: newJob, operation: 'set' },
-        { collection: 'mfr_movements', docId: newMovementId, data: initialMovement, operation: 'set' }
-      ],
-      async () => {
-        await setDoc(doc(db, 'mfr_job_cards', jobCardNo), sanitizeForFirestore(newJob));
-        await setDoc(doc(db, 'mfr_movements', newMovementId), sanitizeForFirestore(initialMovement));
+    // 2. Authoritative Backend API Execution
+    const apiBase = getApiBaseUrl();
+    const headers = await this.getAuthHeaders();
+    let apiSuccess = false;
+
+    try {
+      const res = await fetch(`${apiBase}/api/job-cards`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ jobCard: newJob, initialMovement })
+      });
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success) {
+          apiSuccess = true;
+        }
       }
-    );
+    } catch (apiErr) {
+      console.warn("[JOB_CARD API] Direct backend call failed, falling back to local sync:", apiErr);
+    }
+
+    if (!apiSuccess) {
+      // Direct Firestore write ONLY when client is actively authenticated
+      if (useRealFirebase && db && auth?.currentUser) {
+        try {
+          await setDoc(doc(db, 'mfr_job_cards', jobCardNo), sanitizeForFirestore(newJob));
+          await setDoc(doc(db, 'mfr_movements', newMovementId), sanitizeForFirestore(initialMovement));
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `mfr_job_cards/${jobCardNo}`);
+        }
+      }
+    }
 
     await this.logAction(creatorId, creatorName, 'CREATE_JOB_CARD', `Generated job card ${jobCardNo} for ${job.partyName} (${job.orderQty} ${unitLabel})`);
     
@@ -1219,30 +1228,48 @@ export class DBService {
 
     cards[idx] = { ...cards[idx], ...finalPayload } as JobCard;
     setLocalStorageItem('mfr_job_cards', cards);
+    this.setMemCache('mfr_job_cards', cards);
 
-    // 3. Write to physical Firestore
-    await this.tryPhysicalWrite(
-      'Update Job Card',
-      `Update Job Card ${jobCardNo} (${updates.status || 'Details'})`,
-      [
-        { collection: 'mfr_job_cards', docId: jobCardNo.toUpperCase(), data: finalPayload, operation: 'update' }
-      ],
-      async () => {
-        const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
-        const snapUpper = await getDoc(refUpper);
-        if (snapUpper.exists()) {
-          await updateDoc(refUpper, finalPayload as any);
-        } else {
-          const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
-          const snapAsIs = await getDoc(refAsIs);
-          if (snapAsIs.exists()) {
-            await updateDoc(refAsIs, finalPayload as any);
-          } else {
-            await updateDoc(refUpper, finalPayload as any);
-          }
+    // 3. Authoritative Backend API Execution
+    const apiBase = getApiBaseUrl();
+    const headers = await this.getAuthHeaders();
+    let apiSuccess = false;
+
+    try {
+      const res = await fetch(`${apiBase}/api/job-cards/${encodeURIComponent(jobCardNo)}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(updates)
+      });
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success) {
+          apiSuccess = true;
         }
       }
-    );
+    } catch (apiErr) {
+      console.warn("[JOB_CARD API] Update backend call failed, falling back to direct auth write:", apiErr);
+    }
+
+    if (!apiSuccess) {
+      if (useRealFirebase && db && auth?.currentUser) {
+        try {
+          const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
+          const snapUpper = await getDoc(refUpper);
+          if (snapUpper.exists()) {
+            await updateDoc(refUpper, sanitizeForFirestore(finalPayload) as any);
+          } else {
+            const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
+            const snapAsIs = await getDoc(refAsIs);
+            if (snapAsIs.exists()) {
+              await updateDoc(refAsIs, sanitizeForFirestore(finalPayload) as any);
+            }
+          }
+        } catch (err) {
+          handleFirestoreError(err, OperationType.UPDATE, `mfr_job_cards/${jobCardNo}`);
+        }
+      }
+    }
 
     await this.logAction(userId, userName, 'UPDATE_JOB_CARD', `Updated Job Card ${jobCardNo}. Status: ${updates.status || cards[idx].status}`);
     
@@ -1600,13 +1627,45 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     movements.unshift(newMov);
     setLocalStorageItem('mfr_movements', movements);
+    this.setMemCache('mfr_movements', movements);
     
     // Update Job Card department & status to show pending placement (only if NOT a Dispatch Issue Request)
     if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
       await this.updateJobCard(movement.jobCardNo, {
         status: 'Pending Acceptance',
         currentDepartment: movement.toDepartment as Department
-      }, userId, userName);
+      }, userId, userName).catch(() => {});
+    }
+
+    // 2. Authoritative Backend API Execution
+    const apiBase = getApiBaseUrl();
+    const headers = await this.getAuthHeaders();
+    let apiSuccess = false;
+
+    try {
+      const res = await fetch(`${apiBase}/api/movements`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ movement: newMov })
+      });
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success) {
+          apiSuccess = true;
+        }
+      }
+    } catch (apiErr) {
+      console.warn("[MOVEMENTS API] Create movement call failed, falling back to direct write:", apiErr);
+    }
+
+    if (!apiSuccess) {
+      if (useRealFirebase && db && auth?.currentUser) {
+        try {
+          await setDoc(doc(db, 'mfr_movements', newId), sanitizeForFirestore(newMov));
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `mfr_movements/${newId}`);
+        }
+      }
     }
 
     // Create Notification for the receiving department
@@ -1620,85 +1679,20 @@ export class DBService {
           ? `Job Card ${movement.jobCardNo}: Dispatch requested issue of ${movement.requestedQty} ${(movement as any).requestedUnit || 'KG'} from Store.`
           : `Job Card ${movement.jobCardNo}: ${movement.quantity} KG transferred from ${movement.fromDepartment} to ${movement.toDepartment}.`),
       userId: isRawStoreReq ? 'all_raw_material_store' : (movement.isIssueRequest ? 'all_store' : `all_${movement.toDepartment.toLowerCase().replace(' ', '_')}`)
-    });
-
-    // 2. Write to physical Firestore using Atomic Transaction
-    if (useRealFirebase && db && !this.isOfflineMode()) {
-      try {
-        await runTransaction(db, async (transaction) => {
-          // Check Idempotency key
-          const idempRef = doc(db, 'mfr_idempotency_keys', newId);
-          const idempSnap = await transaction.get(idempRef);
-          if (idempSnap.exists()) {
-            return;
-          }
-
-          // Check Job Card snapshot
-          const jcUpperRef = doc(db, 'mfr_job_cards', movement.jobCardNo.toUpperCase());
-          let jcSnap = await transaction.get(jcUpperRef);
-          let targetJcRef = jcUpperRef;
-
-          if (!jcSnap.exists()) {
-            const jcAsIsRef = doc(db, 'mfr_job_cards', movement.jobCardNo);
-            const asIsSnap = await transaction.get(jcAsIsRef);
-            if (asIsSnap.exists()) {
-              jcSnap = asIsSnap;
-              targetJcRef = jcAsIsRef;
-            }
-          }
-
-          if (jcSnap.exists()) {
-            const jcData = jcSnap.data() as JobCard;
-            const availableQty = Number(jcData.currentQty ?? jcData.orderQty ?? 0);
-            if (!movement.isIssueRequest && movement.fromDepartment !== 'Purchase' && movement.fromDepartment !== 'Raw Material Store') {
-              if (movement.quantity > availableQty) {
-                throw new Error(`Insufficient available quantity. Requested ${movement.quantity} KG, but only ${availableQty} KG available.`);
-              }
-            }
-
-            const nextVersion = (jcData.version || 1) + 1;
-            if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
-              transaction.update(targetJcRef, {
-                currentDepartment: movement.toDepartment,
-                status: 'Pending Acceptance',
-                version: nextVersion,
-                updatedAt: nowIso,
-                updatedBy: userName || userId
-              });
-            }
-          }
-
-          // Set Movement
-          const movRef = doc(db, 'mfr_movements', newId);
-          transaction.set(movRef, newMov);
-
-          // Set Idempotency Key
-          transaction.set(idempRef, {
-            operationId: newId,
-            movementId: newId,
-            jobCardNo: movement.jobCardNo,
-            quantity: movement.quantity,
-            processedAt: nowIso,
-            userId
-          });
-        });
-      } catch (txnErr) {
-        console.error("Firestore material movement atomic transaction failed:", txnErr);
-        handleFirestoreError(txnErr, OperationType.WRITE, `mfr_movements/${newId}`);
-        throw txnErr;
-      }
-    }
+    }).catch(() => {});
 
     await this.logAction(
       userId, 
       userName, 
-      'TRANSFER_MATERIAL', 
-      `User ${userName} (ID: ${userId}) initiated material movement ${newId}: Transferred ${movement.quantity} KG of Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment}.`
+      'MATERIAL_TRANSFER', 
+      `Dispatched ${movement.quantity} KG of Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment}.`
     );
-    
-    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
+
+    // Broadcast SSE Events AFTER COMMIT
     await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: newId, jobCardNo: movement.jobCardNo }).catch(() => {});
-    await this.broadcastEvent('JOB_UPDATED', { jobCardNo: movement.jobCardNo }).catch(() => {});
+    if (!movement.jobCardNo.startsWith('STOCK-IN-')) {
+      await this.broadcastEvent('JOB_UPDATED', { jobCardNo: movement.jobCardNo }).catch(() => {});
+    }
 
     // Log to Google Sheets
     logMaterialMovementToSheets(newMov).catch(err => console.warn('Google Sheets movement log failed:', err));
@@ -1718,19 +1712,62 @@ export class DBService {
     let localMov = localIdx >= 0 ? list[localIdx] : null;
 
     let targetJobCardNo = localMov?.jobCardNo || '';
-    let isAlreadyAccepted = false;
     let finalMovement: MaterialMovement | null = null;
     let finalJobCardUpdates: Partial<JobCard> | null = null;
-    let targetJcDocId = '';
     const nowIso = new Date().toISOString();
 
-    // 1. Physical Firestore Atomic Transaction (When Online)
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    // 1. Authoritative Backend API Call (Primary Protected Mutation Path)
+    const apiBase = getApiBaseUrl();
+    const headers = await this.getAuthHeaders();
+    let apiSucceeded = false;
+
+    try {
+      const res = await fetch(`${apiBase}/api/movements/${encodeURIComponent(movementId)}/accept`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          remarks,
+          allottedLocation: extraFields?.allottedLocation,
+          rackNo: extraFields?.rackNo,
+          quantity: extraFields?.quantity,
+          issueStatus: extraFields?.issueStatus
+        })
+      });
+
+      if (res.ok) {
+        const apiData = await res.json();
+        if (apiData && apiData.success) {
+          apiSucceeded = true;
+          finalMovement = apiData.movement;
+          finalJobCardUpdates = apiData.jobCard;
+        }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        if (res.status === 401) {
+          throw new Error("Your session has expired. Please log in again.");
+        }
+        if (res.status === 403) {
+          throw new Error(errJson.error || "Your account is not authorized to receive this material.");
+        }
+        if (res.status === 404) {
+          throw new Error("Movement not found or already deleted.");
+        }
+        if (res.status === 409) {
+          throw new Error("Material transfer has already been accepted.");
+        }
+        throw new Error(errJson.error || `Failed to accept cargo (status ${res.status}).`);
+      }
+    } catch (apiErr: any) {
+      if (apiErr.message && (apiErr.message.includes("authorized") || apiErr.message.includes("session") || apiErr.message.includes("already been accepted"))) {
+        throw apiErr;
+      }
+      console.warn("[ACCEPT API] Backend API call failed, falling back to direct write:", apiErr);
+    }
+
+    // Direct Firestore write ONLY when client is actively authenticated in Firebase Auth
+    if (!apiSucceeded && useRealFirebase && db && auth?.currentUser && !this.isOfflineMode()) {
       try {
         await runTransaction(db, async (transaction) => {
-          // ==========================================
-          // PHASE 1: ALL READS & VALIDATIONS
-          // ==========================================
           const movRef = doc(db, 'mfr_movements', movementId);
           const movSnap = await transaction.get(movRef);
 
@@ -1743,21 +1780,12 @@ export class DBService {
             throw new Error(`Movement ${movementId} not found in database.`);
           }
 
-          // IDEMPOTENCY: If already accepted on server, exit safely without error
           if (currentMovData.accepted && currentMovData.issueStatus !== 'Rejected') {
-            isAlreadyAccepted = true;
             finalMovement = currentMovData;
             return;
           }
 
-          // Validation
-          if (currentMovData.deletedDate || (currentMovData as any).status === 'deleted') {
-            throw new Error(`Movement ${movementId} has been cancelled or deleted.`);
-          }
-
           targetJobCardNo = currentMovData.jobCardNo;
-
-          // Read Job Card snapshot (ALL READS BEFORE ANY WRITES)
           let jcSnap: any = null;
           let targetJcRef: any = null;
 
@@ -1767,137 +1795,54 @@ export class DBService {
             if (snapUpper.exists()) {
               jcSnap = snapUpper;
               targetJcRef = jcUpperRef;
-              targetJcDocId = targetJobCardNo.toUpperCase();
             } else {
               const jcAsIsRef = doc(db, 'mfr_job_cards', targetJobCardNo);
               const snapAsIs = await transaction.get(jcAsIsRef);
               if (snapAsIs.exists()) {
                 jcSnap = snapAsIs;
                 targetJcRef = jcAsIsRef;
-                targetJcDocId = targetJobCardNo;
               }
             }
           }
 
-          // Compute In-Memory New Movement State
-          const isRawMaterialStoreIssuing = currentMovData.isIssueRequest && 
-                                            currentMovData.fromDepartment === 'Raw Material Store' && 
-                                            currentMovData.toDepartment === 'Production' && 
-                                            extraFields?.issueStatus === 'Issued';
-
           const updatedMov: MaterialMovement = {
             ...currentMovData,
+            accepted: true,
+            acceptedBy: acceptedByName || acceptedByUserId,
+            acceptedDate: nowIso,
             modifiedByUserId: acceptedByUserId,
             modifiedByUserName: acceptedByName,
             modifiedDate: nowIso,
             modifiedAction: 'ACCEPT'
           };
-
-          if (isRawMaterialStoreIssuing) {
-            updatedMov.accepted = false;
-            if (remarks) updatedMov.remarks = remarks;
-            if (extraFields?.allottedLocation !== undefined) updatedMov.allottedLocation = extraFields.allottedLocation;
-            if (extraFields?.rackNo !== undefined) updatedMov.rackNo = extraFields.rackNo;
-            if (extraFields?.quantity !== undefined) updatedMov.quantity = extraFields.quantity;
-            if (extraFields?.issueStatus !== undefined) updatedMov.issueStatus = extraFields.issueStatus;
-          } else {
-            updatedMov.accepted = true;
-            updatedMov.acceptedBy = acceptedByName || acceptedByUserId;
-            updatedMov.acceptedDate = nowIso;
-            if (remarks) updatedMov.remarks = remarks;
-            if (extraFields?.allottedLocation !== undefined) updatedMov.allottedLocation = extraFields.allottedLocation;
-            if (extraFields?.rackNo !== undefined) updatedMov.rackNo = extraFields.rackNo;
-            if (extraFields?.quantity !== undefined) updatedMov.quantity = extraFields.quantity;
-            if (extraFields?.issueStatus !== undefined) updatedMov.issueStatus = extraFields.issueStatus;
-            else if (currentMovData.isIssueRequest) updatedMov.issueStatus = 'Issued';
-          }
+          if (remarks) updatedMov.remarks = remarks;
+          if (extraFields?.quantity !== undefined) updatedMov.quantity = extraFields.quantity;
 
           finalMovement = updatedMov;
-
-          // Compute In-Memory New Job Card State
-          if (jcSnap && jcSnap.exists()) {
-            const jcData = jcSnap.data() as JobCard;
-            const nextVersion = (jcData.version || 1) + 1;
-
-            if (currentMovData.toDepartment === 'Completed') {
-              const newBalance = Math.max(0, (jcData.orderQty || 0) - (updatedMov.quantity || currentMovData.quantity));
-              finalJobCardUpdates = {
-                status: 'Completed',
-                completed: true,
-                currentQty: updatedMov.quantity || currentMovData.quantity,
-                balanceQty: newBalance,
-                version: nextVersion,
-                updatedAt: nowIso,
-                updatedBy: acceptedByName || acceptedByUserId
-              };
-            } else {
-              const targetStatus = currentMovData.toDepartment === 'Production' ? 'Pending' : 'In Process';
-              const jcUpdates: any = {
-                status: targetStatus,
-                currentDepartment: currentMovData.toDepartment,
-                currentQty: updatedMov.quantity || currentMovData.quantity,
-                version: nextVersion,
-                updatedAt: nowIso,
-                updatedBy: acceptedByName || acceptedByUserId
-              };
-
-              if (currentMovData.toDepartment === 'Store' && extraFields) {
-                jcUpdates.storeDetails = {
-                  ...(jcData?.storeDetails || {}),
-                  locationBin: extraFields.allottedLocation || jcData?.storeDetails?.locationBin || '',
-                  rackNo: extraFields.rackNo || jcData?.storeDetails?.rackNo || ''
-                };
-              }
-
-              if (currentMovData.fromDepartment === 'Raw Material Store' && currentMovData.isIssueRequest) {
-                const prevIssuedQty = jcData?.rawMaterialStoreDetails?.issuedQty || 0;
-                const prevRequestedQty = jcData?.rawMaterialStoreDetails?.requestedQty || 0;
-                const newThisIssue = extraFields?.quantity || (currentMovData as any).requestedQty || 0;
-                const newThisReq = (currentMovData as any).requestedQty || 0;
-
-                jcUpdates.rawMaterialStoreDetails = {
-                  ...(jcData?.rawMaterialStoreDetails || {}),
-                  materialCode: (currentMovData as any).processDetails?.rawMaterialCode || jcData?.rawMaterialStoreDetails?.materialCode || '',
-                  materialName: (currentMovData as any).processDetails?.rawMaterialName || jcData?.rawMaterialStoreDetails?.materialName || '',
-                  requestedQty: prevRequestedQty > 0 ? (prevRequestedQty + newThisReq) : newThisReq,
-                  issuedQty: extraFields?.issueStatus === 'Issued' ? (prevIssuedQty + newThisIssue) : prevIssuedQty,
-                  issueStatus: extraFields?.issueStatus || 'Issued',
-                  remarks: remarks || currentMovData.remarks || '',
-                  binLocation: extraFields?.allottedLocation || '',
-                  rejectionReason: extraFields?.issueStatus === 'Rejected' ? remarks : ''
-                };
-                if (extraFields?.issueStatus === 'Issued') {
-                  jcUpdates.currentQty = (jcData?.currentQty || 0) + newThisIssue;
-                }
-              }
-
-              finalJobCardUpdates = jcUpdates;
-            }
-          }
-
-          // ==========================================
-          // PHASE 2: ALL WRITES (NO READS AFTER THIS)
-          // ==========================================
           transaction.set(movRef, sanitizeForFirestore(updatedMov), { merge: true });
 
-          if (targetJcRef && finalJobCardUpdates) {
-            transaction.update(targetJcRef, sanitizeForFirestore(finalJobCardUpdates));
+          if (targetJcRef && jcSnap && jcSnap.exists()) {
+            const jcData = jcSnap.data() as JobCard;
+            const nextVersion = (jcData.version || 1) + 1;
+            const nextStatus = updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
+            const jcUpdates = {
+              currentDepartment: updatedMov.toDepartment,
+              status: nextStatus,
+              currentQty: updatedMov.quantity || jcData.currentQty,
+              version: nextVersion,
+              updatedAt: nowIso,
+              updatedBy: acceptedByName || acceptedByUserId
+            };
+            finalJobCardUpdates = jcUpdates;
+            transaction.update(targetJcRef, sanitizeForFirestore(jcUpdates));
           }
         });
       } catch (txnErr) {
-        console.error("Firestore accept movement atomic transaction failed:", txnErr);
-        handleFirestoreError(txnErr, OperationType.WRITE, `mfr_movements/${movementId}`);
-        throw txnErr;
+        console.warn("Direct Firestore fallback error:", txnErr);
       }
     }
 
-    if (isAlreadyAccepted) {
-      return;
-    }
-
-    // ==========================================
-    // PHASE 3: POST-COMMIT LOCAL STATE, AUDIT LOG & SSE
-    // ==========================================
+    // 2. Update Local Cache & Memory
     const currentMovements = await this.getMovements();
     const updatedMov = finalMovement || {
       ...localMov!,
@@ -1919,7 +1864,6 @@ export class DBService {
     setLocalStorageItem('mfr_movements', currentMovements);
     this.setMemCache('mfr_movements', currentMovements);
 
-    // Update local job cards list
     if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
       const cards = await this.getJobCards();
       const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === targetJobCardNo.toLowerCase());
@@ -1976,16 +1920,44 @@ export class DBService {
     const localMov = idx >= 0 ? list[idx] : null;
 
     let targetJobCardNo = localMov?.jobCardNo || '';
-    let finalJobCardUpdates: Partial<JobCard> | null = null;
+    let finalMovement: MaterialMovement | null = null;
     const nowIso = new Date().toISOString();
 
-    // 1. Physical Firestore Atomic Transaction (When Online)
-    if (useRealFirebase && db && !this.isOfflineMode()) {
+    // 1. Authoritative Backend API Call
+    const apiBase = getApiBaseUrl();
+    const headers = await this.getAuthHeaders();
+    let apiSucceeded = false;
+
+    try {
+      const res = await fetch(`${apiBase}/api/movements/${encodeURIComponent(movementId)}/reject`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ remarks })
+      });
+
+      if (res.ok) {
+        const apiData = await res.json();
+        if (apiData && apiData.success) {
+          apiSucceeded = true;
+          finalMovement = apiData.movement;
+        }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        if (res.status === 401) throw new Error("Your session has expired. Please log in again.");
+        if (res.status === 403) throw new Error(errJson.error || "Your account is not authorized to reject this material.");
+        throw new Error(errJson.error || `Failed to reject cargo (status ${res.status}).`);
+      }
+    } catch (apiErr: any) {
+      if (apiErr.message && (apiErr.message.includes("authorized") || apiErr.message.includes("session"))) {
+        throw apiErr;
+      }
+      console.warn("[REJECT API] Backend API call failed, falling back to direct write:", apiErr);
+    }
+
+    // Direct Firestore write ONLY when client is actively authenticated
+    if (!apiSucceeded && useRealFirebase && db && auth?.currentUser && !this.isOfflineMode()) {
       try {
         await runTransaction(db, async (transaction) => {
-          // ==========================================
-          // PHASE 1: ALL READS & VALIDATIONS
-          // ==========================================
           const movRef = doc(db, 'mfr_movements', movementId);
           const movSnap = await transaction.get(movRef);
 
@@ -1999,8 +1971,6 @@ export class DBService {
           }
 
           targetJobCardNo = currentMovData.jobCardNo;
-
-          // Read Job Card snapshot
           let jcSnap: any = null;
           let targetJcRef: any = null;
 
@@ -2020,41 +1990,61 @@ export class DBService {
             }
           }
 
-          if (jcSnap && jcSnap.exists()) {
+          const updatedMov: MaterialMovement = {
+            ...currentMovData,
+            accepted: false,
+            issueStatus: 'Rejected',
+            rejectionRemarks: remarks,
+            rejectedBy: rejectedByName || rejectedByUserId,
+            rejectedByUserId,
+            rejectedDate: nowIso,
+            modifiedByUserId: rejectedByUserId,
+            modifiedByUserName: rejectedByName,
+            modifiedDate: nowIso,
+            modifiedAction: 'REJECT'
+          };
+          finalMovement = updatedMov;
+          transaction.set(movRef, sanitizeForFirestore(updatedMov), { merge: true });
+
+          if (targetJcRef && jcSnap && jcSnap.exists()) {
             const jcData = jcSnap.data() as JobCard;
-            const nextVersion = (jcData.version || 1) + 1;
-            finalJobCardUpdates = {
-              status: 'Rejected',
-              currentDepartment: currentMovData.fromDepartment,
-              version: nextVersion,
+            transaction.update(targetJcRef, sanitizeForFirestore({
+              status: 'Pending Acceptance',
+              remarks: `Transfer rejected from ${currentMovData.fromDepartment} to ${currentMovData.toDepartment}. Reason: ${remarks}`,
               updatedAt: nowIso,
               updatedBy: rejectedByName || rejectedByUserId
-            };
-          }
-
-          // ==========================================
-          // PHASE 2: ALL WRITES
-          // ==========================================
-          transaction.delete(movRef);
-
-          if (targetJcRef && finalJobCardUpdates) {
-            transaction.update(targetJcRef, sanitizeForFirestore(finalJobCardUpdates));
+            }));
           }
         });
       } catch (txnErr) {
-        console.error("Firestore reject movement atomic transaction failed:", txnErr);
-        handleFirestoreError(txnErr, OperationType.DELETE, `mfr_movements/${movementId}`);
-        throw txnErr;
+        console.warn("Direct Firestore reject fallback error:", txnErr);
       }
     }
 
-    // ==========================================
-    // PHASE 3: POST-COMMIT LOCAL STATE, AUDIT & SSE
-    // ==========================================
-    const currentList = await this.getMovements();
-    const updatedList = currentList.filter(m => m.movementId !== movementId);
-    setLocalStorageItem('mfr_movements', updatedList);
-    this.setMemCache('mfr_movements', updatedList);
+    // 2. Update Local Cache & Memory
+    const currentMovements = await this.getMovements();
+    const updatedMov = finalMovement || {
+      ...localMov!,
+      accepted: false,
+      issueStatus: 'Rejected',
+      rejectionRemarks: remarks,
+      rejectedBy: rejectedByName || rejectedByUserId,
+      rejectedByUserId,
+      rejectedDate: nowIso,
+      modifiedByUserId: rejectedByUserId,
+      modifiedByUserName: rejectedByName,
+      modifiedDate: nowIso,
+      modifiedAction: 'REJECT'
+    };
+
+    const movListIdx = currentMovements.findIndex(m => m.movementId === movementId);
+    if (movListIdx >= 0) {
+      currentMovements[movListIdx] = updatedMov;
+    } else {
+      currentMovements.unshift(updatedMov);
+    }
+    setLocalStorageItem('mfr_movements', currentMovements);
+    this.setMemCache('mfr_movements', currentMovements);
 
     if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
       const cards = await this.getJobCards();
@@ -2062,9 +2052,8 @@ export class DBService {
       if (cardIdx >= 0) {
         cards[cardIdx] = {
           ...cards[cardIdx],
-          status: 'Rejected',
-          currentDepartment: localMov ? localMov.fromDepartment : cards[cardIdx].currentDepartment,
-          version: (cards[cardIdx].version || 1) + 1,
+          status: 'Pending Acceptance',
+          remarks: `Transfer rejected from ${updatedMov.fromDepartment} to ${updatedMov.toDepartment}. Reason: ${remarks}`,
           updatedAt: nowIso,
           updatedBy: rejectedByName || rejectedByUserId
         };
@@ -2073,17 +2062,6 @@ export class DBService {
       }
     }
 
-    // Notification for sender
-    if (localMov?.fromDepartment) {
-      await this.createNotification({
-        department: localMov.fromDepartment,
-        title: '⚠️ Material Rejected',
-        message: `${rejectedByName} rejected Job Card ${targetJobCardNo} movement. Remarks: "${remarks}"`,
-        userId: `all_${localMov.fromDepartment.toLowerCase().replace(/\s+/g, '_')}`
-      }).catch(() => {});
-    }
-
-    // Audit Log
     await this.logAction(
       rejectedByUserId, 
       rejectedByName, 
@@ -2124,11 +2102,12 @@ export class DBService {
 
     // 1. Update Local Storage offline cache first
     setLocalStorageItem('mfr_movements', list);
+    this.setMemCache('mfr_movements', list);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
-        await setDoc(doc(db, 'mfr_movements', movementId), mov);
+        await setDoc(doc(db, 'mfr_movements', movementId), sanitizeForFirestore(mov));
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, `mfr_movements/${movementId}`);
       }
@@ -2171,9 +2150,10 @@ export class DBService {
     // 1. Remove from Local Storage list
     list.splice(idx, 1);
     setLocalStorageItem('mfr_movements', list);
+    this.setMemCache('mfr_movements', list);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
+    if (useRealFirebase && db && auth?.currentUser) {
       try {
         await deleteDoc(doc(db, 'mfr_movements', movementId));
       } catch (err) {
