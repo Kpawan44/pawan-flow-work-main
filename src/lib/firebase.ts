@@ -1049,20 +1049,13 @@ export class DBService {
       createdByUserId: creatorId,
       jobCardNo,
       orderNo,
-      balanceQty: job.orderQty, // initially complete orderQty
+      balanceQty: job.orderQty,
       createdAt: new Date().toISOString(),
       completed: false
     } as JobCard;
 
-    // 1. Update Local Storage offline cache first
-    cards.unshift(newJob);
-    setLocalStorageItem('mfr_job_cards', cards);
-    this.setMemCache('mfr_job_cards', cards);
-
-    // Spawn an initial Material Movement
     const movements = await this.getMovements();
     const newMovementId = `M-${2000 + movements.length + 1}`;
-    
     const unitLabel = job.unit || 'KG';
     const defaultMovement: MaterialMovement = isPurchase ? {
       movementId: newMovementId,
@@ -1091,14 +1084,11 @@ export class DBService {
       ...(initialMovementOverride || {})
     };
 
-    movements.unshift(initialMovement);
-    setLocalStorageItem('mfr_movements', movements);
-    this.setMemCache('mfr_movements', movements);
-
-    // 2. Authoritative Backend API Execution
+    // 1. Authoritative Backend API Execution FIRST (Source of Truth)
     const apiBase = getApiBaseUrl();
     const headers = await this.getAuthHeaders();
-    let apiSuccess = false;
+    let authoritativeJob: JobCard | null = null;
+    let authoritativeMovement: MaterialMovement | null = null;
 
     try {
       const res = await fetch(`${apiBase}/api/job-cards`, {
@@ -1108,31 +1098,58 @@ export class DBService {
       });
       if (res.ok) {
         const resData = await res.json();
-        if (resData.success) {
-          apiSuccess = true;
+        if (resData.success && resData.jobCard) {
+          authoritativeJob = resData.jobCard;
+          authoritativeMovement = resData.movement || initialMovement;
         }
       }
     } catch (apiErr) {
-      console.warn("[JOB_CARD API] Direct backend call failed, falling back to local sync:", apiErr);
+      console.warn("[JOB_CARD API] Backend API call failed, falling back to direct auth write:", apiErr);
     }
 
-    if (!apiSuccess) {
+    if (!authoritativeJob) {
       // Direct Firestore write ONLY when client is actively authenticated
       if (useRealFirebase && db && auth?.currentUser) {
         try {
           await setDoc(doc(db, 'mfr_job_cards', jobCardNo), sanitizeForFirestore(newJob));
           await setDoc(doc(db, 'mfr_movements', newMovementId), sanitizeForFirestore(initialMovement));
+          authoritativeJob = newJob;
+          authoritativeMovement = initialMovement;
         } catch (err) {
           handleFirestoreError(err, OperationType.WRITE, `mfr_job_cards/${jobCardNo}`);
         }
       }
     }
 
-    await this.logAction(creatorId, creatorName, 'CREATE_JOB_CARD', `Generated job card ${jobCardNo} for ${job.partyName} (${job.orderQty} ${unitLabel})`);
+    const finalJob = authoritativeJob || newJob;
+    const finalMovement = authoritativeMovement || initialMovement;
+
+    // 2. Reconcile Local Cache & Memory with Authoritative Server Result
+    const freshCards = await this.getJobCards();
+    const cardIdx = freshCards.findIndex(c => c.jobCardNo.toLowerCase() === finalJob.jobCardNo.toLowerCase());
+    if (cardIdx >= 0) {
+      freshCards[cardIdx] = finalJob;
+    } else {
+      freshCards.unshift(finalJob);
+    }
+    setLocalStorageItem('mfr_job_cards', freshCards);
+    this.setMemCache('mfr_job_cards', freshCards);
+
+    const freshMovements = await this.getMovements();
+    const movIdx = freshMovements.findIndex(m => m.movementId === finalMovement.movementId);
+    if (movIdx >= 0) {
+      freshMovements[movIdx] = finalMovement;
+    } else {
+      freshMovements.unshift(finalMovement);
+    }
+    setLocalStorageItem('mfr_movements', freshMovements);
+    this.setMemCache('mfr_movements', freshMovements);
+
+    await this.logAction(creatorId, creatorName, 'CREATE_JOB_CARD', `Generated job card ${finalJob.jobCardNo} for ${job.partyName} (${job.orderQty} ${unitLabel})`);
     
     // Broadcast real-time SSE event to all connected devices (< 50ms sync)
-    await this.broadcastEvent('JOB_UPDATED', { jobCardNo }).catch(() => {});
-    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: newMovementId, jobCardNo }).catch(() => {});
+    await this.broadcastEvent('JOB_UPDATED', { jobCardNo: finalJob.jobCardNo }).catch(() => {});
+    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: finalMovement.movementId, jobCardNo: finalJob.jobCardNo }).catch(() => {});
 
     // Automatically save item name and code to master list
     try {
@@ -1142,10 +1159,10 @@ export class DBService {
     }
 
     // Log to Google Sheets
-    logJobCardToSheets(newJob).catch(err => console.warn('Google Sheets log failed: ', err));
-    logMaterialMovementToSheets(initialMovement).catch(err => console.warn('Google Sheets movement log failed: ', err));
+    logJobCardToSheets(finalJob).catch(err => console.warn('Google Sheets log failed: ', err));
+    logMaterialMovementToSheets(finalMovement).catch(err => console.warn('Google Sheets movement log failed: ', err));
 
-    return newJob;
+    return finalJob;
   }
 
   static async updateJobCard(
@@ -1209,15 +1226,13 @@ export class DBService {
       }
     }
 
-    // 2. Update Local Storage offline cache
+    // 2. Authoritative Backend API Execution FIRST
+    const apiBase = getApiBaseUrl();
+    const headers = await this.getAuthHeaders();
+    let authoritativeJob: JobCard | null = null;
     const cards = await this.getJobCards();
     const idx = cards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
-    if (idx === -1) {
-      console.warn(`Job card ${jobCardNo} not found for update`);
-      return { success: false, message: `Job card ${jobCardNo} not found` };
-    }
-    
-    const nextVer = (cards[idx].version || 1) + 1;
+    const nextVer = idx >= 0 ? (cards[idx].version || 1) + 1 : 1;
     const nowIso = new Date().toISOString();
     const finalPayload: Partial<JobCard> = {
       ...updates,
@@ -1225,15 +1240,6 @@ export class DBService {
       updatedAt: nowIso,
       updatedBy: userName || userId
     };
-
-    cards[idx] = { ...cards[idx], ...finalPayload } as JobCard;
-    setLocalStorageItem('mfr_job_cards', cards);
-    this.setMemCache('mfr_job_cards', cards);
-
-    // 3. Authoritative Backend API Execution
-    const apiBase = getApiBaseUrl();
-    const headers = await this.getAuthHeaders();
-    let apiSuccess = false;
 
     try {
       const res = await fetch(`${apiBase}/api/job-cards/${encodeURIComponent(jobCardNo)}`, {
@@ -1243,32 +1249,43 @@ export class DBService {
       });
       if (res.ok) {
         const resData = await res.json();
-        if (resData.success) {
-          apiSuccess = true;
+        if (resData.success && resData.jobCard) {
+          authoritativeJob = resData.jobCard;
         }
       }
     } catch (apiErr) {
       console.warn("[JOB_CARD API] Update backend call failed, falling back to direct auth write:", apiErr);
     }
 
-    if (!apiSuccess) {
+    if (!authoritativeJob) {
       if (useRealFirebase && db && auth?.currentUser) {
         try {
           const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
           const snapUpper = await getDoc(refUpper);
           if (snapUpper.exists()) {
             await updateDoc(refUpper, sanitizeForFirestore(finalPayload) as any);
+            authoritativeJob = { ...(snapUpper.data() as JobCard), ...finalPayload } as JobCard;
           } else {
             const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
             const snapAsIs = await getDoc(refAsIs);
             if (snapAsIs.exists()) {
               await updateDoc(refAsIs, sanitizeForFirestore(finalPayload) as any);
+              authoritativeJob = { ...(snapAsIs.data() as JobCard), ...finalPayload } as JobCard;
             }
           }
         } catch (err) {
           handleFirestoreError(err, OperationType.UPDATE, `mfr_job_cards/${jobCardNo}`);
         }
       }
+    }
+
+    // 3. Reconcile Local Cache & Memory with Authoritative Result
+    const freshCards = await this.getJobCards();
+    const freshIdx = freshCards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
+    if (freshIdx >= 0) {
+      freshCards[freshIdx] = authoritativeJob || ({ ...freshCards[freshIdx], ...finalPayload } as JobCard);
+      setLocalStorageItem('mfr_job_cards', freshCards);
+      this.setMemCache('mfr_job_cards', freshCards);
     }
 
     await this.logAction(userId, userName, 'UPDATE_JOB_CARD', `Updated Job Card ${jobCardNo}. Status: ${updates.status || cards[idx].status}`);
@@ -1566,6 +1583,27 @@ export class DBService {
       const mem = this.getFromMemCache<MaterialMovement[]>('mfr_movements');
       if (mem && mem.length > 0) return mem;
     }
+
+    // 1. Authoritative Cloud Run API Fetch FIRST
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/movements`, { headers, signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success && Array.isArray(resData.movements)) {
+          setLocalStorageItem('mfr_movements', resData.movements);
+          this.setMemCache('mfr_movements', resData.movements);
+          return resData.movements;
+        }
+      }
+    } catch (apiErr) {
+      // API unavailable, fall back to direct Firestore or cache
+    }
+
+    // 2. Direct Firestore Client Fallback
     if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
         const querySnapshot = await getDocs(collection(db, 'mfr_movements'));
@@ -1577,7 +1615,6 @@ export class DBService {
           }
         });
         const sorted = list.sort((a, b) => new Date(b.transferDate).getTime() - new Date(a.transferDate).getTime());
-        // Mirror to local cache on successful load
         setLocalStorageItem('mfr_movements', sorted);
         this.setMemCache('mfr_movements', sorted);
         return sorted;
@@ -1585,6 +1622,8 @@ export class DBService {
         handleFirestoreError(err, OperationType.LIST, 'mfr_movements');
       }
     }
+
+    // 3. Fall back to local storage cache
     const cached = getLocalStorageItem<MaterialMovement[]>('mfr_movements', []);
     this.setMemCache('mfr_movements', cached);
     return cached;
@@ -1611,7 +1650,7 @@ export class DBService {
       }
     }
 
-    const newId = `M-${2000 + movements.length + 1}`;
+    const newId = `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const nowIso = new Date().toISOString();
     
     const newMov: MaterialMovement = {
@@ -1624,23 +1663,10 @@ export class DBService {
       initiatedByUserName: userName
     };
 
-    // 1. Update Local Storage offline cache first
-    movements.unshift(newMov);
-    setLocalStorageItem('mfr_movements', movements);
-    this.setMemCache('mfr_movements', movements);
-    
-    // Update Job Card department & status to show pending placement (only if NOT a Dispatch Issue Request)
-    if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
-      await this.updateJobCard(movement.jobCardNo, {
-        status: 'Pending Acceptance',
-        currentDepartment: movement.toDepartment as Department
-      }, userId, userName).catch(() => {});
-    }
-
-    // 2. Authoritative Backend API Execution
+    // 1. Authoritative Backend API Execution FIRST
     const apiBase = getApiBaseUrl();
     const headers = await this.getAuthHeaders();
-    let apiSuccess = false;
+    let authoritativeMov: MaterialMovement | null = null;
 
     try {
       const res = await fetch(`${apiBase}/api/movements`, {
@@ -1650,22 +1676,44 @@ export class DBService {
       });
       if (res.ok) {
         const resData = await res.json();
-        if (resData.success) {
-          apiSuccess = true;
+        if (resData.success && resData.movement) {
+          authoritativeMov = resData.movement;
         }
       }
     } catch (apiErr) {
       console.warn("[MOVEMENTS API] Create movement call failed, falling back to direct write:", apiErr);
     }
 
-    if (!apiSuccess) {
+    if (!authoritativeMov) {
       if (useRealFirebase && db && auth?.currentUser) {
         try {
           await setDoc(doc(db, 'mfr_movements', newId), sanitizeForFirestore(newMov));
+          authoritativeMov = newMov;
         } catch (err) {
           handleFirestoreError(err, OperationType.WRITE, `mfr_movements/${newId}`);
         }
       }
+    }
+
+    const finalMov = authoritativeMov || newMov;
+
+    // 2. Reconcile Local Cache & Memory with Authoritative Server Result
+    const freshMovements = await this.getMovements();
+    const movIdx = freshMovements.findIndex(m => m.movementId === finalMov.movementId);
+    if (movIdx >= 0) {
+      freshMovements[movIdx] = finalMov;
+    } else {
+      freshMovements.unshift(finalMov);
+    }
+    setLocalStorageItem('mfr_movements', freshMovements);
+    this.setMemCache('mfr_movements', freshMovements);
+    
+    // Update Job Card department & status to show pending placement (only if NOT a Dispatch Issue Request)
+    if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
+      await this.updateJobCard(movement.jobCardNo, {
+        status: 'Pending Acceptance',
+        currentDepartment: movement.toDepartment as Department
+      }, userId, userName).catch(() => {});
     }
 
     // Create Notification for the receiving department
@@ -1689,15 +1737,15 @@ export class DBService {
     );
 
     // Broadcast SSE Events AFTER COMMIT
-    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: newId, jobCardNo: movement.jobCardNo }).catch(() => {});
+    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: finalMov.movementId, jobCardNo: movement.jobCardNo }).catch(() => {});
     if (!movement.jobCardNo.startsWith('STOCK-IN-')) {
       await this.broadcastEvent('JOB_UPDATED', { jobCardNo: movement.jobCardNo }).catch(() => {});
     }
 
     // Log to Google Sheets
-    logMaterialMovementToSheets(newMov).catch(err => console.warn('Google Sheets movement log failed:', err));
+    logMaterialMovementToSheets(finalMov).catch(err => console.warn('Google Sheets movement log failed:', err));
 
-    return newMov;
+    return finalMov;
   }
 
   static async acceptMovement(
@@ -2211,6 +2259,26 @@ export class DBService {
 
   // --- NOTIFICATIONS ---
   static async getNotifications(): Promise<AppNotification[]> {
+    // 1. Authoritative Cloud Run API Fetch FIRST
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/notifications`, { headers, signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success && Array.isArray(resData.notifications)) {
+          setLocalStorageItem('mfr_notifications', resData.notifications);
+          this.setMemCache('mfr_notifications', resData.notifications);
+          return resData.notifications;
+        }
+      }
+    } catch (apiErr) {
+      // fallback
+    }
+
+    // 2. Direct Firestore Client Fallback
     if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
         const querySnapshot = await getDocs(collection(db, 'mfr_notifications'));
@@ -2222,8 +2290,8 @@ export class DBService {
           }
         });
         const sorted = list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        // Mirror to local cache on successful load
         setLocalStorageItem('mfr_notifications', sorted);
+        this.setMemCache('mfr_notifications', sorted);
         return sorted;
       } catch (err) {
         handleFirestoreError(err, OperationType.LIST, 'mfr_notifications');
@@ -2376,6 +2444,26 @@ export class DBService {
 
   // --- AUDIT LOGS ---
   static async getAuditLogs(): Promise<AuditLog[]> {
+    // 1. Authoritative Cloud Run API Fetch FIRST
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/audit-logs`, { headers, signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success && Array.isArray(resData.logs)) {
+          setLocalStorageItem('mfr_audit_logs', resData.logs);
+          this.setMemCache('mfr_audit_logs', resData.logs);
+          return resData.logs;
+        }
+      }
+    } catch (apiErr) {
+      // fallback
+    }
+
+    // 2. Direct Firestore Client Fallback
     if (useRealFirebase && db && !this.isOfflineMode()) {
       try {
         const querySnapshot = await getDocs(collection(db, 'mfr_audit_logs'));
@@ -2386,7 +2474,10 @@ export class DBService {
             list.push(data);
           }
         });
-        return list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 500);
+        const sorted = list.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()).slice(0, 500);
+        setLocalStorageItem('mfr_audit_logs', sorted);
+        this.setMemCache('mfr_audit_logs', sorted);
+        return sorted;
       } catch (err) {
         handleFirestoreError(err, OperationType.LIST, 'mfr_audit_logs');
       }

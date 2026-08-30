@@ -2593,6 +2593,60 @@ async function startServer() {
     "Completed"
   ];
 
+  // GET /api/audit-logs — Authoritative Server Audit Logs Fetch
+  app.get("/api/audit-logs", requireFirebaseAuth, async (req, res) => {
+    try {
+      let logs: any[] = [];
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const snap = await dbAdmin.collection("mfr_audit_logs").orderBy("timestamp", "desc").limit(500).get();
+          logs = snap.docs.map(d => d.data());
+        }
+      } catch (_) {}
+
+      if (logs.length === 0) {
+        const restResult = await firestoreRestQueryAll("mfr_audit_logs");
+        if (Array.isArray(restResult)) {
+          logs = restResult;
+        }
+      }
+
+      const sorted = logs.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime()).slice(0, 500);
+      return res.json({ success: true, logs: sorted });
+    } catch (err: any) {
+      console.error("[AUDIT] Error fetching audit logs:", err);
+      return res.status(500).json({ success: false, error: "Failed to retrieve audit logs" });
+    }
+  });
+
+  // GET /api/notifications — Authoritative Server Notifications Fetch
+  app.get("/api/notifications", requireFirebaseAuth, async (req, res) => {
+    try {
+      let notifs: any[] = [];
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const snap = await dbAdmin.collection("mfr_notifications").orderBy("createdAt", "desc").limit(200).get();
+          notifs = snap.docs.map(d => d.data());
+        }
+      } catch (_) {}
+
+      if (notifs.length === 0) {
+        const restResult = await firestoreRestQueryAll("mfr_notifications");
+        if (Array.isArray(restResult)) {
+          notifs = restResult;
+        }
+      }
+
+      const sorted = notifs.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()).slice(0, 200);
+      return res.json({ success: true, notifications: sorted });
+    } catch (err: any) {
+      console.error("[NOTIFICATIONS] Error fetching notifications:", err);
+      return res.status(500).json({ success: false, error: "Failed to retrieve notifications" });
+    }
+  });
+
   // POST /api/audit-logs — Authoritative Server Audit Logging
   app.post("/api/audit-logs", requireFirebaseAuth, async (req, res) => {
     try {
