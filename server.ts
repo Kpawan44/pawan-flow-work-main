@@ -73,9 +73,33 @@ async function startServer() {
     }
   }));
 
-  // Universal CORS Middleware for Android Mobile App, Capacitor, and Web Browsers
+  // Hardened Production CORS Middleware with explicit trusted origin allowlist
+  const ALLOWED_ORIGINS = [
+    "https://pmw-tracker-928410476586.asia-south1.run.app",
+    "https://my-project-9ca72.web.app",
+    "https://my-project-9ca72.firebaseapp.com",
+    "capacitor://localhost",
+    "http://localhost",
+    "https://localhost"
+  ];
+
   app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    const origin = req.headers.origin;
+    if (origin) {
+      const isAllowed = ALLOWED_ORIGINS.includes(origin) ||
+        origin.startsWith("http://localhost:") ||
+        origin.startsWith("http://127.0.0.1:") ||
+        origin.endsWith(".run.app") ||
+        origin.endsWith(".web.app");
+
+      if (isAllowed) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
+        res.setHeader("Vary", "Origin");
+      }
+    } else {
+      // Direct API requests (native Android mobile app, curl, server-to-server)
+      res.setHeader("Access-Control-Allow-Origin", "*");
+    }
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
     res.setHeader("Access-Control-Max-Age", "86400");
@@ -2236,24 +2260,49 @@ async function startServer() {
       }
 
       const { jobCard, initialMovement: customInitialMovement } = req.body || {};
-      if (!jobCard || !jobCard.jobCardNo || !jobCard.partyName || !jobCard.orderQty) {
+      if (!jobCard || !jobCard.jobCardNo || !jobCard.partyName || jobCard.orderQty === undefined || jobCard.orderQty === null) {
         return res.status(400).json({ success: false, error: "jobCardNo, partyName, and orderQty are required." });
+      }
+
+      const numOrderQty = Number(jobCard.orderQty);
+      if (isNaN(numOrderQty) || !isFinite(numOrderQty) || numOrderQty <= 0 || numOrderQty > 1000000000) {
+        return res.status(400).json({ success: false, error: "Invalid orderQty: Must be a positive finite number (1 to 1,000,000,000)." });
+      }
+
+      const isPurchase = Boolean(jobCard.purchaseDetails && Object.keys(jobCard.purchaseDetails).length > 0);
+      const userRole = String(requester.role || "staff").toLowerCase();
+      const userDept = String(requester.department || "").toLowerCase();
+      const allowedDepts: string[] = [
+        ...(Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : []),
+        ...(Array.isArray(requester.accessList) ? requester.accessList : [])
+      ].map((d: string) => String(d).toLowerCase());
+
+      const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
+      const requiredDept = isPurchase ? "purchase" : "dispatch";
+      const hasDeptPerm = isSuperOrAdmin || userDept === requiredDept || allowedDepts.includes(requiredDept);
+
+      if (!hasDeptPerm) {
+        return res.status(403).json({
+          success: false,
+          error: `Forbidden: User '${requester.name || requester.userId}' (${requester.department}) is not authorized to create ${isPurchase ? 'Purchase Inward' : 'Dispatch'} Job Cards.`
+        });
       }
 
       const authoritativeUserId = authUid;
       const authoritativeUserName = requester.name || requester.userId || "Authorized User";
       const now = new Date().toISOString();
-      const upperJobNo = jobCard.jobCardNo.toUpperCase().trim();
-      const isPurchase = jobCard.purchaseDetails && Object.keys(jobCard.purchaseDetails).length > 0;
+      const upperJobNo = String(jobCard.jobCardNo).toUpperCase().trim();
       const unitLabel = jobCard.unit || 'KG';
 
       const newJob = {
         ...jobCard,
         jobCardNo: upperJobNo,
+        orderQty: numOrderQty,
+        currentQty: numOrderQty,
         status: jobCard.status || 'Pending Acceptance',
         createdBy: authoritativeUserName,
         createdByUserId: authoritativeUserId,
-        balanceQty: jobCard.orderQty,
+        balanceQty: numOrderQty,
         version: 1,
         createdAt: now,
         completed: false
@@ -3574,8 +3623,45 @@ async function startServer() {
       }
 
       const { movement } = req.body || {};
-      if (!movement || !movement.jobCardNo || !movement.fromDepartment || !movement.toDepartment || !movement.quantity) {
+      if (!movement || !movement.jobCardNo || !movement.fromDepartment || !movement.toDepartment || movement.quantity === undefined || movement.quantity === null) {
         return res.status(400).json({ success: false, error: "jobCardNo, fromDepartment, toDepartment, and quantity are required." });
+      }
+
+      const numMovQty = Number(movement.quantity);
+      if (isNaN(numMovQty) || !isFinite(numMovQty) || numMovQty <= 0 || numMovQty > 1000000000) {
+        return res.status(400).json({ success: false, error: "Invalid movement quantity: Must be a positive finite number (1 to 1,000,000,000)." });
+      }
+
+      const normFrom = String(movement.fromDepartment).trim();
+      const normTo = String(movement.toDepartment).trim();
+
+      const isValidFrom = VALID_MANUFACTURING_DEPARTMENTS.some(d => d.toLowerCase() === normFrom.toLowerCase());
+      const isValidTo = VALID_MANUFACTURING_DEPARTMENTS.some(d => d.toLowerCase() === normTo.toLowerCase());
+
+      if (!isValidFrom || !isValidTo) {
+        return res.status(400).json({
+          success: false,
+          error: `Invalid department specified. Must be one of: ${VALID_MANUFACTURING_DEPARTMENTS.join(", ")}`
+        });
+      }
+
+      const userRole = String(requester.role || "staff").toLowerCase();
+      const userDept = String(requester.department || "").toLowerCase();
+      const allowedDepts: string[] = [
+        ...(Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : []),
+        ...(Array.isArray(requester.accessList) ? requester.accessList : [])
+      ].map((d: string) => String(d).toLowerCase());
+
+      const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
+      const isDeptAuthorized = isSuperOrAdmin || 
+        userDept === normFrom.toLowerCase() ||
+        allowedDepts.includes(normFrom.toLowerCase());
+
+      if (!isDeptAuthorized) {
+        return res.status(403).json({
+          success: false,
+          error: `Forbidden: User '${requester.name || requester.userId}' (${requester.department}) is not authorized to initiate movements from '${normFrom}'.`
+        });
       }
 
       const authoritativeUserId = authUid;
@@ -3586,6 +3672,9 @@ async function startServer() {
       const newMov = {
         ...movement,
         movementId: movId,
+        fromDepartment: normFrom,
+        toDepartment: normTo,
+        quantity: numMovQty,
         transferDate: now,
         accepted: false,
         transferBy: authoritativeUserName,
