@@ -3,6 +3,7 @@ import compression from "compression";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import dns from "dns";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
@@ -11,6 +12,9 @@ import { initializeApp, getApps, getApp } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import { GoogleAuth } from "google-auth-library";
+
+// Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
+dns.setDefaultResultOrder("ipv4first");
 
 // Read Firebase applet configuration for Admin SDK
 let firebaseConfig: any = null;
@@ -26,17 +30,15 @@ try {
 const firebaseProjectId = firebaseConfig?.projectId || process.env.GCP_PROJECT || process.env.FIREBASE_PROJECT_ID || "my-project-9ca72";
 const firestoreDbId = firebaseConfig?.firestoreDatabaseId || "(default)";
 
-// Guard against unhandled background async rejections (e.g. Google metadata ADC probes on non-GCP hosts)
+// Guard against unhandled background async rejections
 process.on('unhandledRejection', (reason: any) => {
   console.warn('[Server Warning] Caught background async rejection:', reason?.message || reason);
 });
 
 let adminApp: any = null;
 let firestoreAdminDb: any = null;
-let adminSdkHasPermission: boolean | null = null;
 
 function getFirestoreAdmin() {
-  if (adminSdkHasPermission === false) return null;
   if (!firestoreAdminDb) {
     try {
       if (getApps().length === 0) {
@@ -51,7 +53,6 @@ function getFirestoreAdmin() {
         : getFirestore(adminApp);
     } catch (err: any) {
       console.warn("[Firebase Admin] Initialization note:", err?.message || err);
-      adminSdkHasPermission = false;
       return null;
     }
   }
@@ -151,11 +152,12 @@ async function startServer() {
   }
 
   async function firestoreRestGetDoc(collectionName: string, docId: string): Promise<any> {
+    const apiKey = firebaseConfig?.apiKey || "";
+    const projId = firebaseProjectId;
+    const dbId = firestoreDbId;
+    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
+    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
     try {
-      const apiKey = firebaseConfig?.apiKey || "";
-      const projId = firebaseProjectId;
-      const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
       const gcpToken = await getGcpAccessToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
@@ -163,7 +165,8 @@ async function startServer() {
       const res = await fetch(url, { headers });
       if (res.status === 404) return null;
       if (!res.ok) {
-        console.warn(`[Firestore REST] GET ${collectionName}/${docId} returned status ${res.status}`);
+        const errorText = await res.text().catch(() => "");
+        console.warn(`[Firestore REST] GET ${collectionName}/${docId} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
         return null;
       }
       const data = await res.json();
@@ -171,17 +174,23 @@ async function startServer() {
       const parsed = parseFirestoreFields(data.fields);
       return { id: docId, ...parsed };
     } catch (err: any) {
-      console.warn(`[Firestore REST] GET ${collectionName}/${docId} error:`, err.message);
+      console.warn(`[Firestore REST Diagnostics] GET ${collectionName}/${docId} fetch failed:`, {
+        errorName: err?.name,
+        errorMessage: err?.message,
+        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
+        url: safeUrl
+      });
       return null;
     }
   }
 
   async function firestoreRestQuery(collectionName: string, field: string, value: string): Promise<any> {
+    const apiKey = firebaseConfig?.apiKey || "";
+    const projId = firebaseProjectId;
+    const dbId = firestoreDbId;
+    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery${apiKey ? `?key=${apiKey}` : ""}`;
+    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
     try {
-      const apiKey = firebaseConfig?.apiKey || "";
-      const projId = firebaseProjectId;
-      const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery${apiKey ? `?key=${apiKey}` : ""}`;
       const queryBody = {
         structuredQuery: {
           from: [{ collectionId: collectionName }],
@@ -204,7 +213,11 @@ async function startServer() {
         headers,
         body: JSON.stringify(queryBody)
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => "");
+        console.warn(`[Firestore REST] Query ${collectionName} ${field} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
+        return null;
+      }
       const results = await res.json();
       if (Array.isArray(results) && results[0] && results[0].document && results[0].document.fields) {
         const docName = results[0].document.name || "";
@@ -214,17 +227,23 @@ async function startServer() {
       }
       return null;
     } catch (err: any) {
-      console.warn(`[Firestore REST] Query ${collectionName} ${field} error:`, err.message);
+      console.warn(`[Firestore REST Diagnostics] Query ${collectionName} ${field} fetch failed:`, {
+        errorName: err?.name,
+        errorMessage: err?.message,
+        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
+        url: safeUrl
+      });
       return null;
     }
   }
 
   async function firestoreRestQueryAll(collectionName: string): Promise<any[]> {
+    const apiKey = firebaseConfig?.apiKey || "";
+    const projId = firebaseProjectId;
+    const dbId = firestoreDbId;
+    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery${apiKey ? `?key=${apiKey}` : ""}`;
+    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
     try {
-      const apiKey = firebaseConfig?.apiKey || "";
-      const projId = firebaseProjectId;
-      const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery${apiKey ? `?key=${apiKey}` : ""}`;
       const queryBody = {
         structuredQuery: {
           from: [{ collectionId: collectionName }]
@@ -239,7 +258,11 @@ async function startServer() {
         headers,
         body: JSON.stringify(queryBody)
       });
-      if (!res.ok) return [];
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => "");
+        console.warn(`[Firestore REST] QueryAll ${collectionName} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
+        return [];
+      }
       const rawDocs = await res.json().catch(() => []);
       const results: any[] = [];
       if (Array.isArray(rawDocs)) {
@@ -256,17 +279,23 @@ async function startServer() {
       }
       return results;
     } catch (err: any) {
-      console.warn(`[Firestore REST] QueryAll ${collectionName} error:`, err.message);
+      console.warn(`[Firestore REST Diagnostics] QueryAll ${collectionName} fetch failed:`, {
+        errorName: err?.name,
+        errorMessage: err?.message,
+        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
+        url: safeUrl
+      });
       return [];
     }
   }
 
   async function firestoreRestSetDoc(collectionName: string, docId: string, data: any): Promise<boolean> {
+    const apiKey = firebaseConfig?.apiKey || "";
+    const projId = firebaseProjectId;
+    const dbId = firestoreDbId;
+    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
+    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
     try {
-      const apiKey = firebaseConfig?.apiKey || "";
-      const projId = firebaseProjectId;
-      const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
       const encodedFields = encodeFirestoreFields(data);
       const gcpToken = await getGcpAccessToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -277,19 +306,29 @@ async function startServer() {
         headers,
         body: JSON.stringify({ fields: encodedFields })
       });
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => "");
+        console.warn(`[Firestore REST] SET ${collectionName}/${docId} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
+      }
       return res.ok;
     } catch (err: any) {
-      console.warn(`[Firestore REST] SET ${collectionName}/${docId} error:`, err.message);
+      console.warn(`[Firestore REST Diagnostics] SET ${collectionName}/${docId} fetch failed:`, {
+        errorName: err?.name,
+        errorMessage: err?.message,
+        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
+        url: safeUrl
+      });
       return false;
     }
   }
 
   async function firestoreRestDeleteDoc(collectionName: string, docId: string): Promise<boolean> {
+    const apiKey = firebaseConfig?.apiKey || "";
+    const projId = firebaseProjectId;
+    const dbId = firestoreDbId;
+    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
+    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
     try {
-      const apiKey = firebaseConfig?.apiKey || "";
-      const projId = firebaseProjectId;
-      const dbId = firestoreDbId;
-      const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
       const gcpToken = await getGcpAccessToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
@@ -298,9 +337,18 @@ async function startServer() {
         method: "DELETE",
         headers
       });
+      if (!res.ok) {
+        const errorText = await res.text().catch(() => "");
+        console.warn(`[Firestore REST] DELETE ${collectionName}/${docId} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
+      }
       return res.ok;
     } catch (err: any) {
-      console.warn(`[Firestore REST] DELETE ${collectionName}/${docId} error:`, err.message);
+      console.warn(`[Firestore REST Diagnostics] DELETE ${collectionName}/${docId} fetch failed:`, {
+        errorName: err?.name,
+        errorMessage: err?.message,
+        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
+        url: safeUrl
+      });
       return false;
     }
   }
@@ -315,7 +363,7 @@ async function startServer() {
   async function initSystemState(): Promise<string> {
     try {
       let stateDoc: any = null;
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -325,8 +373,7 @@ async function startServer() {
             }
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
       if (!stateDoc) {
         stateDoc = await firestoreRestGetDoc("mfr_system_state", "global");
@@ -346,7 +393,7 @@ async function startServer() {
         resetOpId: "init-0",
         updatedAt: new Date().toISOString()
       };
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -374,7 +421,7 @@ async function startServer() {
       resetOpId: resetOpId || `op-${Date.now()}`,
       updatedAt: new Date().toISOString()
     };
-    if (adminSdkHasPermission !== false) {
+    if (true) {
       try {
         const db = getFirestoreAdmin();
         if (db) {
@@ -427,7 +474,7 @@ async function startServer() {
 
     // 2. Authoritative Firestore check
     try {
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -445,8 +492,7 @@ async function startServer() {
             }
           }
         } catch (_) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       const doc = await firestoreRestGetDoc("mfr_deleted_users", cleanId);
@@ -484,7 +530,7 @@ async function startServer() {
     deletedUserIds.add(lowerId);
     saveDeletedUsers();
 
-    if (adminSdkHasPermission !== false) {
+    if (true) {
       try {
         const db = getFirestoreAdmin();
         if (db) {
@@ -500,8 +546,7 @@ async function startServer() {
           }
         }
       } catch (_) {
-        adminSdkHasPermission = false;
-      }
+        }
     }
 
     await firestoreRestSetDoc("mfr_deleted_users", cleanId, tombstonePayload).catch(() => {});
@@ -634,7 +679,7 @@ async function startServer() {
   app.get("/api/system/state", async (req, res) => {
     try {
       let activeCount = 0;
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -649,7 +694,7 @@ async function startServer() {
           }
         } catch (_) {}
       }
-      if (activeCount === 0 && adminSdkHasPermission === false) {
+      if (activeCount === 0) {
         const restUsers = await firestoreRestQueryAll("mfr_users");
         const activeDocs = restUsers.filter((u: any) => {
           const docUid = (u?.userId || u?.id || "").toLowerCase().trim();
@@ -673,7 +718,7 @@ async function startServer() {
   app.get("/api/system/raw-users", async (req, res) => {
     try {
       let docs: any[] = [];
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -740,7 +785,7 @@ async function startServer() {
     }
 
     // 1. Try Firebase Admin SDK if permission is available
-    if (adminSdkHasPermission !== false) {
+    if (true) {
       try {
         const db = getFirestoreAdmin();
         if (db) {
@@ -839,8 +884,7 @@ async function startServer() {
         }
       } catch (adminErr: any) {
         console.warn("[AUTH] Admin SDK lookup unavailable, switching to Firestore REST API:", adminErr?.message || adminErr);
-        adminSdkHasPermission = false;
-      }
+        }
     }
 
     // 2. Fallback to Firestore REST API if Admin SDK was unavailable or returned permission error
@@ -925,7 +969,7 @@ async function startServer() {
 
     // Look up PIN hash in credentials store if not already obtained
     if (!pinHash) {
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -991,7 +1035,7 @@ async function startServer() {
       let verifiedSessionPayload: any = null;
 
       // 1. Try Firebase Admin ID Token verification if available
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           if (!adminApp) {
             getFirestoreAdmin();
@@ -1054,7 +1098,7 @@ async function startServer() {
       let userData: any = null;
 
       // 1. Try Admin SDK
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1064,8 +1108,7 @@ async function startServer() {
             }
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       // 2. Fallback to Firestore REST
@@ -1370,7 +1413,7 @@ async function startServer() {
       }
 
       let existingData: any = null;
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1378,8 +1421,7 @@ async function startServer() {
             if (userDoc.exists) existingData = userDoc.data();
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
       if (!existingData) {
         existingData = await firestoreRestGetDoc("mfr_users", userId);
@@ -1422,7 +1464,7 @@ async function startServer() {
       }
 
       let usersList: any[] = [];
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1430,8 +1472,7 @@ async function startServer() {
             usersList = snap.docs.map((doc: any) => ({ ...doc.data(), userId: doc.data()?.userId || doc.id }));
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       if (usersList.length === 0) {
@@ -1517,7 +1558,7 @@ async function startServer() {
       }
 
       let existingData: any = null;
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1527,8 +1568,7 @@ async function startServer() {
             }
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       if (!existingData) {
@@ -1556,7 +1596,7 @@ async function startServer() {
         updatedAt: new Date().toISOString()
       };
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1571,8 +1611,7 @@ async function startServer() {
             await db.collection("mfr_users").doc(userData.userId).set(sanitized, { merge: true });
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       firestoreRestSetDoc("mfr_users", userData.userId, sanitized).catch(() => {});
@@ -1581,7 +1620,7 @@ async function startServer() {
 
       const rawPin = (userData.pin && typeof userData.pin === "string" && userData.pin.trim()) ? userData.pin.trim() : "1234";
       const pinHash = await bcrypt.hash(rawPin, 10);
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1630,7 +1669,7 @@ async function startServer() {
       }
 
       let existingData: any = customUsersStore[userId] || null;
-      if (!existingData && adminSdkHasPermission !== false) {
+      if (!existingData) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1638,8 +1677,7 @@ async function startServer() {
             if (docSnap.exists) existingData = docSnap.data();
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
       if (!existingData) {
         existingData = await firestoreRestGetDoc("mfr_users", userId);
@@ -1674,7 +1712,7 @@ async function startServer() {
         updatedAt: new Date().toISOString()
       };
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1689,8 +1727,7 @@ async function startServer() {
             await db.collection("mfr_users").doc(userId).set(sanitized, { merge: true });
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       firestoreRestSetDoc("mfr_users", userId, sanitized).catch(() => {});
@@ -1739,7 +1776,7 @@ async function startServer() {
       const dbId = firestoreDbId;
 
       // 1. Purge via Admin SDK if available
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1759,8 +1796,7 @@ async function startServer() {
             }
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       // 2. Multi-pass REST deletion until empty
@@ -1847,7 +1883,7 @@ async function startServer() {
     // Verify Super Admin PIN
     let storedPinHash = customCredsStore[requester.userId] || "";
     if (!storedPinHash) {
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -1970,7 +2006,7 @@ async function startServer() {
 
     // Strict verification: Query Firestore mfr_users directly to ensure 0 active users exist
     let activeUserCount = 0;
-    if (adminSdkHasPermission !== false) {
+    if (true) {
       try {
         const db = getFirestoreAdmin();
         if (db) {
@@ -1984,8 +2020,7 @@ async function startServer() {
           activeUserCount = activeDocs.length;
         }
       } catch (_) {
-        adminSdkHasPermission = false;
-      }
+        }
     }
 
     if (activeUserCount === 0) {
@@ -2033,7 +2068,7 @@ async function startServer() {
     cachedUsersDirectory = [newSuperAdmin];
     cachedUsersDirectoryTimestamp = Date.now();
 
-    if (adminSdkHasPermission !== false) {
+    if (true) {
       try {
         const db = getFirestoreAdmin();
         if (db) {
@@ -2070,7 +2105,7 @@ async function startServer() {
 
       let userData: any = null;
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -2080,8 +2115,7 @@ async function startServer() {
             }
           }
         } catch (e) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       if (!userData) {
@@ -2120,7 +2154,7 @@ async function startServer() {
   app.get("/api/job-cards", requireFirebaseAuth, async (req, res) => {
     try {
       let cards: any[] = [];
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -2138,7 +2172,7 @@ async function startServer() {
 
       // Check tombstoned job cards
       const deletedIds = new Set<string>();
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -2267,7 +2301,7 @@ async function startServer() {
         details: `Generated job card ${upperJobNo} for ${jobCard.partyName} (${jobCard.orderQty} ${unitLabel})`
       };
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -2321,7 +2355,7 @@ async function startServer() {
 
       let updatedCard: any = null;
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -2412,7 +2446,7 @@ async function startServer() {
       };
 
       // 1. Write tombstone to Firestore
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -2429,7 +2463,7 @@ async function startServer() {
       }
 
       // 2. Delete Job Card and cascade related documents from Firestore
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -2490,7 +2524,7 @@ async function startServer() {
 
       const collectionsToPurge = ["mfr_job_cards", "mfr_movements", "mfr_notifications", "mfr_process_transfers", "mfr_outsource_orders"];
       for (const col of collectionsToPurge) {
-        if (adminSdkHasPermission !== false) {
+        if (true) {
           try {
             const dbAdmin = getFirestoreAdmin();
             if (dbAdmin) {
@@ -2564,7 +2598,7 @@ async function startServer() {
         details
       };
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -2604,7 +2638,7 @@ async function startServer() {
         createdAt: now
       };
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -2711,7 +2745,7 @@ async function startServer() {
 
       let txResult: any = null;
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -2843,8 +2877,7 @@ async function startServer() {
             throw adminErr;
           }
           console.warn("[INVENTORY] Admin SDK transaction unavailable, using REST API:", adminErr?.message || adminErr);
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       // REST Fallback for material movement
@@ -3004,7 +3037,7 @@ async function startServer() {
       let finalMovement: any = null;
       let finalJobCard: any = null;
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -3285,7 +3318,7 @@ async function startServer() {
 
       let finalMovement: any = null;
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const db = getFirestoreAdmin();
           if (db) {
@@ -3419,6 +3452,48 @@ async function startServer() {
     }
   });
 
+  // GET /api/movements — Authoritative Movements Retrieval
+  app.get("/api/movements", requireFirebaseAuth, async (req, res) => {
+    try {
+      let movements: any[] = [];
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const snap = await dbAdmin.collection("mfr_movements").get();
+          movements = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+        }
+      } catch (adminErr) {}
+
+      if (movements.length === 0) {
+        const restResult = await firestoreRestQueryAll("mfr_movements");
+        if (Array.isArray(restResult)) {
+          movements = restResult;
+        }
+      }
+
+      // Check deleted/tombstoned movements
+      const deletedIds = new Set<string>();
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const tombSnap = await dbAdmin.collection("mfr_deleted_movements").get();
+          tombSnap.docs.forEach(d => deletedIds.add(d.id));
+        }
+      } catch (_) {}
+
+      const activeMovements = movements.filter((m: any) => {
+        if (!m || !m.movementId) return false;
+        if (deletedIds.has(m.movementId) || m.isDeleted) return false;
+        return true;
+      }).sort((a, b) => new Date(b.transferDate || 0).getTime() - new Date(a.transferDate || 0).getTime());
+
+      return res.json({ success: true, movements: activeMovements });
+    } catch (err: any) {
+      console.error("[MOVEMENTS] Error fetching movements:", err);
+      return res.status(500).json({ success: false, error: "Failed to retrieve movements" });
+    }
+  });
+
   // POST /api/movements — Authoritative Movement Creation
   app.post("/api/movements", requireFirebaseAuth, async (req, res) => {
     try {
@@ -3448,7 +3523,7 @@ async function startServer() {
         initiatedByUserName: authoritativeUserName
       };
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
@@ -3900,7 +3975,7 @@ async function startServer() {
   app.get("/api/process-transfers", async (req, res) => {
     try {
       let transfersList: any[] = [];
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const admin = getFirestoreAdmin();
           if (admin) {
@@ -3908,8 +3983,7 @@ async function startServer() {
             transfersList = snap.docs.map((d: any) => d.data());
           }
         } catch (adminErr) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       if (transfersList.length === 0) {
@@ -3970,7 +4044,7 @@ async function startServer() {
 
       let createdDoc: any = null;
 
-      if (adminSdkHasPermission !== false) {
+      if (true) {
         try {
           const admin = getFirestoreAdmin();
           if (admin) {
@@ -4025,8 +4099,7 @@ async function startServer() {
             });
           }
         } catch (adminErr) {
-          adminSdkHasPermission = false;
-        }
+          }
       }
 
       if (!createdDoc) {

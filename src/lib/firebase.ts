@@ -1758,10 +1758,10 @@ export class DBService {
         throw new Error(errJson.error || `Failed to accept cargo (status ${res.status}).`);
       }
     } catch (apiErr: any) {
-      if (apiErr.message && (apiErr.message.includes("authorized") || apiErr.message.includes("session") || apiErr.message.includes("already been accepted"))) {
+      if (apiErr.message && (apiErr.message.includes("authorized") || apiErr.message.includes("session") || apiErr.message.includes("already been accepted") || apiErr.message.includes("not found"))) {
         throw apiErr;
       }
-      console.warn("[ACCEPT API] Backend API call failed, falling back to direct write:", apiErr);
+      console.warn("[ACCEPT API] Backend API call failed:", apiErr);
     }
 
     // Direct Firestore write ONLY when client is actively authenticated in Firebase Auth
@@ -1840,6 +1840,10 @@ export class DBService {
       } catch (txnErr) {
         console.warn("Direct Firestore fallback error:", txnErr);
       }
+    }
+
+    if (!apiSucceeded && !finalMovement && !this.isOfflineMode()) {
+      throw new Error("Server connection unavailable. Data was not saved.");
     }
 
     // 2. Update Local Cache & Memory
@@ -2018,6 +2022,10 @@ export class DBService {
       } catch (txnErr) {
         console.warn("Direct Firestore reject fallback error:", txnErr);
       }
+    }
+
+    if (!apiSucceeded && !finalMovement && !this.isOfflineMode()) {
+      throw new Error("Server connection unavailable. Data was not saved.");
     }
 
     // 2. Update Local Cache & Memory
