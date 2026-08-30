@@ -1824,8 +1824,8 @@ export class DBService {
           if (targetJcRef && jcSnap && jcSnap.exists()) {
             const jcData = jcSnap.data() as JobCard;
             const nextVersion = (jcData.version || 1) + 1;
-            const nextStatus = updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
-            const jcUpdates = {
+            const nextStatus: JobCardStatus = (updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process')) as JobCardStatus;
+            const jcUpdates: Partial<JobCard> = {
               currentDepartment: updatedMov.toDepartment,
               status: nextStatus,
               currentQty: updatedMov.quantity || jcData.currentQty,
@@ -1994,7 +1994,7 @@ export class DBService {
             ...currentMovData,
             accepted: false,
             issueStatus: 'Rejected',
-            rejectionRemarks: remarks,
+            remarks: remarks ? `REJECTED: ${remarks}` : (currentMovData.remarks || 'Rejected'),
             rejectedBy: rejectedByName || rejectedByUserId,
             rejectedByUserId,
             rejectedDate: nowIso,
@@ -2009,8 +2009,7 @@ export class DBService {
           if (targetJcRef && jcSnap && jcSnap.exists()) {
             const jcData = jcSnap.data() as JobCard;
             transaction.update(targetJcRef, sanitizeForFirestore({
-              status: 'Pending Acceptance',
-              remarks: `Transfer rejected from ${currentMovData.fromDepartment} to ${currentMovData.toDepartment}. Reason: ${remarks}`,
+              status: 'Pending Acceptance' as JobCardStatus,
               updatedAt: nowIso,
               updatedBy: rejectedByName || rejectedByUserId
             }));
@@ -2027,7 +2026,7 @@ export class DBService {
       ...localMov!,
       accepted: false,
       issueStatus: 'Rejected',
-      rejectionRemarks: remarks,
+      remarks: remarks ? `REJECTED: ${remarks}` : (localMov?.remarks || 'Rejected'),
       rejectedBy: rejectedByName || rejectedByUserId,
       rejectedByUserId,
       rejectedDate: nowIso,
@@ -2053,7 +2052,6 @@ export class DBService {
         cards[cardIdx] = {
           ...cards[cardIdx],
           status: 'Pending Acceptance',
-          remarks: `Transfer rejected from ${updatedMov.fromDepartment} to ${updatedMov.toDepartment}. Reason: ${remarks}`,
           updatedAt: nowIso,
           updatedBy: rejectedByName || rejectedByUserId
         };

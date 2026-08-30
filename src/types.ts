@@ -314,6 +314,12 @@ export interface MaterialMovement {
   wireScrapQty?: number;
   processDetails?: Record<string, any>;
 
+  // Rejection tracking
+  rejectedBy?: string;
+  rejectedByUserId?: string;
+  rejectedDate?: string;
+  rejectionRemarks?: string;
+
   // Perfect Audit Trail Tracking
   initiatedByUserId?: string;
   initiatedByUserName?: string;
