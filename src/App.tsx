@@ -946,13 +946,16 @@ export default function App() {
         refreshUsers(true, 'sse_event');
       } else if (event.type === 'MOVEMENT_UPDATED' || event.type === 'DATA_SYNCED') {
         DBService.invalidateCache('mfr_movements');
+        DBService.invalidateCache('mfr_job_cards');
         refreshAllStates();
       } else if (event.type === 'JOB_UPDATED') {
         DBService.invalidateCache('mfr_job_cards');
-        refreshJobCards();
+        DBService.invalidateCache('mfr_movements');
+        refreshAllStates();
       } else if (event.type === 'NOTIFICATION_UPDATED') {
         refreshNotifications();
       } else if (event.type === 'ALL_UPDATED') {
+        DBService.invalidateCache();
         refreshAllStates();
       }
     });

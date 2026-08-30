@@ -5604,29 +5604,83 @@ Please adjust the quantity or request additional raw material issue.`);
           {activeSubView === 'operations' && (
             <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
               {incomingTransfers.length > 0 && (
-                <div 
-                  onClick={() => setActiveSubView('incoming')}
-                  className="mb-4 p-3.5 bg-gradient-to-r from-red-500/15 via-amber-500/10 to-transparent border border-red-500/30 rounded-xl flex items-center justify-between gap-3 cursor-pointer hover:border-red-500/60 transition shadow-xs group"
-                >
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <span className="text-xl animate-bounce">📥</span>
-                    <div>
-                      <p className="text-xs font-bold text-red-600 dark:text-red-400 font-sans flex items-center gap-1.5">
-                        <span>{incomingTransfers.length} Incoming Material Transfer{incomingTransfers.length > 1 ? 's' : ''} Waiting for Inward Acceptance</span>
-                        <span className="bg-red-500 text-white text-[9.5px] px-1.5 py-0.2 rounded-full font-bold">Action Needed</span>
-                      </p>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono mt-0.5">
-                        Transferred from {Array.from(new Set(incomingTransfers.map(m => m.fromDepartment))).join(', ')}. Click here to accept cargo and start processing.
-                      </p>
+                <div className="mb-5 p-4 bg-gradient-to-r from-red-500/10 via-amber-500/10 to-transparent border border-red-500/30 rounded-2xl space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="text-xl animate-bounce">📥</span>
+                      <div>
+                        <p className="text-xs font-bold text-red-600 dark:text-red-400 font-sans flex items-center gap-1.5">
+                          <span>{incomingTransfers.length} Incoming Material Transfer{incomingTransfers.length > 1 ? 's' : ''} Waiting for Inward Acceptance</span>
+                          <span className="bg-red-500 text-white text-[9.5px] px-1.5 py-0.2 rounded-full font-bold">Action Needed</span>
+                        </p>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 font-mono mt-0.5">
+                          Transferred from {Array.from(new Set(incomingTransfers.map(m => m.fromDepartment))).join(', ')}. Accept cargo below to start processing.
+                        </p>
+                      </div>
                     </div>
+                    <button 
+                      type="button" 
+                      onClick={() => setActiveSubView('incoming')}
+                      className="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold rounded-lg transition shrink-0 cursor-pointer flex items-center gap-1"
+                    >
+                      <span>Full Ingress View</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </button>
                   </div>
-                  <button 
-                    type="button" 
-                    className="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-lg shadow-sm group-hover:scale-105 transition shrink-0 cursor-pointer flex items-center gap-1"
-                  >
-                    <span>View & Accept</span>
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </button>
+
+                  {/* Quick Accept Cards right inside Operations Workbench */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                    {incomingTransfers.map(mov => {
+                      const isAccepting = acceptedMovementIds[mov.movementId] === 'animating';
+                      const matchingJob = jobCards.find(j => j.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
+                      return (
+                        <div 
+                          key={mov.movementId}
+                          className="relative bg-white dark:bg-slate-950 p-3.5 rounded-xl border border-red-200 dark:border-red-900/40 shadow-xs flex flex-col justify-between gap-2.5 overflow-hidden"
+                        >
+                          {isAccepting && (
+                            <div className="absolute inset-0 z-10 bg-emerald-50/95 dark:bg-emerald-950/95 flex flex-col items-center justify-center gap-1 p-2 text-center">
+                              <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                              <span className="text-emerald-700 dark:text-emerald-300 font-extrabold text-[11px] uppercase">Cargo Accepted! 🎉</span>
+                            </div>
+                          )}
+                          <div>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-mono text-xs font-bold text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded">{mov.jobCardNo}</span>
+                              <span className="text-xs font-bold font-mono text-indigo-600 dark:text-indigo-400">{mov.quantity.toLocaleString()} KG</span>
+                            </div>
+                            <div className="mt-1.5 text-xs font-sans">
+                              <p className="font-extrabold text-slate-800 dark:text-slate-100">{matchingJob?.partyName || 'Customer Order'}</p>
+                              <p className="text-[11px] text-slate-600 dark:text-slate-300 font-semibold">{matchingJob?.itemName || 'Raw Material'}</p>
+                              <p className="text-[10px] text-slate-400 font-mono mt-0.5">From: {mov.fromDepartment} ({mov.transferBy})</p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+                            <button
+                              type="button"
+                              onClick={() => handleLocalAccept(mov)}
+                              disabled={isAccepting}
+                              className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold py-2 px-3 rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              <span>Accept Cargo</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveSubView('incoming');
+                                setActiveRejectionId(mov.movementId);
+                              }}
+                              disabled={isAccepting}
+                              className="bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 text-xs font-bold py-2 px-3 rounded-lg transition cursor-pointer"
+                            >
+                              <span>Reject</span>
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 

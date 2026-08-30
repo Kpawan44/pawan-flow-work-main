@@ -3075,9 +3075,10 @@ export class DBService {
   static async broadcastEvent(type: string, payload?: any): Promise<void> {
     try {
       const baseUrl = getApiBaseUrl();
+      const headers = await this.getAuthHeaders();
       await fetch(`${baseUrl}/api/events/broadcast`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ type, payload })
       });
     } catch (_) {}
