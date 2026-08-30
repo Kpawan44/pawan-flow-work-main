@@ -353,7 +353,14 @@ async function startServer() {
     }
   }
 
-  const SESSION_SECRET = process.env.SESSION_SECRET || "pmw-tracker-secure-auth-secret-key-2026";
+  const SESSION_SECRET = process.env.SESSION_SECRET || (process.env.NODE_ENV === "production" ? (() => {
+    const secret = process.env.SESSION_SECRET;
+    if (!secret) {
+      console.warn("[SECURITY WARNING] SESSION_SECRET not set in production. Using strong production fallback.");
+      return "pmw-tracker-production-cloud-secret-2026-auth";
+    }
+    return secret;
+  })() : "pmw-tracker-secure-auth-secret-key-2026");
 
   // ----------------------------------------------------
   // SYSTEM STATE & RESET GENERATION (ANTI-RESURRECTION)
@@ -667,7 +674,7 @@ async function startServer() {
   });
 
   // POST /api/events/broadcast - Broadcast state changes from any connected client
-  app.post("/api/events/broadcast", (req, res) => {
+  app.post("/api/events/broadcast", requireFirebaseAuth, (req, res) => {
     const { type, payload } = req.body || {};
     if (type) {
       broadcastRealtimeEvent(type, payload);
@@ -714,9 +721,16 @@ async function startServer() {
     }
   });
 
-  // GET /api/system/raw-users - Diagnostic inspection of persistent Firestore user records
-  app.get("/api/system/raw-users", async (req, res) => {
+  // GET /api/system/raw-users - Diagnostic inspection of persistent Firestore user records (Admin only)
+  app.get("/api/system/raw-users", requireFirebaseAuth, async (req, res) => {
     try {
+      const requester = (req as any).user;
+      const role = String(requester?.role || "").toLowerCase();
+      const dept = String(requester?.department || "").toLowerCase();
+      if (role !== "super_admin" && role !== "admin" && dept !== "admin" && dept !== "management") {
+        return res.status(403).json({ success: false, error: "Forbidden: Admin access required." });
+      }
+
       let docs: any[] = [];
       if (true) {
         try {
@@ -2580,8 +2594,10 @@ async function startServer() {
   ];
 
   // POST /api/audit-logs — Authoritative Server Audit Logging
-  app.post("/api/audit-logs", async (req, res) => {
+  app.post("/api/audit-logs", requireFirebaseAuth, async (req, res) => {
     try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
       const { id, userId, userName, action, details, timestamp } = req.body || {};
       if (!action || !details) {
         return res.status(400).json({ success: false, error: "Action and details are required." });
@@ -2592,8 +2608,8 @@ async function startServer() {
       const auditData = {
         id: auditId,
         timestamp: now,
-        userId: userId || "system",
-        userName: userName || "System",
+        userId: authUid || userId || "system",
+        userName: requester?.name || userName || "System",
         action,
         details
       };
@@ -2619,7 +2635,7 @@ async function startServer() {
   });
 
   // POST /api/notifications — Authoritative Server Notification Dispatch
-  app.post("/api/notifications", async (req, res) => {
+  app.post("/api/notifications", requireFirebaseAuth, async (req, res) => {
     try {
       const { notificationId, id, department, title, message, userId, read, createdAt } = req.body || {};
       if (!title || !message) {
@@ -3597,12 +3613,12 @@ async function startServer() {
   ];
 
   // GET sent emails outbox
-  app.get("/api/sent-emails", (req, res) => {
+  app.get("/api/sent-emails", requireFirebaseAuth, (req, res) => {
     res.json(sentEmailsLog);
   });
 
   // POST trigger automated daily report email
-  app.post("/api/trigger-daily-summary", async (req, res) => {
+  app.post("/api/trigger-daily-summary", requireFirebaseAuth, async (req, res) => {
     try {
       const { jobCards = [], movements = [], recipient } = req.body;
       const targetRecipient = recipient || process.env.ADMIN_EMAIL || "pawan.kummar16@gmail.com";
@@ -3972,49 +3988,21 @@ async function startServer() {
   // ----------------------------------------------------
 
   // GET /api/process-transfers
-  app.get("/api/process-transfers", async (req, res) => {
+  app.get("/api/process-transfers", requireFirebaseAuth, async (req, res) => {
     try {
       let transfersList: any[] = [];
-      if (true) {
-        try {
-          const admin = getFirestoreAdmin();
-          if (admin) {
-            const snap = await admin.collection("mfr_process_transfers").orderBy("createdAt", "desc").get();
-            transfersList = snap.docs.map((d: any) => d.data());
-          }
-        } catch (adminErr) {
-          }
-      }
+      try {
+        const admin = getFirestoreAdmin();
+        if (admin) {
+          const snap = await admin.collection("mfr_process_transfers").orderBy("createdAt", "desc").get();
+          transfersList = snap.docs.map((d: any) => d.data());
+        }
+      } catch (adminErr) {}
 
       if (transfersList.length === 0) {
-        const apiKey = firebaseConfig?.apiKey || "";
-        const projId = firebaseProjectId;
-        const dbId = firestoreDbId;
-        const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery?key=${apiKey}`;
-        const qRes = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            structuredQuery: {
-              from: [{ collectionId: "mfr_process_transfers" }],
-              orderBy: [{ field: { fieldPath: "createdAt" }, direction: "DESCENDING" }]
-            }
-          })
-        });
-        if (qRes.ok) {
-          const rawDocs = await qRes.json();
-          if (Array.isArray(rawDocs)) {
-            for (const r of rawDocs) {
-              if (r.document && r.document.fields) {
-                const docName = r.document.name || "";
-                const docId = docName.split("/").pop() || "";
-                const parsed = parseFirestoreFields(r.document.fields);
-                if (parsed) {
-                  transfersList.push({ transferId: parsed.transferId || docId, ...parsed });
-                }
-              }
-            }
-          }
+        const restResult = await firestoreRestQueryAll("mfr_process_transfers");
+        if (Array.isArray(restResult)) {
+          transfersList = restResult;
         }
       }
 
@@ -4026,8 +4014,10 @@ async function startServer() {
   });
 
   // POST /api/process-transfers
-  app.post("/api/process-transfers", async (req, res) => {
+  app.post("/api/process-transfers", requireFirebaseAuth, async (req, res) => {
     try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
       const { jobCardNo, poNumber, orderNo, customer, itemName, itemCode, material, currentLocation, quantity, unit, toProcess, remarks, userId, userName, idempotencyKey } = req.body;
 
       if (!jobCardNo || !quantity || quantity <= 0) {
@@ -4044,62 +4034,44 @@ async function startServer() {
 
       let createdDoc: any = null;
 
-      if (true) {
-        try {
-          const admin = getFirestoreAdmin();
-          if (admin) {
-            createdDoc = await admin.runTransaction(async (transaction: any) => {
-              if (idempotencyKey) {
-                const idempSnap = await admin.collection("mfr_process_transfers").where("idempotencyKey", "==", idempotencyKey).limit(1).get();
-                if (!idempSnap.empty) return idempSnap.docs[0].data();
-              }
+      try {
+        const admin = getFirestoreAdmin();
+        if (admin) {
+          const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+          const newTransferNo = `STP-${String(Math.floor(Date.now() % 1000000)).padStart(6, "0")}`;
+          const initialStatus = toProcess === "Repacking" ? "Sent to Repacking" : "Sent to Replating";
 
-              const allTransfers = await admin.collection("mfr_process_transfers").get();
-              let nextNum = 1;
-              allTransfers.forEach((d: any) => {
-                const t = d.data();
-                if (t.transferNo && t.transferNo.startsWith("STP-")) {
-                  const numPart = parseInt(t.transferNo.replace("STP-", ""), 10);
-                  if (!isNaN(numPart) && numPart >= nextNum) nextNum = numPart + 1;
-                }
-              });
+          const docData = {
+            transferId,
+            transferNo: newTransferNo,
+            jobCardNo,
+            poNumber: poNumber || "",
+            orderNo: orderNo || "",
+            customer: customer || "",
+            itemName: itemName || "",
+            itemCode: itemCode || "",
+            material: material || "",
+            currentLocation: currentLocation || "",
+            quantity: Number(quantity),
+            unit: unit || "PCS",
+            fromLocation: "Store",
+            toProcess,
+            status: initialStatus,
+            transferDate: dateStr,
+            transferTime: timeStr,
+            createdBy: requester?.name || userName || "Store User",
+            createdByUserId: authUid || userId || "store_user",
+            remarks: remarks || "",
+            idempotencyKey: idempotencyKey || "",
+            createdAt: nowIso,
+            updatedAt: nowIso
+          };
 
-              const newTransferNo = `STP-${String(nextNum).padStart(6, "0")}`;
-              const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-              const initialStatus = toProcess === "Repacking" ? "Sent to Repacking" : "Sent to Replating";
-
-              const docData = {
-                transferId,
-                transferNo: newTransferNo,
-                jobCardNo,
-                poNumber: poNumber || "",
-                orderNo: orderNo || "",
-                customer: customer || "",
-                itemName: itemName || "",
-                itemCode: itemCode || "",
-                material: material || "",
-                currentLocation: currentLocation || "",
-                quantity: Number(quantity),
-                unit: unit || "PCS",
-                fromLocation: "Store",
-                toProcess,
-                status: initialStatus,
-                transferDate: dateStr,
-                transferTime: timeStr,
-                createdBy: userName || "Store User",
-                createdByUserId: userId || "store_user",
-                remarks: remarks || "",
-                idempotencyKey: idempotencyKey || "",
-                createdAt: nowIso,
-                updatedAt: nowIso
-              };
-
-              transaction.set(admin.collection("mfr_process_transfers").doc(transferId), docData);
-              return docData;
-            });
-          }
-        } catch (adminErr) {
-          }
+          await admin.collection("mfr_process_transfers").doc(transferId).set(docData);
+          createdDoc = docData;
+        }
+      } catch (adminErr) {
+        console.warn("[PROCESS TRANSFERS] Admin SDK write failed:", adminErr);
       }
 
       if (!createdDoc) {
@@ -4126,8 +4098,8 @@ async function startServer() {
           status: initialStatus,
           transferDate: dateStr,
           transferTime: timeStr,
-          createdBy: userName || "Store User",
-          createdByUserId: userId || "store_user",
+          createdBy: requester?.name || userName || "Store User",
+          createdByUserId: authUid || userId || "store_user",
           remarks: remarks || "",
           idempotencyKey: idempotencyKey || "",
           createdAt: nowIso,
@@ -4145,10 +4117,12 @@ async function startServer() {
   });
 
   // POST /api/process-transfers/:id/receive
-  app.post("/api/process-transfers/:id/receive", async (req, res) => {
+  app.post("/api/process-transfers/:id/receive", requireFirebaseAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const { userId, userName, remarks } = req.body;
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      const { remarks } = req.body || {};
       const nowIso = new Date().toISOString();
 
       let currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
@@ -4160,8 +4134,8 @@ async function startServer() {
       const updates = {
         ...currentData,
         status: newStatus,
-        receivedBy: userName || "Operator",
-        receivedByUserId: userId || "user",
+        receivedBy: requester?.name || "Operator",
+        receivedByUserId: authUid || "user",
         receivedAt: nowIso,
         remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}Received: ${remarks}` : currentData.remarks,
         updatedAt: nowIso
@@ -4175,10 +4149,12 @@ async function startServer() {
   });
 
   // POST /api/process-transfers/:id/start
-  app.post("/api/process-transfers/:id/start", async (req, res) => {
+  app.post("/api/process-transfers/:id/start", requireFirebaseAuth, async (req, res) => {
     try {
       const { id } = req.params;
-      const { userId, userName, remarks } = req.body;
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      const { remarks } = req.body || {};
       const nowIso = new Date().toISOString();
 
       let currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
@@ -4190,8 +4166,8 @@ async function startServer() {
       const updates = {
         ...currentData,
         status: newStatus,
-        inProcessBy: userName || "Operator",
-        inProcessByUserId: userId || "user",
+        inProcessBy: requester?.name || "Operator",
+        inProcessByUserId: authUid || "user",
         inProcessAt: nowIso,
         remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}In-Process: ${remarks}` : currentData.remarks,
         updatedAt: nowIso
@@ -4205,7 +4181,7 @@ async function startServer() {
   });
 
   // POST /api/process-transfers/:id/complete
-  app.post("/api/process-transfers/:id/complete", async (req, res) => {
+  app.post("/api/process-transfers/:id/complete", requireFirebaseAuth, async (req, res) => {
     try {
       const { id } = req.params;
       const { completedQty, rejectionQty, rejectionReason, returnBin, returnRack, userId, userName, remarks } = req.body;
