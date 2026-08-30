@@ -1653,8 +1653,18 @@ Please adjust the quantity or request additional raw material issue.`);
   // --- FILTERED LISTS ---
   // A. Department Inbox Architecture: Authoritative Incoming Transfers waiting for acceptance
   const departmentIncomingTransfers = useMemo(() => {
-    return DBService.getDepartmentIncomingTransfers(activeDept, movements);
-  }, [activeDept, movements]);
+    const list = DBService.getDepartmentIncomingTransfers(activeDept, movements);
+    
+    // Forensic Diagnostic Logging
+    console.log(`[INGRESS-AUTH]\nuserId=${currentUser?.userId || 'none'}\ndepartment=${activeDept}\nallowedDepartments=${JSON.stringify(userDepts)}`);
+    console.log(`[INGRESS-FETCH]\nserverMovements=${movements.length}\nserverJobCards=${jobCards.length}`);
+    const toProd = movements.filter(m => m.toDepartment === 'Production');
+    const toActive = movements.filter(m => m.toDepartment === activeDept);
+    console.log(`[INGRESS-FILTER]\ntotal=${movements.length}\ntoProduction=${toProd.length}\naccepted=${toActive.filter(m => m.accepted).length}\nunaccepted=${toActive.filter(m => !m.accepted).length}\nvisible=${list.length}`);
+    console.log(`[INGRESS-FINAL]\nvisibleJobCards=${list.map(m => m.jobCardNo).join(',') || 'none'}`);
+
+    return list;
+  }, [activeDept, movements, jobCards, currentUser, userDepts]);
   const incomingTransfers = departmentIncomingTransfers;
 
   const pendingIssueRequests = movements.filter(m => {

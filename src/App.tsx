@@ -704,6 +704,8 @@ export default function App() {
         DBService.getCompanyConfig()
       ]);
 
+      console.log(`[AUTH-RECONCILE]\njobCardsFetched=${jc.length}\nmovementsFetched=${mov.length}`);
+
       const localGen = localStorage.getItem('mfr_system_generation') || 'none';
       const isFirstRun = localStorage.getItem('mfr_is_first_run') === 'true' || sessionStorage.getItem('mfr_is_first_run') === 'true';
 
@@ -1180,6 +1182,11 @@ export default function App() {
         userId: authenticatedUid
       };
 
+      console.log(`[AUTH-CHANGE]\npreviousUser=${currentUser?.name || 'none'}\nnewUser=${authenticatedProfile.name}`);
+
+      // Clear any previous user's in-memory caches before establishing fresh session
+      DBService.invalidateCache();
+
       // Establish authenticated user session
       setCurrentUser(authenticatedProfile);
       sessionStorage.setItem('mfr_active_user_uid', authenticatedUid);
@@ -1289,14 +1296,25 @@ export default function App() {
     if (currentUser) {
       DBService.logAction(currentUser.userId, currentUser.name, 'USER_LOGOUT', 'Logged out of terminal');
     }
+    console.log(`[AUTH-CHANGE]\npreviousUser=${currentUser?.name || 'none'}\nnewUser=none`);
     DBService.invalidateCache();
     setCurrentUser(null);
+    setJobCards([]);
+    setMovements([]);
+    setProcessTransfers([]);
+    setNotifications([]);
+    setAuditLogs([]);
+    setSelectedJob(null);
     sessionStorage.removeItem('mfr_active_user_uid');
     sessionStorage.removeItem('mfr_active_user_profile');
     sessionStorage.removeItem('mfr_auth_token');
+    sessionStorage.removeItem('mfr_job_cards');
+    sessionStorage.removeItem('mfr_movements');
     localStorage.removeItem('mfr_active_user_uid');
     localStorage.removeItem('mfr_active_user_profile');
     localStorage.removeItem('mfr_auth_token');
+    localStorage.removeItem('mfr_job_cards');
+    localStorage.removeItem('mfr_movements');
     if (auth) {
       try {
         await signOut(auth);

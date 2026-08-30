@@ -3255,7 +3255,8 @@ export class DBService {
         currentFirestoreUnsub = null;
       }
 
-      if (useRealFirebase && db) {
+      // Direct Firestore onSnapshot requires active Firebase Auth client token
+      if (useRealFirebase && db && auth?.currentUser) {
         try {
           let isInitial = true;
           currentFirestoreUnsub = onSnapshot(collection(db, 'mfr_job_cards'), (snapshot) => {
@@ -3263,6 +3264,10 @@ export class DBService {
             const localTombs = new Set(getLocalStorageItem<string[]>('mfr_deleted_job_cards', []).map(t => t.toLowerCase().trim()));
             if (isInitial) {
               isInitial = false;
+              // Guard: Do not wipe state with empty cached snapshots
+              if (snapshot.metadata.fromCache && snapshot.empty) {
+                return;
+              }
               const all: JobCard[] = [];
               snapshot.forEach(d => {
                 const data = d.data() as JobCard;
@@ -3274,7 +3279,9 @@ export class DBService {
                 }
               });
               const sorted = all.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-              onInitial(sorted);
+              if (sorted.length > 0) {
+                onInitial(sorted);
+              }
             } else {
               const changes = snapshot.docChanges().map(change => {
                 const docData = change.doc.data() as JobCard;
@@ -3301,7 +3308,7 @@ export class DBService {
             if (retryTimer) clearTimeout(retryTimer);
             retryTimer = setTimeout(() => {
               if (!isDisposed) startListener();
-            }, 3000);
+            }, 5000);
           });
         } catch (err) {
           console.error("Failed to register job cards incremental listener:", err);
@@ -3358,20 +3365,27 @@ export class DBService {
         currentFirestoreUnsub = null;
       }
 
-      if (useRealFirebase && db) {
+      // Direct Firestore onSnapshot requires active Firebase Auth client token
+      if (useRealFirebase && db && auth?.currentUser) {
         try {
           let isInitial = true;
           currentFirestoreUnsub = onSnapshot(collection(db, 'mfr_movements'), (snapshot) => {
             if (isDisposed) return;
             if (isInitial) {
               isInitial = false;
+              // Guard: Do not wipe state with empty cached snapshots
+              if (snapshot.metadata.fromCache && snapshot.empty) {
+                return;
+              }
               const all: MaterialMovement[] = [];
               snapshot.forEach(d => all.push(d.data() as MaterialMovement));
               
               if (process.env.NODE_ENV !== 'production') {
                 console.log(`[Firestore Movements Snapshot] Initial load: ${all.length} movements.`);
               }
-              onInitial(all);
+              if (all.length > 0) {
+                onInitial(all);
+              }
             } else {
               const changes = snapshot.docChanges().map(change => ({
                 type: change.type as 'added' | 'modified' | 'removed',
@@ -3397,7 +3411,7 @@ export class DBService {
             if (retryTimer) clearTimeout(retryTimer);
             retryTimer = setTimeout(() => {
               if (!isDisposed) startListener();
-            }, 3000);
+            }, 5000);
           });
         } catch (err) {
           console.error("Failed to register movements incremental listener:", err);
