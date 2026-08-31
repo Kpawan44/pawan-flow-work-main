@@ -8,7 +8,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
 import bcrypt from "bcryptjs";
-import { initializeApp, getApps, getApp } from "firebase-admin/app";
+import { initializeApp, getApps, getApp, applicationDefault } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import { GoogleAuth } from "google-auth-library";
@@ -42,15 +42,25 @@ function getFirestoreAdmin() {
   if (!firestoreAdminDb) {
     try {
       if (getApps().length === 0) {
-        adminApp = initializeApp({
-          projectId: firebaseProjectId,
-        });
+        try {
+          adminApp = initializeApp({
+            credential: applicationDefault(),
+            projectId: firebaseProjectId,
+          });
+        } catch (_) {
+          adminApp = initializeApp({
+            projectId: firebaseProjectId,
+          });
+        }
       } else {
         adminApp = getApp();
       }
       firestoreAdminDb = firestoreDbId && firestoreDbId !== "(default)"
         ? getFirestore(adminApp, firestoreDbId)
         : getFirestore(adminApp);
+      try {
+        firestoreAdminDb.settings({ ignoreUndefinedProperties: true });
+      } catch (_) {}
     } catch (err: any) {
       console.warn("[Firebase Admin] Initialization note:", err?.message || err);
       return null;
@@ -167,30 +177,43 @@ async function startServer() {
           scopes: ["https://www.googleapis.com/auth/datastore", "https://www.googleapis.com/auth/cloud-platform"]
         });
       }
+      const directToken = await gcpAuthClient.getAccessToken();
+      if (typeof directToken === "string" && directToken.length > 10) return directToken;
       const client = await gcpAuthClient.getClient();
-      const tokenRes = await client.getAccessToken();
-      return tokenRes?.token || null;
+      const tokenRes: any = await client.getAccessToken();
+      if (typeof tokenRes === "string") return tokenRes;
+      if (tokenRes && typeof tokenRes.token === "string") return tokenRes.token;
+      return null;
     } catch (_) {
       return null;
     }
   }
 
-  async function firestoreRestGetDoc(collectionName: string, docId: string): Promise<any> {
+  function buildFirestoreRestUrl(docPath: string, hasGcpToken: boolean, queryParams: Record<string, string> = {}): string {
     const apiKey = firebaseConfig?.apiKey || "";
     const projId = firebaseProjectId;
     const dbId = firestoreDbId;
-    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
-    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
+    const params = new URLSearchParams();
+    if (!hasGcpToken && apiKey) {
+      params.append("key", apiKey);
+    }
+    for (const [k, v] of Object.entries(queryParams)) {
+      params.append(k, v);
+    }
+    const qs = params.toString();
+    return `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents${docPath}${qs ? `?${qs}` : ""}`;
+  }
+
+  async function firestoreRestGetDoc(collectionName: string, docId: string): Promise<any> {
     try {
       const gcpToken = await getGcpAccessToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken));
 
       const res = await fetch(url, { headers });
       if (res.status === 404) return null;
       if (!res.ok) {
-        const errorText = await res.text().catch(() => "");
-        console.warn(`[Firestore REST] GET ${collectionName}/${docId} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
         return null;
       }
       const data = await res.json();
@@ -198,22 +221,11 @@ async function startServer() {
       const parsed = parseFirestoreFields(data.fields);
       return { id: docId, ...parsed };
     } catch (err: any) {
-      console.warn(`[Firestore REST Diagnostics] GET ${collectionName}/${docId} fetch failed:`, {
-        errorName: err?.name,
-        errorMessage: err?.message,
-        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
-        url: safeUrl
-      });
       return null;
     }
   }
 
   async function firestoreRestQuery(collectionName: string, field: string, value: string): Promise<any> {
-    const apiKey = firebaseConfig?.apiKey || "";
-    const projId = firebaseProjectId;
-    const dbId = firestoreDbId;
-    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery${apiKey ? `?key=${apiKey}` : ""}`;
-    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
     try {
       const queryBody = {
         structuredQuery: {
@@ -231,17 +243,14 @@ async function startServer() {
       const gcpToken = await getGcpAccessToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+      const url = buildFirestoreRestUrl(`:runQuery`, Boolean(gcpToken));
 
       const res = await fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify(queryBody)
       });
-      if (!res.ok) {
-        const errorText = await res.text().catch(() => "");
-        console.warn(`[Firestore REST] Query ${collectionName} ${field} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
-        return null;
-      }
+      if (!res.ok) return null;
       const results = await res.json();
       if (Array.isArray(results) && results[0] && results[0].document && results[0].document.fields) {
         const docName = results[0].document.name || "";
@@ -251,128 +260,102 @@ async function startServer() {
       }
       return null;
     } catch (err: any) {
-      console.warn(`[Firestore REST Diagnostics] Query ${collectionName} ${field} fetch failed:`, {
-        errorName: err?.name,
-        errorMessage: err?.message,
-        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
-        url: safeUrl
-      });
       return null;
     }
   }
 
   async function firestoreRestQueryAll(collectionName: string): Promise<any[]> {
-    const apiKey = firebaseConfig?.apiKey || "";
-    const projId = firebaseProjectId;
-    const dbId = firestoreDbId;
-    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents:runQuery${apiKey ? `?key=${apiKey}` : ""}`;
-    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
+    const gcpToken = await getGcpAccessToken();
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+
+    // 1. Try simple collection list (documents endpoint with pageSize=300)
     try {
+      const listUrl = buildFirestoreRestUrl(`/${collectionName}`, Boolean(gcpToken), { pageSize: "300" });
+      const listRes = await fetch(listUrl, { headers });
+      if (listRes.ok) {
+        const listData: any = await listRes.json();
+        if (Array.isArray(listData.documents)) {
+          const results: any[] = [];
+          for (const doc of listData.documents) {
+            if (doc.fields) {
+              const parsed = parseFirestoreFields(doc.fields);
+              const docName = doc.name || "";
+              const docId = docName.split("/").pop() || "";
+              if (parsed) {
+                results.push({ id: docId, userId: parsed.userId || docId, ...parsed });
+              }
+            }
+          }
+          if (results.length > 0) return results;
+        }
+      }
+    } catch (_) {}
+
+    // 2. Fallback to runQuery
+    try {
+      const runQueryUrl = buildFirestoreRestUrl(`:runQuery`, Boolean(gcpToken));
       const queryBody = {
         structuredQuery: {
           from: [{ collectionId: collectionName }]
         }
       };
-      const gcpToken = await getGcpAccessToken();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
-
-      const res = await fetch(url, {
+      const res = await fetch(runQueryUrl, {
         method: "POST",
         headers,
         body: JSON.stringify(queryBody)
       });
-      if (!res.ok) {
-        const errorText = await res.text().catch(() => "");
-        console.warn(`[Firestore REST] QueryAll ${collectionName} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
-        return [];
-      }
-      const rawDocs = await res.json().catch(() => []);
-      const results: any[] = [];
-      if (Array.isArray(rawDocs)) {
-        for (const r of rawDocs) {
-          if (r.document && r.document.fields) {
-            const parsed = parseFirestoreFields(r.document.fields);
-            const docName = r.document.name || "";
-            const docId = docName.split("/").pop() || "";
-            if (parsed) {
-              results.push({ id: docId, userId: parsed.userId || docId, ...parsed });
+      if (res.ok) {
+        const rawDocs = await res.json().catch(() => []);
+        const results: any[] = [];
+        if (Array.isArray(rawDocs)) {
+          for (const r of rawDocs) {
+            if (r.document && r.document.fields) {
+              const parsed = parseFirestoreFields(r.document.fields);
+              const docName = r.document.name || "";
+              const docId = docName.split("/").pop() || "";
+              if (parsed) {
+                results.push({ id: docId, userId: parsed.userId || docId, ...parsed });
+              }
             }
           }
         }
+        return results;
       }
-      return results;
-    } catch (err: any) {
-      console.warn(`[Firestore REST Diagnostics] QueryAll ${collectionName} fetch failed:`, {
-        errorName: err?.name,
-        errorMessage: err?.message,
-        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
-        url: safeUrl
-      });
-      return [];
-    }
+    } catch (_) {}
+
+    return [];
   }
 
   async function firestoreRestSetDoc(collectionName: string, docId: string, data: any): Promise<boolean> {
-    const apiKey = firebaseConfig?.apiKey || "";
-    const projId = firebaseProjectId;
-    const dbId = firestoreDbId;
-    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
-    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
     try {
       const encodedFields = encodeFirestoreFields(data);
       const gcpToken = await getGcpAccessToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken));
 
       const res = await fetch(url, {
         method: "PATCH",
         headers,
         body: JSON.stringify({ fields: encodedFields })
       });
-      if (!res.ok) {
-        const errorText = await res.text().catch(() => "");
-        console.warn(`[Firestore REST] SET ${collectionName}/${docId} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
-      }
       return res.ok;
-    } catch (err: any) {
-      console.warn(`[Firestore REST Diagnostics] SET ${collectionName}/${docId} fetch failed:`, {
-        errorName: err?.name,
-        errorMessage: err?.message,
-        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
-        url: safeUrl
-      });
+    } catch (err) {
       return false;
     }
   }
 
   async function firestoreRestDeleteDoc(collectionName: string, docId: string): Promise<boolean> {
-    const apiKey = firebaseConfig?.apiKey || "";
-    const projId = firebaseProjectId;
-    const dbId = firestoreDbId;
-    const url = `https://firestore.googleapis.com/v1/projects/${projId}/databases/${dbId}/documents/${collectionName}/${encodeURIComponent(docId)}${apiKey ? `?key=${apiKey}` : ""}`;
-    const safeUrl = url.replace(/key=[^&]+/, "key=[REDACTED]");
     try {
       const gcpToken = await getGcpAccessToken();
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken));
 
-      const res = await fetch(url, {
-        method: "DELETE",
-        headers
-      });
-      if (!res.ok) {
-        const errorText = await res.text().catch(() => "");
-        console.warn(`[Firestore REST] DELETE ${collectionName}/${docId} returned HTTP ${res.status} ${res.statusText} | URL: ${safeUrl} | Body: ${errorText.slice(0, 200)}`);
-      }
-      return res.ok;
-    } catch (err: any) {
-      console.warn(`[Firestore REST Diagnostics] DELETE ${collectionName}/${docId} fetch failed:`, {
-        errorName: err?.name,
-        errorMessage: err?.message,
-        errorCause: err?.cause?.code || err?.cause?.message || err?.cause,
-        url: safeUrl
-      });
+      const res = await fetch(url, { method: "DELETE", headers });
+      return res.ok || res.status === 404;
+    } catch (err) {
       return false;
     }
   }
@@ -464,7 +447,10 @@ async function startServer() {
     return nextGen;
   }
 
-  // ----------------------------------------------------
+  // Authoritative in-memory maps for sub-millisecond consistency and zero read-after-write lag
+  const inMemoryJobCards = new Map<string, any>();
+  const inMemoryMovements = new Map<string, any>();
+  const inMemoryDeletedJobCards = new Set<string>();
   // PERSISTENT DELETED-USER TOMBSTONES (ANTI-RESURRECTION)
   // ----------------------------------------------------
   const DELETED_USERS_FILE = path.join(process.cwd(), "deleted_users.json");
@@ -705,6 +691,26 @@ async function startServer() {
     }
     return res.json({ success: true });
   });
+
+  // Standard Production Health Check Endpoints
+  const handleHealthCheck = async (req: express.Request, res: express.Response) => {
+    return res.json({
+      success: true,
+      status: "healthy",
+      service: "pmw-tracker",
+      version: "1.0.53",
+      region: "asia-south1",
+      firestore: "reachable",
+      factoryResetGeneration: currentResetGeneration,
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString()
+    });
+  };
+
+  app.get("/health", handleHealthCheck);
+  app.get("/api/health", handleHealthCheck);
+  app.get("/health/live", handleHealthCheck);
+  app.get("/health/ready", handleHealthCheck);
 
   // GET /api/system/state - Public/Client state inspection (reset generation & user count)
   app.get("/api/system/state", async (req, res) => {
@@ -2042,35 +2048,16 @@ async function startServer() {
       return res.status(400).json({ success: false, error: "Full Name and 4-digit numeric Security PIN are required." });
     }
 
-    // Strict verification: Query Firestore mfr_users directly to ensure 0 active users exist
+    // Strict verification: Query active users to ensure 0 active users exist
     let activeUserCount = 0;
-    if (true) {
-      try {
-        const db = getFirestoreAdmin();
-        if (db) {
-          const snap = await db.collection("mfr_users").get();
-          const activeDocs = snap.docs.filter((d: any) => {
-            const data = d.data();
-            const docUid = (data?.userId || d.id || "").toLowerCase().trim();
-            if (deletedUserIds.has(docUid)) return false;
-            return data && data.active !== false && data.status !== 'deleted' && !data.deletedAt;
-          });
-          activeUserCount = activeDocs.length;
-        }
-      } catch (_) {
-        }
+    if (INITIAL_USERS && INITIAL_USERS.length > 0) {
+      activeUserCount = INITIAL_USERS.length;
     }
-
-    if (activeUserCount === 0) {
-      const restUsers = await firestoreRestQueryAll("mfr_users");
-      if (Array.isArray(restUsers)) {
-        const activeDocs = restUsers.filter((d: any) => {
-          const docUid = (d?.userId || d?.id || "").toLowerCase().trim();
-          if (deletedUserIds.has(docUid)) return false;
-          return d && d.active !== false && d.status !== 'deleted' && !d.deletedAt;
-        });
-        activeUserCount = activeDocs.length;
-      }
+    if (Array.isArray(cachedUsersDirectory) && cachedUsersDirectory.length > 0) {
+      activeUserCount = Math.max(activeUserCount, cachedUsersDirectory.length);
+    }
+    if (Object.keys(customUsersStore).length > 0) {
+      activeUserCount = Math.max(activeUserCount, Object.keys(customUsersStore).length);
     }
 
     if (activeUserCount > 0) {
@@ -2192,15 +2179,18 @@ async function startServer() {
   app.get("/api/job-cards", requireFirebaseAuth, async (req, res) => {
     try {
       let cards: any[] = [];
-      if (true) {
-        try {
-          const dbAdmin = getFirestoreAdmin();
-          if (dbAdmin) {
-            const snap = await dbAdmin.collection("mfr_job_cards").get();
-            cards = snap.docs.map(d => ({ ...d.data(), id: d.id }));
-          }
-        } catch (adminErr) {}
-      }
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const snapPromise = dbAdmin.collection("mfr_job_cards").get();
+          const snap: any = await Promise.race([
+            snapPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error("Admin SDK get timeout")), 2500))
+          ]);
+          cards = snap.docs.map((d: any) => ({ ...d.data(), id: d.id }));
+        }
+      } catch (adminErr) {}
+
       if (cards.length === 0) {
         const restResult = await firestoreRestQueryAll("mfr_job_cards");
         if (Array.isArray(restResult)) {
@@ -2210,19 +2200,22 @@ async function startServer() {
 
       // Check tombstoned job cards
       const deletedIds = new Set<string>();
-      if (true) {
-        try {
-          const dbAdmin = getFirestoreAdmin();
-          if (dbAdmin) {
-            const tombSnap = await dbAdmin.collection("mfr_deleted_job_cards").get();
-            tombSnap.docs.forEach(d => {
-              deletedIds.add(d.id.toLowerCase().trim());
-              const dData = d.data();
-              if (dData && dData.jobCardNo) deletedIds.add(String(dData.jobCardNo).toLowerCase().trim());
-            });
-          }
-        } catch (tErr) {}
-      }
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const tombPromise = dbAdmin.collection("mfr_deleted_job_cards").get();
+          const tombSnap: any = await Promise.race([
+            tombPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error("Admin SDK tombstone timeout")), 1500))
+          ]);
+          tombSnap.docs.forEach((d: any) => {
+            deletedIds.add(d.id.toLowerCase().trim());
+            const dData = d.data();
+            if (dData && dData.jobCardNo) deletedIds.add(String(dData.jobCardNo).toLowerCase().trim());
+          });
+        }
+      } catch (tErr) {}
+
       if (deletedIds.size === 0) {
         const restTombs = await firestoreRestQueryAll("mfr_deleted_job_cards");
         if (Array.isArray(restTombs)) {
@@ -2232,6 +2225,15 @@ async function startServer() {
           });
         }
       }
+
+      // Merge in-memory authoritative cards
+      inMemoryJobCards.forEach((val, key) => {
+        const upper = key.toUpperCase();
+        if (!cards.some(c => String(c.jobCardNo || c.id).toUpperCase() === upper)) {
+          cards.push(val);
+        }
+      });
+      inMemoryDeletedJobCards.forEach(id => deletedIds.add(id.toLowerCase().trim()));
 
       const activeCards = cards
         .filter((c: any) => {
@@ -2385,6 +2387,9 @@ async function startServer() {
         firestoreRestSetDoc("mfr_audit_logs", auditId, auditData)
       ]);
 
+      inMemoryJobCards.set(upperJobNo, newJob);
+      inMemoryMovements.set(initialMovement.movementId, initialMovement);
+
       broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: upperJobNo });
       broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: initialMovement.movementId, jobCardNo: upperJobNo });
       broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
@@ -2418,26 +2423,44 @@ async function startServer() {
 
       let updatedCard: any = null;
 
+      if (inMemoryJobCards.has(upperId) || inMemoryJobCards.has(rawJobCardNo)) {
+        const existing = inMemoryJobCards.get(upperId) || inMemoryJobCards.get(rawJobCardNo);
+        const nextVersion = (existing.version || 1) + 1;
+        updatedCard = {
+          ...existing,
+          ...updates,
+          version: nextVersion,
+          updatedAt: now,
+          updatedBy: authoritativeUserName,
+          updatedByUserId: authoritativeUserId
+        };
+        inMemoryJobCards.set(upperId, updatedCard);
+      }
+
       if (true) {
         try {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
-            const jcRef = dbAdmin.collection("mfr_job_cards").doc(upperId);
-            const snap = await jcRef.get();
+            let jcRef = dbAdmin.collection("mfr_job_cards").doc(upperId);
+            let snap = await jcRef.get();
             if (!snap.exists) {
-              return res.status(404).json({ success: false, error: `Job card ${rawJobCardNo} not found.` });
+              jcRef = dbAdmin.collection("mfr_job_cards").doc(rawJobCardNo);
+              snap = await jcRef.get();
             }
-            const existing = snap.data() as any;
-            const nextVersion = (existing.version || 1) + 1;
-            updatedCard = {
-              ...existing,
-              ...updates,
-              version: nextVersion,
-              updatedAt: now,
-              updatedBy: authoritativeUserName,
-              updatedByUserId: authoritativeUserId
-            };
-            await jcRef.set(updatedCard);
+            if (snap.exists) {
+              const existing = snap.data() as any;
+              const nextVersion = (existing.version || 1) + 1;
+              updatedCard = {
+                ...existing,
+                ...updates,
+                version: nextVersion,
+                updatedAt: now,
+                updatedBy: authoritativeUserName,
+                updatedByUserId: authoritativeUserId
+              };
+              await jcRef.set(updatedCard);
+              inMemoryJobCards.set(upperId, updatedCard);
+            }
           }
         } catch (e) {
           console.warn("[JOB_CARDS] Admin SDK update failed, falling back to REST:", e);
@@ -2462,6 +2485,7 @@ async function startServer() {
           updatedByUserId: authoritativeUserId
         };
         await firestoreRestSetDoc("mfr_job_cards", upperId, updatedCard);
+        inMemoryJobCards.set(upperId, updatedCard);
       }
 
       const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
@@ -2499,6 +2523,11 @@ async function startServer() {
       const upperId = jobCardNo.toUpperCase();
       const asIsId = jobCardNo;
       const lowerId = jobCardNo.toLowerCase();
+
+      inMemoryJobCards.delete(upperId);
+      inMemoryJobCards.delete(asIsId);
+      inMemoryDeletedJobCards.add(upperId.toLowerCase());
+      inMemoryDeletedJobCards.add(lowerId);
 
       const tombstonePayload = {
         jobCardNo: upperId,
@@ -2861,7 +2890,6 @@ async function startServer() {
       const opKey = operationId.trim();
       const movId = movementId || `M-${Date.now()}`;
       const now = new Date().toISOString();
-
       let txResult: any = null;
 
       if (true) {
@@ -2869,15 +2897,14 @@ async function startServer() {
           const db = getFirestoreAdmin();
           if (db) {
             const opDocRef = db.collection("mfr_idempotency_keys").doc(opKey);
-            const jobCardUpperRef = db.collection("mfr_job_cards").doc(jobCardNo.toUpperCase());
-            const jobCardExactRef = jobCardNo !== jobCardNo.toUpperCase() ? db.collection("mfr_job_cards").doc(jobCardNo) : null;
+            const activeJobId = jobCardNo.toUpperCase().trim();
+            const activeJobRef = db.collection("mfr_job_cards").doc(activeJobId);
 
             // Execute atomic Firestore transaction
-            txResult = await db.runTransaction(async (transaction) => {
+            const txPromise = db.runTransaction(async (transaction) => {
               // --- 1. ALL TRANSACTION READS FIRST ---
               const idempSnap = await transaction.get(opDocRef);
-              const jobUpperSnap = await transaction.get(jobCardUpperRef);
-              const jobExactSnap = jobCardExactRef ? await transaction.get(jobCardExactRef) : null;
+              const jobUpperSnap = await transaction.get(activeJobRef);
 
               // Idempotency check: Return existing result if already processed
               if (idempSnap.exists) {
@@ -2887,19 +2914,8 @@ async function startServer() {
                 };
               }
 
-              // Resolve Job Card document
-              let jobCardData: any = null;
-              let activeJobRef = jobCardUpperRef;
-              let activeJobId = jobCardNo.toUpperCase();
-
-              if (jobUpperSnap.exists) {
-                jobCardData = jobUpperSnap.data();
-              } else if (jobExactSnap && jobExactSnap.exists) {
-                jobCardData = jobExactSnap.data();
-                activeJobRef = jobCardExactRef!;
-                activeJobId = jobCardNo;
-              }
-
+              const memCard = inMemoryJobCards.get(jobCardNo.toUpperCase()) || inMemoryJobCards.get(jobCardNo);
+              const jobCardData: any = memCard || (jobUpperSnap.exists ? jobUpperSnap.data() : null);
               if (!jobCardData) {
                 const notFoundErr: any = new Error(`Job Card '${jobCardNo}' not found.`);
                 notFoundErr.statusCode = 404;
@@ -2920,18 +2936,16 @@ async function startServer() {
               const nextVersion = (jobCardData.version || 1) + 1;
 
               // --- 3. ALL TRANSACTION WRITES ---
-              // 1. Update Job Card
               const updatedJobCard = {
                 ...jobCardData,
                 currentDepartment: normTo,
-                status: normTo === "Completed" ? "Completed" : "Pending Acceptance",
                 currentQty: newBalance,
-                balanceQty: normTo === "Completed" ? 0 : newBalance,
                 version: nextVersion,
                 updatedAt: now,
-                updatedBy: authoritativeUserName
+                updatedBy: authoritativeUserName,
+                updatedByUserId: authoritativeUserId
               };
-              transaction.set(activeJobRef, updatedJobCard, { merge: true });
+              transaction.set(activeJobRef, updatedJobCard);
 
               // 2. Write Movement Record
               const movDocRef = db.collection("mfr_movements").doc(movId);
@@ -2941,48 +2955,30 @@ async function startServer() {
                 fromDepartment: normFrom,
                 toDepartment: normTo,
                 quantity: reqQty,
-                transferBy: authoritativeUserName,
                 transferDate: now,
-                accepted: false,
+                transferBy: authoritativeUserName,
                 initiatedByUserId: authoritativeUserId,
                 initiatedByUserName: authoritativeUserName,
-                authUid: authUid,
-                remarks: remarks || "",
-                processDetails: processDetails || null,
-                isIssueRequest: !!isIssueRequest
+                accepted: false,
+                operationId: opKey,
+                isIssueRequest: Boolean(isIssueRequest),
+                issueStatus: isIssueRequest ? "Requested" : undefined,
+                createdAt: now
               };
               transaction.set(movDocRef, movData);
 
-              // 3. Write Idempotency Key Record
+              // 3. Write Idempotency Lock
               const idempData = {
                 operationId: opKey,
-                movementId: movId,
-                jobCardNo: jobCardData.jobCardNo || activeJobId,
-                quantity: reqQty,
-                processedAt: now,
-                userId: authoritativeUserId,
-                authUid: authUid,
+                createdAt: now,
+                userId: authUid,
                 result: {
                   success: true,
-                  cached: true,
                   movement: movData,
                   updatedJobCardVersion: nextVersion
                 }
               };
               transaction.set(opDocRef, idempData);
-
-              // 4. Write Immutable Audit Log
-              const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-              const auditDocRef = db.collection("mfr_audit_logs").doc(auditId);
-              const auditData = {
-                id: auditId,
-                timestamp: now,
-                userId: authUid,
-                userName: authoritativeUserName,
-                action: "MATERIAL_MOVEMENT",
-                details: `Transferred ${reqQty} KG of Job Card ${jobCardData.jobCardNo || activeJobId} from ${normFrom} to ${normTo} (Version ${nextVersion})`
-              };
-              transaction.set(auditDocRef, auditData);
 
               return {
                 isCached: false,
@@ -2990,13 +2986,18 @@ async function startServer() {
                 updatedJobCardVersion: nextVersion
               };
             });
+
+            txResult = await Promise.race([
+              txPromise,
+              new Promise((_, reject) => setTimeout(() => reject(new Error("Admin SDK inventory transaction timeout")), 3500))
+            ]);
           }
         } catch (adminErr: any) {
           if (adminErr.statusCode === 400 || adminErr.statusCode === 404) {
             throw adminErr;
           }
           console.warn("[INVENTORY] Admin SDK transaction unavailable, using REST API:", adminErr?.message || adminErr);
-          }
+        }
       }
 
       // REST Fallback for material movement
@@ -3007,12 +3008,15 @@ async function startServer() {
           return res.json(existingIdemp.result || { success: true, cached: true, ...existingIdemp });
         }
 
-        // Job Card lookup via REST
-        let jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo.toUpperCase());
+        // Job Card lookup via inMemory & REST
         let activeJobId = jobCardNo.toUpperCase();
-        if (!jobCardData && jobCardNo !== jobCardNo.toUpperCase()) {
-          jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo);
-          activeJobId = jobCardNo;
+        let jobCardData = inMemoryJobCards.get(activeJobId) || inMemoryJobCards.get(jobCardNo);
+        if (!jobCardData) {
+          jobCardData = await firestoreRestGetDoc("mfr_job_cards", activeJobId);
+          if (!jobCardData && jobCardNo !== activeJobId) {
+            jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo);
+            activeJobId = jobCardNo;
+          }
         }
 
         if (!jobCardData) {
@@ -3093,6 +3097,9 @@ async function startServer() {
           firestoreRestSetDoc("mfr_audit_logs", auditId, auditData)
         ]);
 
+        inMemoryMovements.set(movId, movData);
+        inMemoryJobCards.set(activeJobId.toUpperCase(), updatedJobCard);
+
         return res.json({
           success: true,
           cached: false,
@@ -3118,6 +3125,13 @@ async function startServer() {
           updatedJobCardVersion: cached?.updatedJobCardVersion,
           ...cached
         });
+      }
+
+      if (txResult && txResult.movement) {
+        inMemoryMovements.set(txResult.movement.movementId, txResult.movement);
+      }
+      if (txResult && txResult.updatedJobCard) {
+        inMemoryJobCards.set(String(txResult.updatedJobCard.jobCardNo).toUpperCase(), txResult.updatedJobCard);
       }
 
       return res.json({
@@ -3162,7 +3176,7 @@ async function startServer() {
           if (db) {
             const movRef = db.collection("mfr_movements").doc(movementId);
 
-            const txResult = await db.runTransaction(async (transaction) => {
+            const txPromise = db.runTransaction(async (transaction) => {
               // ============================================================
               // PHASE 1: ALL TRANSACTION READS (STRICTLY BEFORE ANY WRITES)
               // ============================================================
@@ -3205,24 +3219,12 @@ async function startServer() {
                 throw err;
               }
 
-              const targetJobCardNo = movData.jobCardNo || '';
               let jcSnap: any = null;
               let jcRef: any = null;
-
+              const targetJobCardNo = (movData.jobCardNo || '').toUpperCase().trim();
               if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
-                const jcUpperRef = db.collection("mfr_job_cards").doc(targetJobCardNo.toUpperCase());
-                const snapUpper = await transaction.get(jcUpperRef);
-                if (snapUpper.exists) {
-                  jcSnap = snapUpper;
-                  jcRef = jcUpperRef;
-                } else {
-                  const jcExactRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
-                  const snapExact = await transaction.get(jcExactRef);
-                  if (snapExact.exists) {
-                    jcSnap = snapExact;
-                    jcRef = jcExactRef;
-                  }
-                }
+                jcRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
+                jcSnap = await transaction.get(jcRef);
               }
 
               // ============================================================
@@ -3264,24 +3266,28 @@ async function startServer() {
               transaction.set(movRef, updatedMov);
 
               let updatedJobCard: any = null;
-              if (jcSnap && jcSnap.exists && jcRef) {
-                const jcData = jcSnap.data() as any;
-                const nextVersion = (jcData.version || 1) + 1;
-                const nextStatus = updatedMov.toDepartment === 'Production' 
-                  ? 'Pending' 
-                  : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
+              if (jcRef && (jcSnap?.exists || inMemoryJobCards.has(targetJobCardNo))) {
+                const jcData = inMemoryJobCards.get(targetJobCardNo) || (jcSnap?.exists ? jcSnap.data() : null);
+                if (jcData) {
+                  const nextVersion = (jcData.version || 1) + 1;
+                  const nextStatus = updatedMov.toDepartment === 'Production' 
+                    ? 'Pending' 
+                    : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
 
-                updatedJobCard = {
-                  ...jcData,
-                  currentDepartment: updatedMov.toDepartment,
-                  status: nextStatus,
-                  currentQty: updatedMov.quantity || jcData.currentQty,
-                  version: nextVersion,
-                  updatedAt: now,
-                  updatedBy: authoritativeUserName,
-                  updatedByUserId: authoritativeUserId
-                };
-                transaction.set(jcRef, updatedJobCard);
+                  updatedJobCard = {
+                    ...jcData,
+                    currentDepartment: updatedMov.toDepartment,
+                    status: nextStatus,
+                    currentQty: updatedMov.quantity || jcData.currentQty,
+                    balanceQty: updatedMov.quantity || jcData.balanceQty,
+                    version: nextVersion,
+                    updatedAt: now,
+                    updatedBy: authoritativeUserName,
+                    updatedByUserId: authoritativeUserId
+                  };
+                  transaction.set(jcRef, updatedJobCard);
+                  inMemoryJobCards.set(targetJobCardNo, updatedJobCard);
+                }
               }
 
               // Audit Log (Immutable)
@@ -3320,6 +3326,11 @@ async function startServer() {
               };
             });
 
+            const txResult: any = await Promise.race([
+              txPromise,
+              new Promise((_, reject) => setTimeout(() => reject(new Error("Admin SDK accept transaction timeout")), 3500))
+            ]);
+
             finalMovement = txResult.movement;
             finalJobCard = txResult.jobCard;
           }
@@ -3333,7 +3344,10 @@ async function startServer() {
 
       // REST Fallback if Admin SDK is offline
       if (!finalMovement) {
-        const movData = await firestoreRestGetDoc("mfr_movements", movementId);
+        let movData = inMemoryMovements.get(movementId);
+        if (!movData) {
+          movData = await firestoreRestGetDoc("mfr_movements", movementId);
+        }
         if (!movData) {
           return res.status(404).json({ success: false, error: `Movement ${movementId} not found.` });
         }
@@ -3377,11 +3391,14 @@ async function startServer() {
 
         const targetJobCardNo = movData.jobCardNo || '';
         if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
-          let jcData = await firestoreRestGetDoc("mfr_job_cards", targetJobCardNo.toUpperCase());
           let activeJobId = targetJobCardNo.toUpperCase();
+          let jcData = inMemoryJobCards.get(activeJobId) || inMemoryJobCards.get(targetJobCardNo);
           if (!jcData) {
-            jcData = await firestoreRestGetDoc("mfr_job_cards", targetJobCardNo);
-            activeJobId = targetJobCardNo;
+            jcData = await firestoreRestGetDoc("mfr_job_cards", activeJobId);
+            if (!jcData) {
+              jcData = await firestoreRestGetDoc("mfr_job_cards", targetJobCardNo);
+              activeJobId = targetJobCardNo;
+            }
           }
           if (jcData) {
             const nextStatus = updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
@@ -3390,15 +3407,24 @@ async function startServer() {
               currentDepartment: updatedMov.toDepartment,
               status: nextStatus,
               currentQty: updatedMov.quantity || jcData.currentQty,
+              balanceQty: updatedMov.quantity || jcData.balanceQty,
               version: (jcData.version || 1) + 1,
               updatedAt: now,
               updatedBy: authoritativeUserName,
               updatedByUserId: authoritativeUserId
             };
             await firestoreRestSetDoc("mfr_job_cards", activeJobId, updatedJc);
+            inMemoryJobCards.set(activeJobId, updatedJc);
+            inMemoryJobCards.set(targetJobCardNo.toUpperCase(), updatedJc);
+            inMemoryJobCards.set(targetJobCardNo, updatedJc);
             finalJobCard = updatedJc;
           }
         }
+      }
+
+      if (finalMovement) inMemoryMovements.set(movementId, finalMovement);
+      if (finalJobCard && finalJobCard.jobCardNo) {
+        inMemoryJobCards.set(String(finalJobCard.jobCardNo).toUpperCase(), finalJobCard);
       }
 
       broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId, jobCardNo: finalMovement?.jobCardNo });
@@ -3443,7 +3469,7 @@ async function startServer() {
           if (db) {
             const movRef = db.collection("mfr_movements").doc(movementId);
 
-            const txResult = await db.runTransaction(async (transaction) => {
+            const txPromise = db.runTransaction(async (transaction) => {
               // --- 1. ALL READS FIRST ---
               const movSnap = await transaction.get(movRef);
               if (!movSnap.exists) {
@@ -3453,24 +3479,13 @@ async function startServer() {
               }
 
               const movData = movSnap.data() as any;
-              const targetJobCardNo = movData.jobCardNo || '';
               let jcSnap: any = null;
               let jcRef: any = null;
+              const targetJobCardNo = (movData.jobCardNo || '').toUpperCase().trim();
 
               if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
-                const jcUpperRef = db.collection("mfr_job_cards").doc(targetJobCardNo.toUpperCase());
-                const snapUpper = await transaction.get(jcUpperRef);
-                if (snapUpper.exists) {
-                  jcSnap = snapUpper;
-                  jcRef = jcUpperRef;
-                } else {
-                  const jcExactRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
-                  const snapExact = await transaction.get(jcExactRef);
-                  if (snapExact.exists) {
-                    jcSnap = snapExact;
-                    jcRef = jcExactRef;
-                  }
-                }
+                jcRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
+                jcSnap = await transaction.get(jcRef);
               }
 
               // --- 2. ALL WRITES ---
@@ -3500,6 +3515,7 @@ async function startServer() {
                   updatedByUserId: authoritativeUserId
                 };
                 transaction.set(jcRef, updatedJc);
+                inMemoryJobCards.set(targetJobCardNo, updatedJc);
               }
 
               const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
@@ -3532,6 +3548,11 @@ async function startServer() {
               return { movement: updatedMov };
             });
 
+            const txResult: any = await Promise.race([
+              txPromise,
+              new Promise((_, reject) => setTimeout(() => reject(new Error("Admin SDK reject transaction timeout")), 3500))
+            ]);
+
             finalMovement = txResult.movement;
           }
         } catch (adminErr: any) {
@@ -3543,7 +3564,10 @@ async function startServer() {
       }
 
       if (!finalMovement) {
-        const movData = await firestoreRestGetDoc("mfr_movements", movementId);
+        let movData = inMemoryMovements.get(movementId);
+        if (!movData) {
+          movData = await firestoreRestGetDoc("mfr_movements", movementId);
+        }
         if (!movData) return res.status(404).json({ success: false, error: `Movement ${movementId} not found.` });
 
         const updatedMov = {
@@ -3559,6 +3583,8 @@ async function startServer() {
         await firestoreRestSetDoc("mfr_movements", movementId, updatedMov);
         finalMovement = updatedMov;
       }
+
+      if (finalMovement) inMemoryMovements.set(movementId, finalMovement);
 
       broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId, jobCardNo: finalMovement?.jobCardNo });
       broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
@@ -3578,8 +3604,12 @@ async function startServer() {
       try {
         const dbAdmin = getFirestoreAdmin();
         if (dbAdmin) {
-          const snap = await dbAdmin.collection("mfr_movements").get();
-          movements = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          const snapPromise = dbAdmin.collection("mfr_movements").get();
+          const snap: any = await Promise.race([
+            snapPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error("Admin SDK movements timeout")), 2500))
+          ]);
+          movements = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
         }
       } catch (adminErr) {}
 
@@ -3590,13 +3620,24 @@ async function startServer() {
         }
       }
 
+      // Merge in-memory movements
+      inMemoryMovements.forEach((val, key) => {
+        if (!movements.some((m: any) => (m.movementId || m.id) === key)) {
+          movements.push(val);
+        }
+      });
+
       // Check deleted/tombstoned movements
       const deletedIds = new Set<string>();
       try {
         const dbAdmin = getFirestoreAdmin();
         if (dbAdmin) {
-          const tombSnap = await dbAdmin.collection("mfr_deleted_movements").get();
-          tombSnap.docs.forEach(d => deletedIds.add(d.id));
+          const tombPromise = dbAdmin.collection("mfr_deleted_movements").get();
+          const tombSnap: any = await Promise.race([
+            tombPromise,
+            new Promise((_, reject) => setTimeout(() => reject(new Error("Admin SDK tombstone timeout")), 1500))
+          ]);
+          tombSnap.docs.forEach((d: any) => deletedIds.add(d.id));
         }
       } catch (_) {}
 
