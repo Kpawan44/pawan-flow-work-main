@@ -2050,9 +2050,6 @@ async function startServer() {
 
     // Strict verification: Query active users to ensure 0 active users exist
     let activeUserCount = 0;
-    if (INITIAL_USERS && INITIAL_USERS.length > 0) {
-      activeUserCount = INITIAL_USERS.length;
-    }
     if (Array.isArray(cachedUsersDirectory) && cachedUsersDirectory.length > 0) {
       activeUserCount = Math.max(activeUserCount, cachedUsersDirectory.length);
     }
