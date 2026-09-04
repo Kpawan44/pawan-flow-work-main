@@ -16,6 +16,12 @@ interface JobCardDao {
     @Query("SELECT * FROM job_cards WHERE currentDepartment = :dept ORDER BY priority DESC, createdAt ASC")
     fun getJobCardsByDepartment(dept: Department): Flow<List<JobCard>>
 
+    @Query("SELECT * FROM job_cards WHERE jobCardNo = :jobCardNo LIMIT 1")
+    suspend fun getJobCardSync(jobCardNo: String): JobCard?
+
+    @Query("SELECT * FROM job_cards ORDER BY updatedAt DESC")
+    suspend fun getAllJobCardsList(): List<JobCard>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertJobCard(jobCard: JobCard)
 

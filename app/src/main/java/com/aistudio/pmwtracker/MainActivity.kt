@@ -53,7 +53,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
                     topBar = {
-                        if (currentScreen !is Screen.JobCardDetail) {
+                        if (currentScreen !is Screen.JobCardDetail && currentScreen !is Screen.AiChat) {
                             val title = when (currentScreen) {
                                 Screen.Dashboard -> "PMW Tracker"
                                 Screen.JobCards -> "Job Cards"
@@ -61,6 +61,7 @@ class MainActivity : ComponentActivity() {
                                 Screen.Transfers -> "Material Transfers"
                                 Screen.Outsource -> "Outsource Orders"
                                 Screen.Reports -> "Reports"
+                                Screen.AiChat -> "AI Automation Flow"
                                 is Screen.JobCardDetail -> "Details"
                             }
                             AppTopBar(
@@ -91,11 +92,19 @@ class MainActivity : ComponentActivity() {
                             onNavigateToJobCards = { currentScreen = Screen.JobCards },
                             onNavigateToTransfers = { currentScreen = Screen.Transfers },
                             onSelectJobCard = { currentScreen = Screen.JobCardDetail(it) },
+                            onNavigateToAi = { currentScreen = Screen.AiChat },
                             modifier = Modifier.padding(innerPadding)
                         )
                         Screen.JobCards -> JobCardsListScreen(
                             viewModel = viewModel,
                             onSelectJobCard = { currentScreen = Screen.JobCardDetail(it) },
+                            modifier = Modifier.padding(innerPadding)
+                        )
+                        Screen.AiChat -> AiChatScreen(
+                            viewModel = viewModel,
+                            onNavigateToJobCard = { currentScreen = Screen.JobCardDetail(it) },
+                            onNavigateToTransfers = { currentScreen = Screen.Transfers },
+                            onNavigateToOutsource = { currentScreen = Screen.Outsource },
                             modifier = Modifier.padding(innerPadding)
                         )
                         Screen.DepartmentOps -> DepartmentOperationsScreen(
@@ -116,6 +125,7 @@ class MainActivity : ComponentActivity() {
                             onNavigateToJobCards = { currentScreen = Screen.JobCards },
                             onNavigateToTransfers = { currentScreen = Screen.Transfers },
                             onSelectJobCard = { currentScreen = Screen.JobCardDetail(it) },
+                            onNavigateToAi = { currentScreen = Screen.AiChat },
                             modifier = Modifier.padding(innerPadding)
                         )
                         is Screen.JobCardDetail -> JobCardDetailScreen(

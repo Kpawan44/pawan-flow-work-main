@@ -58,8 +58,120 @@ class PmwRepository(
         )
         movementDao.updateMovement(updated)
 
-        // Also update JobCard current department to destination
-        // fetch job card from dao and update currentDepartment
+        val card = jobCardDao.getJobCardSync(currentMovement.jobCardNo)
+        if (card != null) {
+            jobCardDao.updateJobCard(
+                card.copy(
+                    currentDepartment = currentMovement.toDepartment,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    suspend fun getLiveJobCards(): List<JobCard> = jobCardDao.getAllJobCardsList()
+    suspend fun getLiveMovements(): List<MaterialMovement> = movementDao.getAllMovementsList()
+    suspend fun getLiveOutsourceOrders(): List<OutsourceOrder> = outsourceDao.getAllOutsourceOrdersList()
+
+    suspend fun executeAiTransfer(
+        jobCardNo: String,
+        toDept: Department,
+        quantity: Double,
+        remarks: String,
+        operatorName: String = "AI Automation Flow"
+    ): MaterialMovement? {
+        val card = jobCardDao.getJobCardSync(jobCardNo) ?: return null
+        val transferQty = if (quantity <= 0) card.currentQty else quantity.coerceAtMost(card.currentQty)
+        val movement = MaterialMovement(
+            movementId = "MOV-AI-${System.currentTimeMillis() % 100000}",
+            jobCardNo = jobCardNo,
+            fromDepartment = card.currentDepartment,
+            toDepartment = toDept,
+            quantity = transferQty,
+            transferBy = operatorName,
+            transferDate = System.currentTimeMillis(),
+            accepted = true,
+            acceptedBy = "AI Automated System",
+            acceptedDate = System.currentTimeMillis(),
+            remarks = remarks.ifEmpty { "Transferred via PMW AI Flow" }
+        )
+        movementDao.insertMovement(movement)
+
+        jobCardDao.updateJobCard(
+            card.copy(
+                currentDepartment = toDept,
+                status = if (toDept == Department.DISPATCH) JobCardStatus.COMPLETED else JobCardStatus.IN_PROCESS,
+                completed = toDept == Department.DISPATCH,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        return movement
+    }
+
+    suspend fun executeAiCreateJobCard(
+        partyName: String,
+        itemName: String,
+        itemCode: String,
+        orderQty: Double,
+        unit: String,
+        priority: JobPriority,
+        heatTreatment: Boolean,
+        notes: String
+    ): JobCard {
+        val existing = jobCardDao.getAllJobCardsList()
+        val nextNumber = 101 + existing.size
+        val newCard = JobCard(
+            jobCardNo = "JC-2026-0$nextNumber",
+            orderNo = "ORD-AI-$nextNumber",
+            poNumber = "PO-AI-$nextNumber",
+            partyName = partyName.ifEmpty { "Industrial Client" },
+            itemName = itemName.ifEmpty { "Precision Component" },
+            itemCode = itemCode.ifEmpty { "PC-${100 + nextNumber}" },
+            orderQty = if (orderQty <= 0) 1000.0 else orderQty,
+            currentQty = if (orderQty <= 0) 1000.0 else orderQty,
+            balanceQty = 0.0,
+            unit = if (unit.uppercase() == "PCS") "PCS" else "KGS",
+            currentDepartment = Department.RAW_MATERIAL_STORE,
+            status = JobCardStatus.PENDING,
+            priority = priority,
+            heatTreatmentRequired = heatTreatment,
+            operatorName = "AI Dispatcher",
+            targetDate = "2026-09-18",
+            notes = notes.ifEmpty { "Created automatically via PMW AI Operations Flow" }
+        )
+        jobCardDao.insertJobCard(newCard)
+        return newCard
+    }
+
+    suspend fun executeAiCreateOutsourceOrder(
+        partyName: String,
+        itemName: String,
+        itemCode: String,
+        supplierName: String,
+        processType: String,
+        orderQty: Double,
+        unit: String,
+        remarks: String
+    ): OutsourceOrder {
+        val existing = outsourceDao.getAllOutsourceOrdersList()
+        val nextNumber = existing.size + 1
+        val order = OutsourceOrder(
+            orderId = "OUT-AI-0$nextNumber",
+            jobCardNo = "JC-2026-0101",
+            partyName = partyName.ifEmpty { "Industrial Client" },
+            itemName = itemName.ifEmpty { "Machined Parts" },
+            itemCode = itemCode.ifEmpty { "EXT-$nextNumber" },
+            orderQty = if (orderQty <= 0) 500.0 else orderQty,
+            unit = if (unit.uppercase() == "PCS") "PCS" else "KGS",
+            processType = processType.ifEmpty { "Heat Treatment" },
+            status = "Supplier PO Placed",
+            supplierName = supplierName.ifEmpty { "Supreme Heat Treaters" },
+            poNumber = "PO-EXT-AI-$nextNumber",
+            expectedDate = "2026-09-15",
+            remarks = remarks.ifEmpty { "Subcontracted via PMW AI Flow" }
+        )
+        outsourceDao.insertOutsourceOrder(order)
+        return order
     }
 
     suspend fun rejectMovement(movementId: String, currentMovement: MaterialMovement, reason: String) {

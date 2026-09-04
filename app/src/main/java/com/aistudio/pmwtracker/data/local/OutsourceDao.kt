@@ -9,6 +9,9 @@ interface OutsourceDao {
     @Query("SELECT * FROM outsource_orders ORDER BY createdAt DESC")
     fun getAllOutsourceOrders(): Flow<List<OutsourceOrder>>
 
+    @Query("SELECT * FROM outsource_orders ORDER BY createdAt DESC")
+    suspend fun getAllOutsourceOrdersList(): List<OutsourceOrder>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOutsourceOrder(order: OutsourceOrder)
 

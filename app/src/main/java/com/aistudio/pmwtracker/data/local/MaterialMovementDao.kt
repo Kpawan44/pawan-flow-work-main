@@ -15,6 +15,9 @@ interface MaterialMovementDao {
     @Query("SELECT * FROM material_movements WHERE accepted = 0 ORDER BY transferDate DESC")
     fun getPendingMovements(): Flow<List<MaterialMovement>>
 
+    @Query("SELECT * FROM material_movements ORDER BY transferDate DESC")
+    suspend fun getAllMovementsList(): List<MaterialMovement>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMovement(movement: MaterialMovement)
 

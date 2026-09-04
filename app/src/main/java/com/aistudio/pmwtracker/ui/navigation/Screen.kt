@@ -14,6 +14,9 @@ sealed interface Screen {
     data object JobCards : Screen
 
     @Serializable
+    data object AiChat : Screen
+
+    @Serializable
     data object DepartmentOps : Screen
 
     @Serializable
@@ -37,7 +40,7 @@ enum class NavigationTab(
 ) {
     DASHBOARD(Screen.Dashboard, "Dashboard", Icons.Filled.Dashboard, Icons.Outlined.Dashboard),
     JOB_CARDS(Screen.JobCards, "Job Cards", Icons.Filled.Assignment, Icons.Outlined.Assignment),
-    OPERATIONS(Screen.DepartmentOps, "Ops", Icons.Filled.PrecisionManufacturing, Icons.Outlined.PrecisionManufacturing),
+    AI_FLOW(Screen.AiChat, "AI Flow", Icons.Filled.AutoAwesome, Icons.Outlined.AutoAwesome),
     TRANSFERS(Screen.Transfers, "Transfers", Icons.Filled.SwapHoriz, Icons.Outlined.SwapHoriz),
     OUTSOURCE(Screen.Outsource, "Outsource", Icons.Filled.WorkOutline, Icons.Outlined.WorkOutline)
 }
