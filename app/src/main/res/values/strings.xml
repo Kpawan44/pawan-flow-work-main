@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PMW Tracker</string>
+    <string name="title_dashboard">Dashboard</string>
+    <string name="title_job_cards">Job Cards</string>
+    <string name="title_department_ops">Operations</string>
+    <string name="title_transfers">Transfers</string>
+    <string name="title_outsource">Outsource</string>
+    <string name="title_reports">Reports</string>
+    
+    <!-- Action buttons -->
+    <string name="action_transfer">Transfer</string>
+    <string name="action_accept">Accept</string>
+    <string name="action_reject">Reject</string>
+    <string name="action_create_job">New Job Card</string>
+    <string name="action_search">Search Job Cards...</string>
+    <string name="action_filter">Filter</string>
+    <string name="action_details">View Details</string>
+    <string name="action_confirm">Confirm</string>
+    <string name="action_cancel">Cancel</string>
+</resources>
