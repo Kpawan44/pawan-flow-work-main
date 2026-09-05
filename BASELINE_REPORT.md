@@ -28,9 +28,11 @@ None (`tsc --noEmit` exit 0).
 
 ## Current tests
 
-- `test-production-hardening.ts` exists but is **not wired** to `package.json`.
-- It calls **removed** `POST /api/users/:id/verify-pin` and unauthenticated `POST /api/inventory/movement`.
-- It is **not a valid production-Firestore-safe suite**. Treat as stale.
+*(This section is a pre-Phase-1 snapshot. After hardening, `npm test` runs a mocked suite of 53 tests. `test-production-hardening.ts` is now a wrapper that only imports `test/hardening.test.ts` and must not call production Firestore or live Cloud Run.)*
+
+- At baseline: `test-production-hardening.ts` existed but was **not wired** to `package.json`.
+- At baseline it called **removed** `POST /api/users/:id/verify-pin` and unauthenticated `POST /api/inventory/movement`.
+- At baseline it was **not** a production-Firestore-safe suite.
 
 ## Important architecture findings
 

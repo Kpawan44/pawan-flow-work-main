@@ -9,7 +9,7 @@ PHASE: 0–11
 STATUS: COMPLETE (rules/hosting/Cloud Run deploy NOT performed — requires separate approval)
 PROGRESS: 100% of in-repo hardening
 FILES CHANGED: see below
-TESTS: 45 PASS / 0 FAIL (`npm test`)
+TESTS: 53 PASS / 0 FAIL (`npm test`)
 BLOCKERS: none for merge of code; production rollout needs SESSION_SECRET + separate rules deploy approval
 NEXT STEP: human review; do not auto-deploy
 ```
@@ -28,7 +28,7 @@ Post-change validation (this revision):
 
 | Check | Result |
 |---|---|
-| `npm test` | **45 PASS / 0 FAIL** (mocked MemoryStore; production Firestore not used) |
+| `npm test` | **53 PASS / 0 FAIL** (mocked MemoryStore; production Firestore not used) |
 | `npm run lint` (`tsc --noEmit`) | **PASS** |
 | `npm run build` | **PASS** (Vite + `dist/server.cjs`) |
 | Production Firestore | **Not touched** |

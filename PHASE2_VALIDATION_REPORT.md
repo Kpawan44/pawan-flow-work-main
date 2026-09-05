@@ -26,16 +26,16 @@ Phase 1 artifacts **exist in source** (not assumed from reports):
 
 **Discrepancies vs reports:**
 
-1. `PHASE1_REPORT.md` status header previously said 33 tests; table already said 45. Header corrected to 45.
-2. `BASELINE_REPORT.md` still describes **pre-Phase-1** `test-production-hardening.ts` (live `/verify-pin`). Current file only imports the mocked suite. Baseline is historically correct; current code differs as intended.
-3. **AdminConsole.tsx** still defaults an empty create-user PIN to `1234` (server will store it if sent). Phase 1 server path requires a PIN; UI can still supply the old default. Reported, not auto-fixed (HIGH RISK / policy: do not auto-modify).
-4. `updateResetGeneration()` still writes Admin SDK **then** REST for `mfr_system_state/global`. Movement path was fixed; this leftover remains.
+1. `PHASE1_REPORT.md` test count is **53** (was 45 after Phase 1, 33 in an earlier header).
+2. `BASELINE_REPORT.md` describes **pre-Phase-1** live `test-production-hardening.ts`. Current file is a mocked wrapper that only imports `test/hardening.test.ts`.
+3. AdminConsole empty PIN → `1234` was **fixed** in `d751327` (`resolveExplicitUserPin`; placeholder `"1234"` is format hint only).
+4. `updateResetGeneration()` exclusive persist was **fixed** in `d751327`. Remaining same-document Admin-then-REST leftovers (`initSystemState`, user/job tombstones, job-card delete/purge) were switched to `persistExclusive` in the source-only audit.
 
 ## 2–5. Local validation
 
 | Command | Result |
 |---|---|
-| `npm test` | **45 PASS / 0 FAIL** |
+| `npm test` | **53 PASS / 0 FAIL** |
 | `npx tsc --noEmit` | **PASS** |
 | `npm run lint` | **PASS** |
 | `npm run build` | **PASS** |
@@ -60,8 +60,10 @@ No Phase-1 regressions found. No tests deleted or weakened.
 | `GET /api/auth/login-directory` enumerates names | NEEDS REVIEW (replaces former public user read) |
 | Job-card update audit still REST after Admin job write (different collection) | NEEDS REVIEW |
 | `POST /api/users/:id/set-pin` REST write | NEEDS REVIEW |
-| AdminConsole empty PIN → `1234` | HIGH RISK (do not auto-modify in Phase 2) |
-| `updateResetGeneration` Admin then REST same document | HIGH RISK leftover (do not auto-modify in Phase 2) |
+| AdminConsole empty PIN → `1234` | FIXED (`d751327`; empty PIN rejected) |
+| `updateResetGeneration` Admin then REST same document | FIXED (`d751327` exclusive persist) |
+| Job-card PUT audit REST after Admin job write (different collection) | NEEDS REVIEW (accepted leftover) |
+| `POST /api/users/:id/set-pin` REST-only credential write | NEEDS REVIEW |
 | Merging to `main` auto-deploys Firebase Hosting via GitHub Actions | HIGH RISK process (not executed here) |
 
 ## 7. Workflow verification
@@ -96,7 +98,7 @@ Mocked via `applyFactoryResetToStore` + server inspection. **Not executed agains
 
 - Production refuses missing/deny-listed secret
 - Server create user requires valid 4-digit PIN
-- `1234` is valid **if explicitly supplied**; server does not auto-fill; **UI still can**
+- `1234` is valid **if explicitly supplied**; server and AdminConsole do not auto-fill an empty PIN
 - PIN-less Firestore login fallback throws (must verify via server)
 - Session: token, exp, generation; `/api/auth/session` + active user lookup
 - No Custom Token migration
@@ -130,11 +132,11 @@ HMAC-only users without Firebase Auth already depend on the API for mutations; t
 
 ## 13. Files changed in Phase 2
 
-- `PRE_DEPLOYMENT_CHECKLIST.md` (created)
-- `PHASE2_VALIDATION_REPORT.md` (created)
-- `PHASE1_REPORT.md` (test count header aligned to 45)
+- `PRE_DEPLOYMENT_CHECKLIST.md` (created; test count later aligned to 53)
+- `PHASE2_VALIDATION_REPORT.md` (created; remediations recorded)
+- `PHASE1_REPORT.md` (test count aligned to current suite)
 
-No application behavior changes in Phase 2.
+Phase 2 later remediations: AdminConsole PIN, exclusive persist for factory-reset generation and remaining Admin+REST same-document writes.
 
 ## 14. Remaining risks
 
@@ -143,11 +145,9 @@ See HIGH RISK / NEEDS REVIEW above. Also: CI does not run `npm test`; Hosting au
 ## 15. Exact next steps before deployment
 
 1. Human review of PR #1.
-2. Fix or explicitly accept AdminConsole default PIN `1234`.
-3. Fix or explicitly accept `updateResetGeneration` Admin+REST.
-4. Set unique Cloud Run `SESSION_SECRET`.
-5. Backup Firestore + record Cloud Run/Hosting/rules revisions.
-6. Separate approvals: backend image, Hosting (main merge), rules.
-7. Smoke tests in section H of the checklist — **after** approval only.
+2. Set unique Cloud Run `SESSION_SECRET`.
+3. Backup Firestore + record Cloud Run/Hosting/rules revisions.
+4. Separate approvals: backend image, Hosting (main merge), rules.
+5. Smoke tests in section H of the checklist — **after** approval only.
 
 **NO PRODUCTION DEPLOYMENT PERFORMED.**

@@ -462,15 +462,18 @@ async function startServer() {
         resetOpId: "init-0",
         updatedAt: new Date().toISOString()
       };
-      if (true) {
-        try {
+      await persistExclusive(
+        async () => {
           const db = getFirestoreAdmin();
-          if (db) {
-            await db.collection("mfr_system_state").doc("global").set(payload);
+          if (!db) {
+            throw new Error("Admin SDK unavailable");
           }
-        } catch (_) {}
-      }
-      await firestoreRestSetDoc("mfr_system_state", "global", payload).catch(() => {});
+          await db.collection("mfr_system_state").doc("global").set(payload);
+        },
+        async () => {
+          await firestoreRestSetDoc("mfr_system_state", "global", payload);
+        }
+      ).catch(() => {});
       console.log(`[SYSTEM] Initialized new factory reset generation: ${currentResetGeneration}`);
       return currentResetGeneration;
     } catch (err) {
@@ -605,35 +608,36 @@ async function startServer() {
     deletedUserIds.add(lowerId);
     saveDeletedUsers();
 
-    if (true) {
-      try {
+    await persistExclusive(
+      async () => {
         const db = getFirestoreAdmin();
-        if (db) {
-          await db.collection("mfr_deleted_users").doc(cleanId).set(tombstonePayload);
-          if (lowerId !== cleanId) {
-            await db.collection("mfr_deleted_users").doc(lowerId).set(tombstonePayload);
-          }
-          await db.collection("mfr_users").doc(cleanId).delete().catch(() => {});
-          await db.collection("mfr_user_credentials").doc(cleanId).delete().catch(() => {});
-          if (lowerId !== cleanId) {
-            await db.collection("mfr_users").doc(lowerId).delete().catch(() => {});
-            await db.collection("mfr_user_credentials").doc(lowerId).delete().catch(() => {});
-          }
+        if (!db) {
+          throw new Error("Admin SDK unavailable");
         }
-      } catch (_) {
+        await db.collection("mfr_deleted_users").doc(cleanId).set(tombstonePayload);
+        if (lowerId !== cleanId) {
+          await db.collection("mfr_deleted_users").doc(lowerId).set(tombstonePayload);
         }
-    }
-
-    await firestoreRestSetDoc("mfr_deleted_users", cleanId, tombstonePayload).catch(() => {});
-    if (lowerId !== cleanId) {
-      await firestoreRestSetDoc("mfr_deleted_users", lowerId, tombstonePayload).catch(() => {});
-    }
-    await firestoreRestDeleteDoc("mfr_users", cleanId).catch(() => {});
-    await firestoreRestDeleteDoc("mfr_user_credentials", cleanId).catch(() => {});
-    if (lowerId !== cleanId) {
-      await firestoreRestDeleteDoc("mfr_users", lowerId).catch(() => {});
-      await firestoreRestDeleteDoc("mfr_user_credentials", lowerId).catch(() => {});
-    }
+        await db.collection("mfr_users").doc(cleanId).delete();
+        await db.collection("mfr_user_credentials").doc(cleanId).delete();
+        if (lowerId !== cleanId) {
+          await db.collection("mfr_users").doc(lowerId).delete();
+          await db.collection("mfr_user_credentials").doc(lowerId).delete();
+        }
+      },
+      async () => {
+        await firestoreRestSetDoc("mfr_deleted_users", cleanId, tombstonePayload);
+        if (lowerId !== cleanId) {
+          await firestoreRestSetDoc("mfr_deleted_users", lowerId, tombstonePayload);
+        }
+        await firestoreRestDeleteDoc("mfr_users", cleanId);
+        await firestoreRestDeleteDoc("mfr_user_credentials", cleanId);
+        if (lowerId !== cleanId) {
+          await firestoreRestDeleteDoc("mfr_users", lowerId);
+          await firestoreRestDeleteDoc("mfr_user_credentials", lowerId);
+        }
+      }
+    ).catch(() => {});
 
     for (const k of Object.keys(customUsersStore)) {
       const u = customUsersStore[k];
@@ -2639,63 +2643,67 @@ async function startServer() {
       };
 
       // 1. Write tombstone to Firestore
-      if (true) {
-        try {
+      await persistExclusive(
+        async () => {
           const dbAdmin = getFirestoreAdmin();
-          if (dbAdmin) {
-            await dbAdmin.collection("mfr_deleted_job_cards").doc(upperId).set(tombstonePayload);
-            if (upperId !== asIsId) {
-              await dbAdmin.collection("mfr_deleted_job_cards").doc(asIsId).set(tombstonePayload);
-            }
+          if (!dbAdmin) {
+            throw new Error("Admin SDK unavailable");
           }
-        } catch (e) {}
-      }
-      await firestoreRestSetDoc("mfr_deleted_job_cards", upperId, tombstonePayload).catch(() => {});
-      if (upperId !== asIsId) {
-        await firestoreRestSetDoc("mfr_deleted_job_cards", asIsId, tombstonePayload).catch(() => {});
-      }
+          await dbAdmin.collection("mfr_deleted_job_cards").doc(upperId).set(tombstonePayload);
+          if (upperId !== asIsId) {
+            await dbAdmin.collection("mfr_deleted_job_cards").doc(asIsId).set(tombstonePayload);
+          }
+        },
+        async () => {
+          await firestoreRestSetDoc("mfr_deleted_job_cards", upperId, tombstonePayload);
+          if (upperId !== asIsId) {
+            await firestoreRestSetDoc("mfr_deleted_job_cards", asIsId, tombstonePayload);
+          }
+        }
+      ).catch(() => {});
 
       // 2. Delete Job Card and cascade related documents from Firestore
-      if (true) {
-        try {
+      await persistExclusive(
+        async () => {
           const dbAdmin = getFirestoreAdmin();
-          if (dbAdmin) {
-            await dbAdmin.collection("mfr_job_cards").doc(upperId).delete().catch(() => {});
-            await dbAdmin.collection("mfr_job_cards").doc(asIsId).delete().catch(() => {});
+          if (!dbAdmin) {
+            throw new Error("Admin SDK unavailable");
+          }
+          await dbAdmin.collection("mfr_job_cards").doc(upperId).delete();
+          await dbAdmin.collection("mfr_job_cards").doc(asIsId).delete();
 
-            // Cascade delete movements
-            const movSnap = await dbAdmin.collection("mfr_movements").where("jobCardNo", "==", jobCardNo).get().catch(() => null);
-            if (movSnap && !movSnap.empty) {
+          const movSnap = await dbAdmin.collection("mfr_movements").where("jobCardNo", "==", jobCardNo).get().catch(() => null);
+          if (movSnap && !movSnap.empty) {
+            const batch = dbAdmin.batch();
+            movSnap.docs.forEach(d => batch.delete(d.ref));
+            await batch.commit().catch(() => {});
+          }
+          if (upperId !== asIsId) {
+            const movUpperSnap = await dbAdmin.collection("mfr_movements").where("jobCardNo", "==", upperId).get().catch(() => null);
+            if (movUpperSnap && !movUpperSnap.empty) {
               const batch = dbAdmin.batch();
-              movSnap.docs.forEach(d => batch.delete(d.ref));
-              await batch.commit().catch(() => {});
-            }
-            if (upperId !== asIsId) {
-              const movUpperSnap = await dbAdmin.collection("mfr_movements").where("jobCardNo", "==", upperId).get().catch(() => null);
-              if (movUpperSnap && !movUpperSnap.empty) {
-                const batch = dbAdmin.batch();
-                movUpperSnap.docs.forEach(d => batch.delete(d.ref));
-                await batch.commit().catch(() => {});
-              }
-            }
-
-            // Cascade delete notifications mentioning this job card
-            const notifSnap = await dbAdmin.collection("mfr_notifications").get().catch(() => null);
-            if (notifSnap && !notifSnap.empty) {
-              const batch = dbAdmin.batch();
-              notifSnap.docs.forEach(d => {
-                const nData = d.data();
-                if (nData.message && nData.message.toLowerCase().includes(lowerId)) {
-                  batch.delete(d.ref);
-                }
-              });
+              movUpperSnap.docs.forEach(d => batch.delete(d.ref));
               await batch.commit().catch(() => {});
             }
           }
-        } catch (e) {}
-      }
-      await firestoreRestDeleteDoc("mfr_job_cards", upperId).catch(() => {});
-      await firestoreRestDeleteDoc("mfr_job_cards", asIsId).catch(() => {});
+
+          const notifSnap = await dbAdmin.collection("mfr_notifications").get().catch(() => null);
+          if (notifSnap && !notifSnap.empty) {
+            const batch = dbAdmin.batch();
+            notifSnap.docs.forEach(d => {
+              const nData = d.data();
+              if (nData.message && nData.message.toLowerCase().includes(lowerId)) {
+                batch.delete(d.ref);
+              }
+            });
+            await batch.commit().catch(() => {});
+          }
+        },
+        async () => {
+          await firestoreRestDeleteDoc("mfr_job_cards", upperId);
+          await firestoreRestDeleteDoc("mfr_job_cards", asIsId);
+        }
+      ).catch(() => {});
 
       // 3. Broadcast SSE Event for Instant Cross-User & Cross-Device Synchronization
       broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: upperId });
@@ -2717,26 +2725,29 @@ async function startServer() {
 
       const collectionsToPurge = ["mfr_job_cards", "mfr_movements", "mfr_notifications", "mfr_process_transfers", "mfr_outsource_orders"];
       for (const col of collectionsToPurge) {
-        if (true) {
-          try {
+        await persistExclusive(
+          async () => {
             const dbAdmin = getFirestoreAdmin();
-            if (dbAdmin) {
-              const snap = await dbAdmin.collection(col).get();
-              if (!snap.empty) {
-                const batch = dbAdmin.batch();
-                snap.docs.forEach(d => batch.delete(d.ref));
-                await batch.commit().catch(() => {});
-              }
+            if (!dbAdmin) {
+              throw new Error("Admin SDK unavailable");
             }
-          } catch (e) {}
-        }
-        const restDocs = await firestoreRestQueryAll(col);
-        if (Array.isArray(restDocs)) {
-          await Promise.all(restDocs.map((doc: any) => {
-            const docId = doc.id || (doc.name ? doc.name.split("/").pop() : "");
-            return docId ? firestoreRestDeleteDoc(col, docId) : Promise.resolve(true);
-          }));
-        }
+            const snap = await dbAdmin.collection(col).get();
+            if (!snap.empty) {
+              const batch = dbAdmin.batch();
+              snap.docs.forEach(d => batch.delete(d.ref));
+              await batch.commit();
+            }
+          },
+          async () => {
+            const restDocs = await firestoreRestQueryAll(col);
+            if (Array.isArray(restDocs)) {
+              await Promise.all(restDocs.map((doc: any) => {
+                const docId = doc.id || (doc.name ? doc.name.split("/").pop() : "");
+                return docId ? firestoreRestDeleteDoc(col, docId) : Promise.resolve(true);
+              }));
+            }
+          }
+        ).catch(() => {});
       }
 
       broadcastRealtimeEvent("ALL_UPDATED");

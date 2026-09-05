@@ -13,13 +13,13 @@ This checklist is a human approval gate. Completing local tests does **not** aut
 
 Date of last local validation: 2026-09-05  
 Branch: `cursor/backend-hardening-a4bf`  
-Commit validated locally: `3dd0db8` plus this Phase 2 documentation revision  
+Commit validated locally: latest on this branch (source-only audit; no production deploy)  
 
 ---
 
 ## A. Code validation
 
-- [x] `npm test` — 45 PASS / 0 FAIL (mocked MemoryStore; no production Firestore)
+- [x] `npm test` — 53 PASS / 0 FAIL (mocked MemoryStore; no production Firestore)
 - [x] `npx tsc --noEmit` — PASS
 - [x] `npm run lint` (`tsc --noEmit`) — PASS
 - [x] `npm run build` — PASS
