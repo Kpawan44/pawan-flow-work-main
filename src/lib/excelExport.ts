@@ -1,7 +1,7 @@
 import * as XLSX from 'xlsx';
 import { JobCard, MaterialMovement, AuditLog } from '../types';
 import { getJobCardProcessMetrics, getJobCardDepartmentPending } from './metrics';
-import { INVENTORY_RAW_MATERIALS } from '../components/RawMaterialRequestModal';
+import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from '../components/RawMaterialRequestModal';
 
 export interface ComprehensiveExportData {
   jobCards: JobCard[];
@@ -323,7 +323,8 @@ export function exportComprehensiveExcelBackup(
     'Starting Stock (KG)', 'Inwarded Stock (KG)', 'Total Issued (KG)', 'Total Rejected (KG)',
     'Current Stock (KG)', 'Reserve Status (%)'
   ];
-  const rmStockRows = INVENTORY_RAW_MATERIALS.map(item => {
+  const rmStockRows = getDynamicRawMaterialsStock(movements).map(item => {
+    const opening = INVENTORY_RAW_MATERIALS.find(s => s.code === item.code)?.availableStock ?? item.availableStock;
     const totalIssued = movements
       .filter(m => 
         m.fromDepartment === 'Raw Material Store' && m.isIssueRequest && 
@@ -347,11 +348,11 @@ export function exportComprehensiveExcelBackup(
       )
       .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
 
-    const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
+    const currentStock = item.availableStock;
     return [
       item.code, item.name, item.category, item.location,
-      item.availableStock, totalPurchased, totalIssued, totalRejected, currentStock,
-      Math.round(item.availableStock > 0 ? (currentStock / item.availableStock) * 100 : 0)
+      opening, totalPurchased, totalIssued, totalRejected, currentStock,
+      Math.round(opening > 0 ? (currentStock / opening) * 100 : 0)
     ];
   });
   const wsRMStock = XLSX.utils.aoa_to_sheet([rmStockHeaders, ...rmStockRows]);

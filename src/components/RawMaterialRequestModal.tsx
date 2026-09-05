@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { X, Search, FileText, CheckCircle, Flame, ShieldAlert, Sparkles, AlertCircle, RefreshCw } from 'lucide-react';
 import { JobCard, MaterialMovement, UserProfile } from '../types';
 import { getRawMaterialIssuedQty } from '../lib/metrics';
+import { INVENTORY_RAW_MATERIALS_SEED, computeRmRuntimeStock } from '../hardening/rmSkuMaster';
+import { DBService } from '../lib/firebase';
 
 interface RawMaterial {
   code: string;
@@ -13,17 +15,14 @@ interface RawMaterial {
   location: string;
 }
 
-export const INVENTORY_RAW_MATERIALS: RawMaterial[] = [
-  { code: 'EN8-R', name: 'EN8 Carbon Steel Round Bars', category: 'Alloy Steel', availableStock: 14500, unit: 'KG', location: 'Bin RM-101' },
-  { code: 'EN9-S', name: 'EN9 Alloy Steel Square Rods', category: 'Alloy Steel', availableStock: 8200, unit: 'KG', location: 'Bin RM-102' },
-  { code: 'MS-WC', name: 'Mild Steel Wire Coils (High Carbon)', category: 'Mild Steel', availableStock: 22000, unit: 'KG', location: 'Bin RM-204' },
-  { code: 'SS-304', name: 'Stainless Steel Sheet Coils (Grade 304)', category: 'Stainless Steel', availableStock: 6800, unit: 'KG', location: 'Bin RM-301' },
-  { code: 'HT-SB', name: 'High-Tensile Steel Billets (HT-200)', category: 'Alloy Steel', availableStock: 18300, unit: 'KG', location: 'Bin RM-105' },
-  { code: 'BR-HEX', name: 'Brass Hexagonal Rods (C360)', category: 'Copper Alloys', availableStock: 4100, unit: 'KG', location: 'Bin RM-402' },
-  { code: 'AL-6061', name: 'Aluminum Extrusion Bars (6061-T6)', category: 'Aluminum Alloys', availableStock: 9500, unit: 'KG', location: 'Bin RM-405' },
-  { code: 'CR-STEEL', name: 'Cold Rolled Steel Sheets (1.2mm)', category: 'Sheet Metal', availableStock: 11200, unit: 'KG', location: 'Bin RM-202' },
-  { code: 'FE-500', name: 'Deformed Fe-500 Reinforcing Bars', category: 'Carbon Steel', availableStock: 31000, unit: 'KG', location: 'Bin RM-208' }
-];
+export const INVENTORY_RAW_MATERIALS: RawMaterial[] = INVENTORY_RAW_MATERIALS_SEED.map((s) => ({
+  code: s.code,
+  name: s.name,
+  category: s.category,
+  availableStock: s.availableStock,
+  unit: s.unit,
+  location: s.location
+}));
 
 interface RawMaterialRequestModalProps {
   isOpen: boolean;
@@ -42,39 +41,22 @@ interface RawMaterialRequestModalProps {
   initialJobCardNo?: string;
 }
 
-export function getDynamicRawMaterialsStock(movements: MaterialMovement[]): RawMaterial[] {
-  return INVENTORY_RAW_MATERIALS.map(item => {
-    const totalIssued = movements
-      .filter(m => 
-        m.fromDepartment === 'Raw Material Store' && 
-        m.isIssueRequest && 
-        m.issueStatus === 'Issued' && 
-        (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
-      )
-      .reduce((sum, m) => sum + (m.quantity || 0), 0);
+export function getDynamicRawMaterialsStock(movements: MaterialMovement[], master?: Array<{ code: string; openingQty: number; name?: string; category?: string; unit?: string; location?: string }>): RawMaterial[] {
+  const rows = master && master.length > 0
+    ? master.map((m) => ({
+        code: m.code,
+        name: m.name || m.code,
+        category: m.category || '',
+        availableStock: m.openingQty,
+        unit: m.unit || 'KG',
+        location: m.location || ''
+      }))
+    : INVENTORY_RAW_MATERIALS;
 
-    const totalPurchased = movements
-      .filter(m => 
-        m.toDepartment === 'Raw Material Store' && 
-        m.fromDepartment === 'Purchase' && 
-        m.accepted &&
-        (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
-      )
-      .reduce((sum, m) => sum + (m.quantity || 0), 0);
-
-    const totalRejected = movements
-      .filter(m => 
-        m.fromDepartment === 'Raw Material Store' && 
-        (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
-        (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-'))
-      )
-      .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
-
-    const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
-    return {
-      ...item,
-      availableStock: currentStock
-    };
+  return rows.map((item) => {
+    const opening = item.availableStock;
+    const currentStock = computeRmRuntimeStock(opening, movements, item.code);
+    return { ...item, availableStock: currentStock };
   });
 }
 
@@ -97,6 +79,14 @@ export default function RawMaterialRequestModal({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState('');
+  const [skuMaster, setSkuMaster] = useState<Array<{ code: string; openingQty: number; name?: string; category?: string; unit?: string; location?: string }>>([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    DBService.getRmSkuMaster().then((rows) => {
+      if (Array.isArray(rows) && rows.length > 0) setSkuMaster(rows);
+    }).catch(() => {});
+  }, [isOpen]);
 
   // Reset state when modal opens
   useEffect(() => {
@@ -120,7 +110,7 @@ export default function RawMaterialRequestModal({
     }
   }, [isOpen, initialJobCardNo, jobCards]);
 
-  const dynamicMaterials = getDynamicRawMaterialsStock(movements);
+  const dynamicMaterials = getDynamicRawMaterialsStock(movements, skuMaster);
 
   const filteredMaterials = dynamicMaterials.filter(m =>
     m.name.toLowerCase().includes(searchTerm.toLowerCase()) ||

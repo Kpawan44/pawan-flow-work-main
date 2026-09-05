@@ -73,7 +73,7 @@ service cloud.firestore {
     // Collection: User Profiles (mfr_users)
     // Sanitized public profiles (never contains PINs, passwords, or credentials)
     match /mfr_users/{userId} {
-      allow read: if true;
+      allow read: if isActiveUser();
       
       // Creating users: Only super_admin or admin (admin cannot create super_admin)
       allow create: if isSuperAdmin() || (isAdmin() && request.resource.data.role != 'super_admin');
@@ -169,7 +169,11 @@ service cloud.firestore {
     match /mfr_notifications/{notificationId} {
       allow read: if isActiveUser();
       allow create: if isActiveUser();
-      allow update: if isActiveUser();
+      allow update: if isActiveUser() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+      );
       allow delete: if isAdmin() || isSuperAdmin();
     }
 
@@ -192,6 +196,36 @@ service cloud.firestore {
       allow create: if isActiveUser() && request.resource.data.orderQty > 0;
       allow update: if isActiveUser();
       allow delete: if isAdmin() || isSuperAdmin();
+    }
+
+    match /mfr_process_transfers/{transferId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+
+    match /mfr_system_state/{docId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+
+    match /mfr_deleted_users/{userId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /mfr_deleted_job_cards/{jobCardNo} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /mfr_deleted_movements/{movementId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /mfr_rm_sku_master/{code} {
+      allow read: if isActiveUser();
+      allow write: if isAdmin();
     }
   }
 }

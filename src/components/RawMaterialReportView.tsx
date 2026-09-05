@@ -17,7 +17,7 @@ import {
   Activity
 } from 'lucide-react';
 import { JobCard, MaterialMovement } from '../types';
-import { INVENTORY_RAW_MATERIALS } from './RawMaterialRequestModal';
+import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 
 interface RawMaterialReportViewProps {
   jobCards: JobCard[];
@@ -91,8 +91,8 @@ export default function RawMaterialReportView({
 
   // 4. Calculate dynamic current stock levels
   const dynamicInventory = useMemo(() => {
-    return INVENTORY_RAW_MATERIALS.map(item => {
-      // Aggregate all issued movements for this material
+    return getDynamicRawMaterialsStock(movements).map(item => {
+      const opening = INVENTORY_RAW_MATERIALS.find(s => s.code === item.code)?.availableStock ?? item.availableStock;
       const totalIssued = movements
         .filter(m => 
           m.fromDepartment === 'Raw Material Store' && 
@@ -119,12 +119,12 @@ export default function RawMaterialReportView({
         )
         .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
 
-      const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
-      const stockPercentage = item.availableStock > 0 ? (currentStock / item.availableStock) * 100 : 0;
+      const currentStock = item.availableStock;
+      const stockPercentage = opening > 0 ? (currentStock / opening) * 100 : 0;
 
       return {
         ...item,
-        startingStock: item.availableStock,
+        startingStock: opening,
         totalPurchased,
         totalIssued,
         totalRejected,

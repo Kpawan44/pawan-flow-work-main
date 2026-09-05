@@ -323,6 +323,7 @@ export interface MaterialMovement {
   // Perfect Audit Trail Tracking
   initiatedByUserId?: string;
   initiatedByUserName?: string;
+  operationId?: string;
   modifiedByUserId?: string;
   modifiedByUserName?: string;
   modifiedDate?: string;

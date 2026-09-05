@@ -425,7 +425,7 @@ export class DBService {
     }
     if (!headers['Authorization']) {
       try {
-        const sessionToken = sessionStorage.getItem('mfr_auth_token') || localStorage.getItem('mfr_auth_token');
+        const sessionToken = sessionStorage.getItem('mfr_auth_token');
         if (sessionToken) {
           headers['Authorization'] = `Bearer ${sessionToken}`;
         }
@@ -446,7 +446,11 @@ export class DBService {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000);
       const headers = await this.getAuthHeaders();
-      const res = await fetch(`${getApiBaseUrl()}/api/users`, { headers, signal: controller.signal });
+      const hasBearer = Boolean(headers['Authorization']);
+      const usersUrl = hasBearer
+        ? `${getApiBaseUrl()}/api/users`
+        : `${getApiBaseUrl()}/api/auth/login-directory`;
+      const res = await fetch(usersUrl, { headers, signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
         const resData = await res.json();
@@ -634,7 +638,6 @@ export class DBService {
         const authToken = result.token || result.customToken || result.sessionToken;
         if (authToken) {
           sessionStorage.setItem('mfr_auth_token', authToken);
-          localStorage.setItem('mfr_auth_token', authToken);
         }
         return {
           user: result.user as UserProfile,
@@ -700,12 +703,10 @@ export class DBService {
         throw new Error(`User profile "${cleanKey}" not found in database.`);
       }
 
-      if (matchedUser.active === false || matchedUser.status === 'deleted' || matchedUser.deletedAt) {
-        throw new Error(`Your profile (${matchedUser.name}) is deactivated. Please contact an administrator.`);
-      }
+      throw new Error('Authentication service unavailable. PIN must be verified by the server. Please check your internet connection.');
     }
 
-    throw new Error('Authentication service unavailable. Please check your internet connection.');
+    throw new Error('Authentication service unavailable. PIN must be verified by the server. Please check your internet connection.');
   }
 
   static async setUserPin(userId: string, pin: string): Promise<{ success: boolean; message?: string }> {
@@ -739,7 +740,7 @@ export class DBService {
         headers,
         body: JSON.stringify({
           ...cleanUser,
-          pin: pin || '1234'
+          pin: pin
         })
       });
 
@@ -1557,8 +1558,11 @@ export class DBService {
     this.clearClientCaches(newGen);
 
     try {
-      localStorage.setItem('mfr_is_first_run', 'true');
-      sessionStorage.setItem('mfr_is_first_run', 'true');
+      if (data.token) {
+        sessionStorage.setItem('mfr_auth_token', data.token);
+      }
+      localStorage.setItem('mfr_is_first_run', data.firstRun ? 'true' : 'false');
+      sessionStorage.setItem('mfr_is_first_run', data.firstRun ? 'true' : 'false');
       localStorage.setItem('mfr_system_generation', newGen);
       sessionStorage.setItem('mfr_system_generation', newGen);
     } catch (_) {}
@@ -1572,9 +1576,21 @@ export class DBService {
       } catch (_) {}
     }
 
-    window.dispatchEvent(new CustomEvent('factory-reset-completed', { detail: { generation: newGen, firstRun: true } }));
+    window.dispatchEvent(new CustomEvent('factory-reset-completed', { detail: { generation: newGen, firstRun: Boolean(data.firstRun) } }));
 
     return data;
+  }
+
+  static async getRmSkuMaster(): Promise<Array<{ code: string; name?: string; category?: string; unit?: string; location?: string; openingQty: number }>> {
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/rm-sku-master`, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success && Array.isArray(data.skus)) {
+        return data.skus;
+      }
+    } catch (_) {}
+    return [];
   }
 
   // --- MATERIAL MOVEMENTS ---
@@ -1652,6 +1668,9 @@ export class DBService {
 
     const newId = `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const nowIso = new Date().toISOString();
+    const operationId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `op-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
     
     const newMov: MaterialMovement = {
       ...movement,
@@ -1660,27 +1679,42 @@ export class DBService {
       transferDate: nowIso,
       accepted: false,
       initiatedByUserId: userId,
-      initiatedByUserName: userName
-    };
+      initiatedByUserName: userName,
+      operationId
+    } as MaterialMovement;
 
     // 1. Authoritative Backend API Execution FIRST
     const apiBase = getApiBaseUrl();
     const headers = await this.getAuthHeaders();
     let authoritativeMov: MaterialMovement | null = null;
 
+    let apiSucceeded = false;
     try {
       const res = await fetch(`${apiBase}/api/movements`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ movement: newMov })
+        body: JSON.stringify({ movement: newMov, operationId })
       });
       if (res.ok) {
         const resData = await res.json();
         if (resData.success && resData.movement) {
           authoritativeMov = resData.movement;
+          apiSucceeded = true;
+        } else {
+          throw new Error(resData.error || 'Movement commit was rejected by the server.');
         }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `Failed to create movement (status ${res.status}).`);
       }
-    } catch (apiErr) {
+    } catch (apiErr: any) {
+      const msg = String(apiErr?.message || apiErr || '');
+      const isNetwork =
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError') ||
+        msg.includes('abort') ||
+        msg.includes('Load failed');
+      if (!isNetwork) throw apiErr;
       console.warn("[MOVEMENTS API] Create movement call failed, falling back to direct write:", apiErr);
     }
 
@@ -1695,7 +1729,11 @@ export class DBService {
       }
     }
 
-    const finalMov = authoritativeMov || newMov;
+    if (!authoritativeMov) {
+      throw new Error('Server connection unavailable. Material movement was not saved.');
+    }
+
+    const finalMov = authoritativeMov;
 
     // 2. Reconcile Local Cache & Memory with Authoritative Server Result
     const freshMovements = await this.getMovements();
@@ -1708,33 +1746,33 @@ export class DBService {
     setLocalStorageItem('mfr_movements', freshMovements);
     this.setMemCache('mfr_movements', freshMovements);
     
-    // Update Job Card department & status to show pending placement (only if NOT a Dispatch Issue Request)
-    if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
-      await this.updateJobCard(movement.jobCardNo, {
-        status: 'Pending Acceptance',
-        currentDepartment: movement.toDepartment as Department
-      }, userId, userName).catch(() => {});
+    if (!apiSucceeded) {
+      if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
+        await this.updateJobCard(movement.jobCardNo, {
+          status: 'Pending Acceptance',
+          currentDepartment: movement.toDepartment as Department
+        }, userId, userName).catch(() => {});
+      }
+
+      const isRawStoreReq = movement.isIssueRequest && movement.fromDepartment === 'Raw Material Store';
+      await this.createNotification({
+        department: isRawStoreReq ? 'Raw Material Store' : (movement.isIssueRequest ? 'Store' : (movement.toDepartment === 'Completed' ? 'Dispatch' : (movement.toDepartment as Department))),
+        title: isRawStoreReq ? 'Raw Material Request' : (movement.isIssueRequest ? 'Dispatch Issue Request' : 'Material Sent'),
+        message: isRawStoreReq
+          ? `Job Card ${movement.jobCardNo}: Production requested raw material of ${movement.requestedQty} KG.`
+          : (movement.isIssueRequest
+            ? `Job Card ${movement.jobCardNo}: Dispatch requested issue of ${movement.requestedQty} ${(movement as any).requestedUnit || 'KG'} from Store.`
+            : `Job Card ${movement.jobCardNo}: ${movement.quantity} KG transferred from ${movement.fromDepartment} to ${movement.toDepartment}.`),
+        userId: isRawStoreReq ? 'all_raw_material_store' : (movement.isIssueRequest ? 'all_store' : `all_${movement.toDepartment.toLowerCase().replace(' ', '_')}`)
+      }).catch(() => {});
+
+      await this.logAction(
+        userId, 
+        userName, 
+        'MATERIAL_TRANSFER', 
+        `Dispatched ${movement.quantity} KG of Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment}.`
+      );
     }
-
-    // Create Notification for the receiving department
-    const isRawStoreReq = movement.isIssueRequest && movement.fromDepartment === 'Raw Material Store';
-    await this.createNotification({
-      department: isRawStoreReq ? 'Raw Material Store' : (movement.isIssueRequest ? 'Store' : (movement.toDepartment === 'Completed' ? 'Dispatch' : (movement.toDepartment as Department))),
-      title: isRawStoreReq ? 'Raw Material Request' : (movement.isIssueRequest ? 'Dispatch Issue Request' : 'Material Sent'),
-      message: isRawStoreReq
-        ? `Job Card ${movement.jobCardNo}: Production requested raw material of ${movement.requestedQty} KG.`
-        : (movement.isIssueRequest
-          ? `Job Card ${movement.jobCardNo}: Dispatch requested issue of ${movement.requestedQty} ${(movement as any).requestedUnit || 'KG'} from Store.`
-          : `Job Card ${movement.jobCardNo}: ${movement.quantity} KG transferred from ${movement.fromDepartment} to ${movement.toDepartment}.`),
-      userId: isRawStoreReq ? 'all_raw_material_store' : (movement.isIssueRequest ? 'all_store' : `all_${movement.toDepartment.toLowerCase().replace(' ', '_')}`)
-    }).catch(() => {});
-
-    await this.logAction(
-      userId, 
-      userName, 
-      'MATERIAL_TRANSFER', 
-      `Dispatched ${movement.quantity} KG of Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment}.`
-    );
 
     // Broadcast SSE Events AFTER COMMIT
     await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: finalMov.movementId, jobCardNo: movement.jobCardNo }).catch(() => {});
@@ -1806,9 +1844,13 @@ export class DBService {
         throw new Error(errJson.error || `Failed to accept cargo (status ${res.status}).`);
       }
     } catch (apiErr: any) {
-      if (apiErr.message && (apiErr.message.includes("authorized") || apiErr.message.includes("session") || apiErr.message.includes("already been accepted") || apiErr.message.includes("not found"))) {
-        throw apiErr;
-      }
+      const msg = String(apiErr?.message || apiErr || '');
+      const isNetwork =
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError') ||
+        msg.includes('abort') ||
+        msg.includes('Load failed');
+      if (!isNetwork) throw apiErr;
       console.warn("[ACCEPT API] Backend API call failed:", apiErr);
     }
 
@@ -1938,22 +1980,23 @@ export class DBService {
       }
     }
 
-    // Audit Logging
-    await this.logAction(
-      acceptedByUserId, 
-      acceptedByName, 
-      'ACCEPT_MATERIAL', 
-      `User ${acceptedByName} (ID: ${acceptedByUserId}) accepted material movement ${movementId}: Confirmed transfer of ${updatedMov.quantity} KG for ${updatedMov.jobCardNo} at ${updatedMov.toDepartment}.`
-    );
+    // Audit / notifications are already written by the API transaction.
+    if (!apiSucceeded) {
+      await this.logAction(
+        acceptedByUserId, 
+        acceptedByName, 
+        'ACCEPT_MATERIAL', 
+        `User ${acceptedByName} (ID: ${acceptedByUserId}) accepted material movement ${movementId}: Confirmed transfer of ${updatedMov.quantity} KG for ${updatedMov.jobCardNo} at ${updatedMov.toDepartment}.`
+      );
 
-    // Notification to previous department
-    if (updatedMov.fromDepartment) {
-      await this.createNotification({
-        department: updatedMov.fromDepartment,
-        title: 'Material Accepted',
-        message: `${acceptedByName} accepted ${updatedMov.quantity} KG for Job Card ${updatedMov.jobCardNo} at ${updatedMov.toDepartment}.`,
-        userId: `all_${updatedMov.fromDepartment.toLowerCase().replace(/\s+/g, '_')}`
-      }).catch(() => {});
+      if (updatedMov.fromDepartment) {
+        await this.createNotification({
+          department: updatedMov.fromDepartment,
+          title: 'Material Accepted',
+          message: `${acceptedByName} accepted ${updatedMov.quantity} KG for Job Card ${updatedMov.jobCardNo} at ${updatedMov.toDepartment}.`,
+          userId: `all_${updatedMov.fromDepartment.toLowerCase().replace(/\s+/g, '_')}`
+        }).catch(() => {});
+      }
     }
 
     // Broadcast SSE Events AFTER COMMIT
@@ -3675,6 +3718,17 @@ export class DBService {
   // ==========================================================
 
   static async getProcessTransfers(): Promise<ProcessTransfer[]> {
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/process-transfers`, { headers });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.transfers)) {
+          setLocalStorageItem('mfr_process_transfers', data.transfers);
+          return data.transfers;
+        }
+      }
+    } catch (_) {}
     if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         const q = query(collection(db, 'mfr_process_transfers'), orderBy('createdAt', 'desc'));
@@ -3703,178 +3757,76 @@ export class DBService {
       throw new Error("Process destination is mandatory. Must select either 'Repacking' or 'Replating'.");
     }
 
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
-    const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-    const nowIso = now.toISOString();
-
     const existingTransfers = await this.getProcessTransfers();
 
-    // Check duplicate idempotency
     if (transfer.idempotencyKey) {
       const dup = existingTransfers.find(t => t.idempotencyKey === transfer.idempotencyKey);
       if (dup) {
-        console.warn(`Duplicate submission suppressed for idempotencyKey: ${transfer.idempotencyKey}`);
         return dup;
       }
     }
 
-    // Generate unique sequential reference number: STP-000001, STP-000002...
-    let nextNum = 1;
-    existingTransfers.forEach(t => {
-      if (t.transferNo && t.transferNo.startsWith('STP-')) {
-        const numPart = parseInt(t.transferNo.replace('STP-', ''), 10);
-        if (!isNaN(numPart) && numPart >= nextNum) {
-          nextNum = numPart + 1;
-        }
-      }
+    const headers = await this.getAuthHeaders();
+    const res = await fetch(`${getApiBaseUrl()}/api/process-transfers`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        ...transfer,
+        idempotencyKey: transfer.idempotencyKey,
+        userId,
+        userName
+      })
     });
-
-    const newTransferNo = `STP-${String(nextNum).padStart(6, '0')}`;
-    const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-    const initialStatus = transfer.toProcess === 'Repacking' ? 'Sent to Repacking' : 'Sent to Replating';
-
-    const newRecord: ProcessTransfer = {
-      ...transfer,
-      transferId,
-      transferNo: newTransferNo,
-      status: initialStatus,
-      fromLocation: 'Store',
-      transferDate: dateStr,
-      transferTime: timeStr,
-      createdBy: userName || 'Store User',
-      createdByUserId: userId || 'store_user',
-      createdAt: nowIso,
-      updatedAt: nowIso
-    };
-
-    // 1. Save to local storage first for offline / responsive instant UI
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.transfer) {
+      throw new Error(data.error || 'Failed to create process transfer');
+    }
+    const newRecord = data.transfer as ProcessTransfer;
     existingTransfers.unshift(newRecord);
     setLocalStorageItem('mfr_process_transfers', existingTransfers);
-
-    // 2. Add to Audit Log
-    await this.logAction(
-      userId,
-      userName,
-      `Send to ${transfer.toProcess} (${newTransferNo})`,
-      `Store sent ${transfer.quantity.toLocaleString()} ${transfer.unit} of ${transfer.itemName} to ${transfer.toProcess} under ${newTransferNo}. Remarks: ${transfer.remarks || '-'}`
-    );
-
-    // 3. Create Department Notification
-    const targetDept = transfer.toProcess === 'Repacking' ? 'Packing' : 'Plating';
-    await this.createNotification({
-      department: targetDept,
-      title: `Store Transfer: ${transfer.toProcess}`,
-      message: `${newTransferNo}: Store sent ${transfer.quantity.toLocaleString()} ${transfer.unit} of ${transfer.itemName} (Job Card: ${transfer.jobCardNo}) for ${transfer.toProcess}.`,
-      userId: `all_${targetDept.toLowerCase()}`
-    });
-
-    // 4. Atomic Firestore write with Transaction
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
-      try {
-        await runTransaction(db, async (transaction) => {
-          const docRef = doc(db, 'mfr_process_transfers', transferId);
-          transaction.set(docRef, sanitizeForFirestore(newRecord));
-        });
-      } catch (err) {
-        console.warn("Firestore transaction failed for process transfer, queued locally:", err);
-        handleFirestoreError(err, OperationType.WRITE, 'mfr_process_transfers');
-      }
-    }
-
     return newRecord;
   }
 
   static async receiveProcessTransfer(
     transferId: string,
-    userId: string,
-    userName: string,
+    _userId: string,
+    _userName: string,
     remarks?: string
   ): Promise<ProcessTransfer> {
+    const headers = await this.getAuthHeaders();
+    const res = await fetch(`${getApiBaseUrl()}/api/process-transfers/${encodeURIComponent(transferId)}/receive`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ remarks })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to receive process transfer');
     const list = await this.getProcessTransfers();
     const idx = list.findIndex(t => t.transferId === transferId || t.transferNo === transferId);
-    if (idx === -1) throw new Error(`Process Transfer ${transferId} not found`);
-
-    const transfer = list[idx];
-    const nowIso = new Date().toISOString();
-    const newStatus = transfer.toProcess === 'Repacking' ? 'Received at Repacking' : 'Received at Replating';
-
-    const updated: ProcessTransfer = {
-      ...transfer,
-      status: newStatus,
-      receivedBy: userName,
-      receivedByUserId: userId,
-      receivedAt: nowIso,
-      remarks: remarks ? `${transfer.remarks ? transfer.remarks + ' | ' : ''}Received: ${remarks}` : transfer.remarks,
-      updatedAt: nowIso
-    };
-
-    list[idx] = updated;
+    if (idx >= 0) list[idx] = data.transfer;
     setLocalStorageItem('mfr_process_transfers', list);
-
-    // Audit Log
-    await this.logAction(
-      userId,
-      userName,
-      `Received at ${transfer.toProcess} (${transfer.transferNo})`,
-      `${userName} confirmed receipt of ${transfer.quantity.toLocaleString()} ${transfer.unit} at ${transfer.toProcess} under ${transfer.transferNo}.`
-    );
-
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
-      try {
-        await setDoc(doc(db, 'mfr_process_transfers', transfer.transferId), sanitizeForFirestore(updated), { merge: true });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, 'mfr_process_transfers');
-      }
-    }
-
-    return updated;
+    return data.transfer;
   }
 
   static async startProcessTransfer(
     transferId: string,
-    userId: string,
-    userName: string,
+    _userId: string,
+    _userName: string,
     remarks?: string
   ): Promise<ProcessTransfer> {
+    const headers = await this.getAuthHeaders();
+    const res = await fetch(`${getApiBaseUrl()}/api/process-transfers/${encodeURIComponent(transferId)}/start`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ remarks })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to start process transfer');
     const list = await this.getProcessTransfers();
     const idx = list.findIndex(t => t.transferId === transferId || t.transferNo === transferId);
-    if (idx === -1) throw new Error(`Process Transfer ${transferId} not found`);
-
-    const transfer = list[idx];
-    const nowIso = new Date().toISOString();
-    const newStatus = transfer.toProcess === 'Repacking' ? 'Repacking in Process' : 'Replating in Process';
-
-    const updated: ProcessTransfer = {
-      ...transfer,
-      status: newStatus,
-      inProcessBy: userName,
-      inProcessByUserId: userId,
-      inProcessAt: nowIso,
-      remarks: remarks ? `${transfer.remarks ? transfer.remarks + ' | ' : ''}In-Process: ${remarks}` : transfer.remarks,
-      updatedAt: nowIso
-    };
-
-    list[idx] = updated;
+    if (idx >= 0) list[idx] = data.transfer;
     setLocalStorageItem('mfr_process_transfers', list);
-
-    // Audit Log
-    await this.logAction(
-      userId,
-      userName,
-      `${transfer.toProcess} in Process (${transfer.transferNo})`,
-      `${userName} started ${transfer.toProcess} on ${transfer.quantity.toLocaleString()} ${transfer.unit} for ${transfer.transferNo}.`
-    );
-
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
-      try {
-        await setDoc(doc(db, 'mfr_process_transfers', transfer.transferId), sanitizeForFirestore(updated), { merge: true });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, 'mfr_process_transfers');
-      }
-    }
-
-    return updated;
+    return data.transfer;
   }
 
   static async completeAndReturnProcessTransfer(
@@ -3884,64 +3836,22 @@ export class DBService {
     rejectionReason: string,
     returnBin: string,
     returnRack: string,
-    userId: string,
-    userName: string,
+    _userId: string,
+    _userName: string,
     remarks?: string
   ): Promise<ProcessTransfer> {
+    const headers = await this.getAuthHeaders();
+    const res = await fetch(`${getApiBaseUrl()}/api/process-transfers/${encodeURIComponent(transferId)}/complete`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ completedQty, rejectionQty, rejectionReason, returnBin, returnRack, remarks })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to complete process transfer');
     const list = await this.getProcessTransfers();
     const idx = list.findIndex(t => t.transferId === transferId || t.transferNo === transferId);
-    if (idx === -1) throw new Error(`Process Transfer ${transferId} not found`);
-
-    const transfer = list[idx];
-    const nowIso = new Date().toISOString();
-
-    const updated: ProcessTransfer = {
-      ...transfer,
-      status: 'Returned to Store',
-      completedBy: userName,
-      completedByUserId: userId,
-      completedAt: nowIso,
-      completedQty,
-      rejectionQty,
-      rejectionReason: rejectionReason || undefined,
-      returnedBy: userName,
-      returnedByUserId: userId,
-      returnedAt: nowIso,
-      returnedQty: completedQty,
-      returnLocationBin: returnBin || undefined,
-      returnRackNo: returnRack || undefined,
-      remarks: remarks ? `${transfer.remarks ? transfer.remarks + ' | ' : ''}Completed & Returned: ${remarks}` : transfer.remarks,
-      updatedAt: nowIso
-    };
-
-    list[idx] = updated;
+    if (idx >= 0) list[idx] = data.transfer;
     setLocalStorageItem('mfr_process_transfers', list);
-
-    // Audit Log
-    await this.logAction(
-      userId,
-      userName,
-      `Process Completed & Returned to Store (${transfer.transferNo})`,
-      `${userName} completed ${transfer.toProcess} for ${transfer.transferNo} and returned ${completedQty.toLocaleString()} ${transfer.unit} (Rejections: ${rejectionQty.toLocaleString()}) to Store (Bin: ${returnBin || '-'}, Rack: ${returnRack || '-'}).`
-    );
-
-    // Notify Store
-    await this.createNotification({
-      department: 'Store',
-      title: `${transfer.toProcess} Returned to Store`,
-      message: `${transfer.transferNo}: ${completedQty.toLocaleString()} ${transfer.unit} of ${transfer.itemName} completed ${transfer.toProcess} and returned to Store.`,
-      userId: 'all_store'
-    });
-
-    if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
-      try {
-        await setDoc(doc(db, 'mfr_process_transfers', transfer.transferId), sanitizeForFirestore(updated), { merge: true });
-      } catch (err) {
-        handleFirestoreError(err, OperationType.UPDATE, 'mfr_process_transfers');
-      }
-    }
-
-    return updated;
+    return data.transfer;
   }
 }
-
