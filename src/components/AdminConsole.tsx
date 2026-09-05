@@ -36,6 +36,7 @@ import {
 import { UserProfile, AuditLog, Department, JobCard, MaterialMovement, CompanyConfig, JobCardStatus } from '../types';
 import { getJobCardProcessMetrics } from '../lib/metrics';
 import { DBService } from '../lib/firebase';
+import { resolveExplicitUserPin } from '../hardening/userPin';
 import { formatMovementWhatsAppMessage, getWhatsAppShareUrl, triggerWhatsAppMovementNotification } from '../lib/whatsapp';
 import JobStatusBadge from './JobStatusBadge';
 import BulkStatusUpdateModal from './BulkStatusUpdateModal';
@@ -618,16 +619,13 @@ export default function AdminConsole({
       }
     }
 
-    // Validate 4-digit PIN format if entered
-    if (newUserPin && newUserPin.trim() && (newUserPin.trim().length !== 4 || !/^\d{4}$/.test(newUserPin.trim()))) {
-      const errorMsg = 'Security PIN must be exactly 4 numeric digits (e.g. 1234).';
-      setPinError(errorMsg);
-      showToast(errorMsg, 'error');
+    const pinResolved = resolveExplicitUserPin(newUserPin);
+    if (pinResolved.ok === false) {
+      setPinError(pinResolved.error);
+      showToast(pinResolved.error, 'error');
       return;
     }
-
-    // Use the entered 4-digit PIN or default to 1234
-    const userPin = (newUserPin && newUserPin.trim().length === 4) ? newUserPin.trim() : '1234';
+    const userPin = pinResolved.pin;
 
     // Enforce only one Super Admin across the entire system
     if (newUserRole === 'super_admin') {
@@ -1202,7 +1200,7 @@ export default function AdminConsole({
                 className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6] font-mono tracking-widest text-center"
               />
               <p className="text-[10px] text-slate-400 mt-1 font-sans">
-                Set employee 4-digit login PIN (default: <strong>1234</strong>).
+                Required. Enter exactly 4 numeric digits. No default PIN is assigned.
               </p>
             </div>
 

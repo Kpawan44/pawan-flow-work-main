@@ -1,6 +1,7 @@
 import { MemoryStore } from "../src/hardening/memoryStore";
 import { commitMaterialMovementTx, applyAcceptanceDepartment, isDeptAuthorized } from "../src/hardening/commitMaterialMovement";
-import { assertSessionSecretSafe, createSessionToken, verifySessionToken, isValidFourDigitPin, requireUserPin, extractBearerToken, hmacBearerAuthStatus } from "../src/hardening/hmacSession";
+import { assertSessionSecretSafe, createSessionToken, verifySessionToken, isValidFourDigitPin, requireUserPin, extractBearerToken, hmacBearerAuthStatus, resolveExplicitUserPin } from "../src/hardening/hmacSession";
+import { persistExclusive } from "../src/hardening/exclusivePersist";
 import { assertProcessTransferTransition } from "../src/hardening/processTransferMachine";
 import { isProtectedSuperAdmin, shouldDeleteUserOnFactoryReset, operationalCollectionsForFactoryReset, applyFactoryResetToStore } from "../src/hardening/factoryResetPolicy";
 import { INVENTORY_RAW_MATERIALS_SEED, mergeCreateIfMissing, seedToMasterDoc, computeRmRuntimeStock } from "../src/hardening/rmSkuMaster";
@@ -389,6 +390,51 @@ async function run() {
     { fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", quantity: 20, processDetails: { rawMaterialCode: seed.code } }
   ], seed.code);
   assert("17 SKU reconciliation 100+50-20=130", specStock === 130);
+
+  const missingPin = resolveExplicitUserPin("");
+  const missingPin2 = resolveExplicitUserPin(undefined);
+  assert("A missing PIN is rejected", missingPin.ok === false && missingPin2.ok === false);
+  const shortPin = resolveExplicitUserPin("12");
+  const longPin = resolveExplicitUserPin("12345");
+  assert("A invalid PIN length is rejected", shortPin.ok === false && longPin.ok === false);
+  const nonNumeric = resolveExplicitUserPin("12ab");
+  assert("A non-numeric PIN is rejected", nonNumeric.ok === false);
+  const okPin = resolveExplicitUserPin("4829");
+  assert("A valid 4-digit PIN succeeds", okPin.ok === true && okPin.ok && okPin.pin === "4829");
+  const emptyResolved = resolveExplicitUserPin("");
+  assert("A 1234 is never automatically inserted when PIN is empty", emptyResolved.ok === false && JSON.stringify(emptyResolved).indexOf("1234") === -1);
+
+  let adminCalls = 0;
+  let restCalls = 0;
+  const adminOk = await persistExclusive(
+    async () => {
+      adminCalls += 1;
+    },
+    async () => {
+      restCalls += 1;
+    }
+  );
+  assert("B Admin success is one persist op and skips REST", adminOk.wroteViaAdmin && !adminOk.restCalled && adminCalls === 1 && restCalls === 0);
+
+  adminCalls = 0;
+  restCalls = 0;
+  const adminFail = await persistExclusive(
+    async () => {
+      adminCalls += 1;
+      throw new Error("admin down");
+    },
+    async () => {
+      restCalls += 1;
+    }
+  );
+  assert("B REST fallback when Admin throws", !adminFail.wroteViaAdmin && adminFail.restCalled && adminCalls === 1 && restCalls === 1);
+
+  adminCalls = 0;
+  restCalls = 0;
+  const noAdmin = await persistExclusive(null, async () => {
+    restCalls += 1;
+  });
+  assert("B REST when Admin SDK unavailable", !noAdmin.wroteViaAdmin && noAdmin.restCalled && adminCalls === 0 && restCalls === 1);
 
   console.log(`\n${passed} PASS / ${failed} FAIL`);
   if (failed > 0) process.exit(1);

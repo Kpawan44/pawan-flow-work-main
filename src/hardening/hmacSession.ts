@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { HARDCODED_SESSION_SECRETS } from "./constants";
+export { isValidFourDigitPin, requireUserPin, resolveExplicitUserPin } from "./userPin";
 
 export interface SessionPayload {
   uid: string;
@@ -66,18 +67,6 @@ export function verifySessionToken(
   } catch {
     return { ok: false, error: "Invalid or tampered session token." };
   }
-}
-
-export function isValidFourDigitPin(pin: unknown): pin is string {
-  return typeof pin === "string" && /^\d{4}$/.test(pin.trim());
-}
-
-/** Never invent a PIN. Callers must supply a valid 4-digit value. */
-export function requireUserPin(pin: unknown): string {
-  if (!isValidFourDigitPin(pin)) {
-    throw new Error("A valid 4-digit PIN is required.");
-  }
-  return pin.trim();
 }
 
 export function extractBearerToken(authorizationHeader: string | undefined | null): string | null {

@@ -24,7 +24,7 @@ import {
   ProcessKind
 } from "./src/hardening/processTransferMachine";
 import { INVENTORY_RAW_MATERIALS_SEED, mergeCreateIfMissing, seedToMasterDoc } from "./src/hardening/rmSkuMaster";
-import { VALID_MANUFACTURING_DEPARTMENTS } from "./src/hardening/constants";
+import { persistExclusive } from "./src/hardening/exclusivePersist";
 
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
@@ -490,15 +490,18 @@ async function startServer() {
       resetOpId: resetOpId || `op-${Date.now()}`,
       updatedAt: new Date().toISOString()
     };
-    if (true) {
-      try {
+    await persistExclusive(
+      async () => {
         const db = getFirestoreAdmin();
-        if (db) {
-          await db.collection("mfr_system_state").doc("global").set(payload);
+        if (!db) {
+          throw new Error("Admin SDK unavailable");
         }
-      } catch (_) {}
-    }
-    await firestoreRestSetDoc("mfr_system_state", "global", payload).catch(() => {});
+        await db.collection("mfr_system_state").doc("global").set(payload);
+      },
+      async () => {
+        await firestoreRestSetDoc("mfr_system_state", "global", payload);
+      }
+    );
     return nextGen;
   }
 
