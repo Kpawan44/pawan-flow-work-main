@@ -51,6 +51,24 @@ function qtyAcceptedAt(jobCardNo: string, toDepartment: string, movements: Workb
     .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
 }
 
+/**
+ * Pick the Firestore job-card document ID that already exists.
+ * Prefer canonical uppercase; fall back to the original/as-is ID.
+ * Returns null when neither exists so callers do not create a duplicate.
+ */
+export function resolveExistingJobCardDocId(
+  rawJobCardNo: string,
+  hasDoc: (id: string) => boolean
+): string | null {
+  const raw = String(rawJobCardNo || "").trim();
+  if (!raw) return null;
+  const upper = raw.toUpperCase();
+  if (upper.startsWith("STOCK-IN-")) return null;
+  if (hasDoc(upper)) return upper;
+  if (raw !== upper && hasDoc(raw)) return raw;
+  return null;
+}
+
 export function hasUnacceptedIncomingToDepartment(
   jobCardNo: string,
   department: string,

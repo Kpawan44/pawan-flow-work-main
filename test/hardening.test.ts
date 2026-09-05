@@ -1,6 +1,6 @@
 import { MemoryStore } from "../src/hardening/memoryStore";
 import { commitMaterialMovementTx, applyAcceptanceDepartment, isDeptAuthorized, nextStatusOnAccept, clearPendingOutbound } from "../src/hardening/commitMaterialMovement";
-import { isJobInDepartmentOperationsQueue } from "../src/hardening/departmentWorkbench";
+import { isJobInDepartmentOperationsQueue, hasUnacceptedIncomingToDepartment, resolveExistingJobCardDocId } from "../src/hardening/departmentWorkbench";
 import { assertSessionSecretSafe, createSessionToken, verifySessionToken, isValidFourDigitPin, requireUserPin, extractBearerToken, hmacBearerAuthStatus, resolveExplicitUserPin } from "../src/hardening/hmacSession";
 import { persistExclusive } from "../src/hardening/exclusivePersist";
 import { assertProcessTransferTransition } from "../src/hardening/processTransferMachine";
@@ -461,10 +461,10 @@ async function run() {
     });
     const pendingJob = await store.get("mfr_job_cards", jobNo);
     const pendingMov = send.movement;
-    const incomingPending =
-      pendingMov && pendingMov.toDepartment === "Production" && pendingMov.accepted === false;
+    const incomingPending = hasUnacceptedIncomingToDepartment(jobNo, "Production", [pendingMov]);
     const opsWhilePending = isJobInDepartmentOperationsQueue("Production", pendingJob, [pendingMov]);
-    assert("C pending Production receipt is not on operations queue", incomingPending && opsWhilePending === false);
+    assert("C pending Production receipt appears in Incoming", incomingPending === true && pendingMov.accepted === false);
+    assert("C pending Production receipt is not on operations queue", opsWhilePending === false);
     assert("C pending job is persisted (not deleted)", Boolean(pendingJob) && pendingJob.status === "Pending Acceptance");
 
     const dest = applyAcceptanceDepartment(pendingMov);
@@ -505,6 +505,37 @@ async function run() {
     const dest2 = applyAcceptanceDepartment(stillMov);
     const status2 = nextStatusOnAccept(dest2 || stillMov.toDepartment);
     assert("C second accept is idempotent (same job, same status, no extra job)", status2 === "Pending" && reloadedJobs.length === 1);
+  }
+
+  {
+    const mixedId = "jc-MixEd-9";
+    const docs = new Set([mixedId]);
+    const resolved = resolveExistingJobCardDocId(mixedId, (id) => docs.has(id));
+    assert("G mixed-case jobCardNo resolves to existing as-is document", resolved === mixedId);
+    assert(
+      "G canonical uppercase wins when both documents exist",
+      resolveExistingJobCardDocId("jc-x", (id) => id === "JC-X" || id === "jc-x") === "JC-X"
+    );
+    const store = new MemoryStore();
+    await store.set("mfr_job_cards", mixedId, {
+      jobCardNo: mixedId,
+      status: "Pending Acceptance",
+      currentDepartment: "Production",
+      processType: "Purchase",
+      orderQty: 10,
+      currentQty: 10,
+      version: 1
+    });
+    const existing = await store.get("mfr_job_cards", resolved as string);
+    await store.set("mfr_job_cards", resolved as string, {
+      ...existing,
+      status: "Pending",
+      currentDepartment: "Production"
+    });
+    const listed = await store.list("mfr_job_cards");
+    const upperGhost = await store.get("mfr_job_cards", mixedId.toUpperCase());
+    assert("G accept updates mixed-case job in place", listed.length === 1 && listed[0].status === "Pending" && listed[0].jobCardNo === mixedId);
+    assert("G accept does not create uppercase duplicate job", !upperGhost);
   }
 
   console.log(`\n${passed} PASS / ${failed} FAIL`);
