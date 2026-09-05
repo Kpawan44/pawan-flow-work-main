@@ -824,14 +824,32 @@ export default function App() {
   useEffect(() => {
     refreshUsers(true);
 
-    // Check for existing session in sessionStorage or localStorage on mount
+    // Check for existing session token; profile cache is display-only
     try {
-      const savedProfileStr = sessionStorage.getItem('mfr_active_user_profile') || localStorage.getItem('mfr_active_user_profile');
-      if (savedProfileStr) {
-        const profile = JSON.parse(savedProfileStr);
-        if (profile && profile.userId && profile.active !== false) {
-          setCurrentUser(profile);
-        }
+      const token = sessionStorage.getItem('mfr_auth_token');
+      if (token) {
+        fetch(`${getApiBaseUrl()}/api/auth/session`, {
+          headers: { Authorization: `Bearer ${token}` }
+        }).then(async (res) => {
+          if (!res.ok) {
+            sessionStorage.removeItem('mfr_auth_token');
+            sessionStorage.removeItem('mfr_active_user_uid');
+            sessionStorage.removeItem('mfr_active_user_profile');
+            localStorage.removeItem('mfr_active_user_uid');
+            localStorage.removeItem('mfr_active_user_profile');
+            setCurrentUser(null);
+            return;
+          }
+          const data = await res.json();
+          if (data.success && data.user) {
+            setCurrentUser(data.user);
+            sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(data.user));
+          }
+        }).catch(() => {
+          setCurrentUser(null);
+        });
+      } else {
+        setCurrentUser(null);
       }
     } catch (e) {}
 
@@ -1191,11 +1209,9 @@ export default function App() {
       setCurrentUser(authenticatedProfile);
       sessionStorage.setItem('mfr_active_user_uid', authenticatedUid);
       sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(authenticatedProfile));
-      localStorage.setItem('mfr_active_user_uid', authenticatedUid);
-      localStorage.setItem('mfr_active_user_profile', JSON.stringify(authenticatedProfile));
       if (token) {
         sessionStorage.setItem('mfr_auth_token', token);
-        localStorage.setItem('mfr_auth_token', token);
+        localStorage.removeItem('mfr_auth_token');
       }
       setLoginName('');
       setLoginPin('');
@@ -1687,40 +1703,7 @@ export default function App() {
   ) => {
     if (!currentUser) return;
     try {
-      const mov = movements.find(m => m.movementId === movementId);
-
       await DBService.acceptMovement(movementId, currentUser.userId, currentUser.name, remarks, extraFields);
-
-      // Conditional logic: If a job card movement is received/transferred from the Purchase Department,
-      // inspect its 'itemFinished' status to automatically set the next currentDepartment to either 'Packing' or 'Production'/'Heat Treatment'.
-      if (mov && (mov.fromDepartment === 'Purchase' || mov.toDepartment === 'Purchase')) {
-        const card = jobCards.find(j => j.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
-        if (card) {
-          const isItemFinished = Boolean(
-            (card as any).itemFinished ||
-            (mov as any).itemFinished ||
-            card.materialType === 'Finished Goods' ||
-            card.receivedMaterialType === 'Finished Goods' ||
-            card.outsourceDetails?.outsourceMaterialType === 'Finished Goods'
-          );
-
-          const nextDepartment: Department = isItemFinished
-            ? 'Packing'
-            : (card.heatTreatmentRequired ? 'Heat Treatment' : 'Production');
-
-          if (mov.fromDepartment === 'Purchase') {
-            await DBService.updateJobCard(
-              card.jobCardNo,
-              {
-                currentDepartment: nextDepartment,
-                status: nextDepartment === 'Production' ? 'Pending' : 'In Process'
-              },
-              currentUser.userId,
-              currentUser.name
-            );
-          }
-        }
-      }
 
       refreshAllStates();
     } catch (err: any) {
@@ -2340,7 +2323,6 @@ export default function App() {
               }
               if (data.token) {
                 sessionStorage.setItem('mfr_auth_token', data.token);
-                localStorage.setItem('mfr_auth_token', data.token);
               }
               if (data.user) {
                 sessionStorage.setItem('mfr_active_user_uid', data.user.userId);

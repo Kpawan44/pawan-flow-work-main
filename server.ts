@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import compression from "compression";
 import path from "path";
@@ -9,9 +10,21 @@ import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
 import bcrypt from "bcryptjs";
 import { initializeApp, getApps, getApp, applicationDefault } from "firebase-admin/app";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import { GoogleAuth } from "google-auth-library";
+import { commitMaterialMovementTx, nextStatusOnAccept, SimpleStore, applyAcceptanceDepartment, clearPendingOutbound } from "./src/hardening/commitMaterialMovement";
+import { assertSessionSecretSafe, createSessionToken, verifySessionToken, isValidFourDigitPin, extractBearerToken, requireUserPin } from "./src/hardening/hmacSession";
+import { operationalCollectionsForFactoryReset, isProtectedSuperAdmin, shouldDeleteUserOnFactoryReset } from "./src/hardening/factoryResetPolicy";
+import {
+  assertProcessTransferTransition,
+  formatStpNumber,
+  initialProcessTransferStatus,
+  nextStatusForAction,
+  ProcessKind
+} from "./src/hardening/processTransferMachine";
+import { INVENTORY_RAW_MATERIALS_SEED, mergeCreateIfMissing, seedToMasterDoc } from "./src/hardening/rmSkuMaster";
+import { VALID_MANUFACTURING_DEPARTMENTS } from "./src/hardening/constants";
 
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
@@ -360,14 +373,56 @@ async function startServer() {
     }
   }
 
-  const SESSION_SECRET = process.env.SESSION_SECRET || (process.env.NODE_ENV === "production" ? (() => {
-    const secret = process.env.SESSION_SECRET;
-    if (!secret) {
-      console.warn("[SECURITY WARNING] SESSION_SECRET not set in production. Using strong production fallback.");
-      return "pmw-tracker-production-cloud-secret-2026-auth";
+  async function persistDocsExclusive(
+    docs: Array<{ collection: string; id: string; data: any }>
+  ): Promise<{ wroteViaAdmin: boolean }> {
+    const db = getFirestoreAdmin();
+    if (db) {
+      try {
+        const batch = db.batch();
+        for (const d of docs) {
+          batch.set(db.collection(d.collection).doc(d.id), d.data);
+        }
+        await batch.commit();
+        return { wroteViaAdmin: true };
+      } catch (err: any) {
+        console.warn("[PERSIST] Admin SDK write failed, using REST fallback:", err?.message || err);
+      }
     }
-    return secret;
-  })() : "pmw-tracker-secure-auth-secret-key-2026");
+    await Promise.all(docs.map((d) => firestoreRestSetDoc(d.collection, d.id, d.data)));
+    return { wroteViaAdmin: false };
+  }
+
+  function createFirestoreSimpleStore(): SimpleStore {
+    return {
+      async get(collection: string, id: string) {
+        const db = getFirestoreAdmin();
+        if (db) {
+          try {
+            const snap = await db.collection(collection).doc(id).get();
+            if (snap.exists) return snap.data();
+          } catch (_) {}
+        }
+        return firestoreRestGetDoc(collection, id);
+      },
+      async set(collection: string, id: string, data: any) {
+        await persistDocsExclusive([{ collection, id, data }]);
+      },
+      async list(collection: string) {
+        const db = getFirestoreAdmin();
+        if (db) {
+          try {
+            const snap = await db.collection(collection).limit(500).get();
+            return snap.docs.map((d: any) => d.data());
+          } catch (_) {}
+        }
+        const rest = await firestoreRestQueryAll(collection);
+        return Array.isArray(rest) ? rest : [];
+      }
+    };
+  }
+
+  const SESSION_SECRET = assertSessionSecretSafe(process.env.SESSION_SECRET, process.env.NODE_ENV);
 
   // ----------------------------------------------------
   // SYSTEM STATE & RESET GENERATION (ANTI-RESURRECTION)
@@ -787,16 +842,7 @@ async function startServer() {
     }
     const cleanUid = uid.trim();
 
-    // Fast, cryptographically secure HMAC-signed session token with generation tracking
-    const payload = Buffer.from(JSON.stringify({
-      uid: cleanUid,
-      userId: cleanUid,
-      gen: currentResetGeneration,
-      iat: Date.now(),
-      exp: Date.now() + 30 * 24 * 3600 * 1000 // 30 days
-    })).toString("base64url");
-    const sig = crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
-    return `${payload}.${sig}`;
+    return createSessionToken(SESSION_SECRET, cleanUid, currentResetGeneration, 24 * 3600 * 1000);
   }
 
   // Authoritative user profile and credentials lookup via Firebase Admin SDK with REST fallback
@@ -1058,19 +1104,11 @@ async function startServer() {
   // ----------------------------------------------------
   async function requireFirebaseAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({
-          success: false,
-          error: "Unauthorized: Missing or invalid Authorization header."
-        });
-      }
-
-      const token = authHeader.split("Bearer ")[1]?.trim();
+      const token = extractBearerToken(req.headers.authorization as string);
       if (!token) {
         return res.status(401).json({
           success: false,
-          error: "Unauthorized: No bearer token provided."
+          error: "Unauthorized: Missing or invalid Authorization header."
         });
       }
 
@@ -1097,22 +1135,11 @@ async function startServer() {
 
       // 2. Try signed session token verification
       if (!decodedUid) {
-        try {
-          const parts = token.split(".");
-          if (parts.length === 2) {
-            const [payloadStr, sig] = parts;
-            const expectedSig = crypto.createHmac("sha256", SESSION_SECRET).update(payloadStr).digest("base64url");
-            if (crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) {
-              const payload = JSON.parse(Buffer.from(payloadStr, "base64url").toString("utf8"));
-              if (payload && (payload.uid || payload.userId) && (!payload.exp || payload.exp > Date.now())) {
-                decodedUid = payload.uid || payload.userId;
-                tokenGeneration = payload.gen || null;
-                verifiedSessionPayload = payload;
-              }
-            }
-          }
-        } catch (sessErr) {
-          // Token signature invalid
+        const verified = verifySessionToken(SESSION_SECRET, token, currentResetGeneration);
+        if (verified.ok) {
+          decodedUid = verified.payload.uid || verified.payload.userId;
+          tokenGeneration = verified.payload.gen || null;
+          verifiedSessionPayload = verified.payload;
         }
       }
 
@@ -1224,6 +1251,17 @@ async function startServer() {
       });
     }
   }
+
+  app.get("/api/auth/session", requireFirebaseAuth, async (req, res) => {
+    const user = (req as any).user;
+    const authUid = (req as any).authUid;
+    return res.json({
+      success: true,
+      user,
+      authUid,
+      factoryResetGeneration: currentResetGeneration
+    });
+  });
 
   // ----------------------------------------------------
   // SERVER-SIDE BRUTE-FORCE RATE LIMITING & LOCKOUT
@@ -1576,6 +1614,30 @@ async function startServer() {
   app.get("/api/users", requireFirebaseAuth, handleGetUsers);
   app.get("/api/auth/users", requireFirebaseAuth, handleGetUsers);
 
+  // Public login picker (names only). PINs/credentials are never included.
+  app.get("/api/auth/login-directory", async (_req, res) => {
+    try {
+      await handleGetUsers(_req as any, {
+        json: (payload: any) => {
+          const users = Array.isArray(payload?.users)
+            ? payload.users.map((u: any) => ({
+                userId: u.userId,
+                name: u.name,
+                department: u.department,
+                role: u.role
+              }))
+            : [];
+          return res.json({ success: true, users });
+        },
+        status: (code: number) => ({
+          json: (payload: any) => res.status(code).json(payload)
+        })
+      } as any);
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: "Failed to load login directory" });
+    }
+  });
+
   // POST /api/users — Protected user creation/save endpoint with strict role escalation guard & anti-resurrection
   app.post("/api/users", requireFirebaseAuth, async (req, res) => {
     try {
@@ -1625,6 +1687,14 @@ async function startServer() {
         }
       }
 
+      if (!existingData) {
+        try {
+          requireUserPin(userData.pin);
+        } catch {
+          return res.status(400).json({ success: false, error: "A valid 4-digit PIN is required to create a user." });
+        }
+      }
+
       const sanitized = {
         userId: userData.userId,
         name: userData.name,
@@ -1640,41 +1710,44 @@ async function startServer() {
         updatedAt: new Date().toISOString()
       };
 
-      if (true) {
-        try {
-          const db = getFirestoreAdmin();
-          if (db) {
-            if (sanitized.role === "super_admin") {
-              const prevSuperSnap = await db.collection("mfr_users").where("role", "==", "super_admin").get();
-              for (const doc of prevSuperSnap.docs) {
-                if (doc.id !== userData.userId && doc.data()?.userId !== userData.userId) {
-                  await doc.ref.update({ role: "admin", updatedAt: new Date().toISOString() }).catch(() => {});
-                }
+      let wroteUserViaAdmin = false;
+      try {
+        const db = getFirestoreAdmin();
+        if (db) {
+          if (sanitized.role === "super_admin") {
+            const prevSuperSnap = await db.collection("mfr_users").where("role", "==", "super_admin").get();
+            for (const doc of prevSuperSnap.docs) {
+              if (doc.id !== userData.userId && doc.data()?.userId !== userData.userId) {
+                await doc.ref.update({ role: "admin", updatedAt: new Date().toISOString() }).catch(() => {});
               }
             }
-            await db.collection("mfr_users").doc(userData.userId).set(sanitized, { merge: true });
           }
-        } catch (e) {
-          }
+        }
+      } catch (e) {
       }
 
-      firestoreRestSetDoc("mfr_users", userData.userId, sanitized).catch(() => {});
+      const userPersist = await persistDocsExclusive([{ collection: "mfr_users", id: userData.userId, data: sanitized }]);
+      wroteUserViaAdmin = userPersist.wroteViaAdmin;
+      void wroteUserViaAdmin;
       customUsersStore[userData.userId] = sanitized;
       saveUsersStore();
 
-      const rawPin = (userData.pin && typeof userData.pin === "string" && userData.pin.trim()) ? userData.pin.trim() : "1234";
-      const pinHash = await bcrypt.hash(rawPin, 10);
-      if (true) {
+      if (userData.pin !== undefined && userData.pin !== null && String(userData.pin).length > 0) {
         try {
-          const db = getFirestoreAdmin();
-          if (db) {
-            await db.collection("mfr_user_credentials").doc(userData.userId).set({ pinHash, updatedAt: new Date().toISOString() }, { merge: true });
-          }
-        } catch (_) {}
+          requireUserPin(userData.pin);
+        } catch {
+          return res.status(400).json({ success: false, error: "A valid 4-digit PIN is required when setting credentials." });
+        }
+        const rawPin = userData.pin.trim();
+        const pinHash = await bcrypt.hash(rawPin, 10);
+        await persistDocsExclusive([{
+          collection: "mfr_user_credentials",
+          id: userData.userId,
+          data: { pinHash, updatedAt: new Date().toISOString() }
+        }]);
+        customCredsStore[userData.userId] = pinHash;
+        saveCredsStore();
       }
-      firestoreRestSetDoc("mfr_user_credentials", userData.userId, { pinHash, updatedAt: new Date().toISOString() }).catch(() => {});
-      customCredsStore[userData.userId] = pinHash;
-      saveCredsStore();
 
       cachedUsersDirectory = null;
       broadcastRealtimeEvent("USER_UPDATED", { userId: sanitized.userId, action: "create" });
@@ -1756,25 +1829,19 @@ async function startServer() {
         updatedAt: new Date().toISOString()
       };
 
-      if (true) {
-        try {
-          const db = getFirestoreAdmin();
-          if (db) {
-            if (sanitized.role === "super_admin" && existingData?.role !== "super_admin") {
-              const prevSuperSnap = await db.collection("mfr_users").where("role", "==", "super_admin").get();
-              for (const doc of prevSuperSnap.docs) {
-                if (doc.id !== userId) {
-                  await doc.ref.update({ role: "admin", updatedAt: new Date().toISOString() }).catch(() => {});
-                }
-              }
+      try {
+        const db = getFirestoreAdmin();
+        if (db && sanitized.role === "super_admin" && existingData?.role !== "super_admin") {
+          const prevSuperSnap = await db.collection("mfr_users").where("role", "==", "super_admin").get();
+          for (const doc of prevSuperSnap.docs) {
+            if (doc.id !== userId) {
+              await doc.ref.update({ role: "admin", updatedAt: new Date().toISOString() }).catch(() => {});
             }
-            await db.collection("mfr_users").doc(userId).set(sanitized, { merge: true });
           }
-        } catch (e) {
-          }
-      }
+        }
+      } catch (_) {}
 
-      firestoreRestSetDoc("mfr_users", userId, sanitized).catch(() => {});
+      await persistDocsExclusive([{ collection: "mfr_users", id: userId, data: sanitized }]);
       customUsersStore[userId] = sanitized;
       saveUsersStore();
 
@@ -1969,19 +2036,7 @@ async function startServer() {
       return res.status(401).json({ success: false, error: "Invalid Super Admin Security PIN." });
     }
 
-    const operationalCollections = [
-      "mfr_users",
-      "mfr_user_credentials",
-      "mfr_job_cards",
-      "mfr_movements",
-      "mfr_process_transfers",
-      "mfr_audit_logs",
-      "mfr_idempotency_keys",
-      "mfr_notifications",
-      "mfr_items",
-      "mfr_outsource_orders",
-      "mfr_deleted_users"
-    ];
+    const operationalCollections = operationalCollectionsForFactoryReset();
 
     console.log(`[AUDIT] [FACTORY_RESET_PROCESSING] OpId: ${resetOpId}, Beginning purge of ${operationalCollections.length} collections...`);
 
@@ -2000,6 +2055,51 @@ async function startServer() {
       }
     }
 
+    // Remove non-super_admin users only. Never delete, deactivate, or tombstone super_admin.
+    try {
+      const db = getFirestoreAdmin();
+      const preservedUsers: any[] = [];
+      if (db) {
+        const usersSnap = await db.collection("mfr_users").get();
+        for (const doc of usersSnap.docs) {
+          const data = doc.data() || {};
+          if (isProtectedSuperAdmin(data) || isProtectedSuperAdmin({ role: data.role })) {
+            preservedUsers.push({ id: doc.id, ...data, role: "super_admin", active: true });
+            continue;
+          }
+          if (shouldDeleteUserOnFactoryReset(data)) {
+            await db.collection("mfr_user_credentials").doc(doc.id).delete().catch(() => {});
+            await db.collection("mfr_users").doc(doc.id).delete().catch(() => {});
+          }
+        }
+      } else {
+        const restUsers = await firestoreRestQueryAll("mfr_users");
+        for (const u of restUsers) {
+          const id = u.userId || u.id;
+          if (isProtectedSuperAdmin(u)) {
+            preservedUsers.push(u);
+            continue;
+          }
+          await firestoreRestDeleteDoc("mfr_users", id);
+          await firestoreRestDeleteDoc("mfr_user_credentials", id);
+        }
+      }
+
+      const nextUsers: Record<string, any> = {};
+      const nextCreds: Record<string, string> = {};
+      for (const u of preservedUsers) {
+        const id = u.userId || u.id;
+        nextUsers[id] = { ...u, role: "super_admin", active: true };
+        if (customCredsStore[id]) nextCreds[id] = customCredsStore[id];
+      }
+      customUsersStore = nextUsers;
+      saveUsersStore();
+      customCredsStore = nextCreds;
+      saveCredsStore();
+    } catch (userPurgeErr: any) {
+      console.error("[FACTORY_RESET] Non-super user purge warning:", userPurgeErr?.message || userPurgeErr);
+    }
+
     // Advance persistent reset generation
     const newGeneration = await updateResetGeneration(resetOpId, requester.userId);
 
@@ -2014,29 +2114,42 @@ async function startServer() {
       defaultUnit: "KGS",
       updatedAt: new Date().toISOString()
     };
-    await firestoreRestSetDoc("mfr_company_config", "global", cleanDefaultConfig).catch(() => {});
-
-    // Clear all server-side in-memory and local JSON stores
-    customUsersStore = {};
-    saveUsersStore();
-
-    customCredsStore = {};
-    saveCredsStore();
+    await persistDocsExclusive([{ collection: "mfr_company_config", id: "global", data: cleanDefaultConfig }]);
 
     deletedUserIds.clear();
     saveDeletedUsers();
 
-    cachedUsersDirectory = [];
+    cachedUsersDirectory = Object.values(customUsersStore);
     cachedUsersDirectoryTimestamp = Date.now();
 
-    console.log(`[AUDIT] [FACTORY_RESET_COMPLETED] OpId: ${resetOpId}, All operational collections verified empty. New Generation: ${newGeneration}`);
-    broadcastRealtimeEvent("FACTORY_RESET_COMPLETED", { resetOpId, factoryResetGeneration: newGeneration, timestamp: new Date().toISOString() });
+    const freshToken = await issueAuthToken(requester.userId);
 
-    return res.json({ 
-      success: true, 
-      resetOperationId: resetOpId, 
+    const resetAuditId = `AL-${Date.now()}-reset`;
+    await persistDocsExclusive([{
+      collection: "mfr_audit_logs",
+      id: resetAuditId,
+      data: {
+        id: resetAuditId,
+        timestamp: new Date().toISOString(),
+        userId: requester.userId,
+        userName: requester.name,
+        action: "FACTORY_RESET",
+        details: `Factory reset ${resetOpId} completed. Super admin accounts preserved. Generation ${newGeneration}.`
+      }
+    }]);
+
+    console.log(`[AUDIT] [FACTORY_RESET_COMPLETED] OpId: ${resetOpId}, Operational data purged. Super admin preserved. New Generation: ${newGeneration}`);
+    broadcastRealtimeEvent("FACTORY_RESET_COMPLETED", { resetOpId, factoryResetGeneration: newGeneration, timestamp: new Date().toISOString(), firstRun: false });
+
+    return res.json({
+      success: true,
+      resetOperationId: resetOpId,
       factoryResetGeneration: newGeneration,
-      message: "Factory reset completed successfully. All operational data permanently erased." 
+      firstRun: false,
+      token: freshToken,
+      sessionToken: freshToken,
+      user: requester,
+      message: "Factory reset completed. Super Admin accounts preserved. Operational data erased."
     });
   });
 
@@ -2055,6 +2168,16 @@ async function startServer() {
     }
     if (Object.keys(customUsersStore).length > 0) {
       activeUserCount = Math.max(activeUserCount, Object.keys(customUsersStore).length);
+    }
+
+    if (activeUserCount === 0) {
+      try {
+        const db = getFirestoreAdmin();
+        if (db) {
+          const snap = await db.collection("mfr_users").limit(5).get();
+          activeUserCount = Math.max(activeUserCount, snap.size);
+        }
+      } catch (_) {}
     }
 
     if (activeUserCount > 0) {
@@ -2090,18 +2213,10 @@ async function startServer() {
     cachedUsersDirectory = [newSuperAdmin];
     cachedUsersDirectoryTimestamp = Date.now();
 
-    if (true) {
-      try {
-        const db = getFirestoreAdmin();
-        if (db) {
-          await db.collection("mfr_users").doc(userId).set(newSuperAdmin);
-          await db.collection("mfr_user_credentials").doc(userId).set({ pinHash, updatedAt: new Date().toISOString() });
-        }
-      } catch (_) {}
-    }
-
-    await firestoreRestSetDoc("mfr_users", userId, newSuperAdmin).catch(() => {});
-    await firestoreRestSetDoc("mfr_user_credentials", userId, { pinHash, updatedAt: new Date().toISOString() }).catch(() => {});
+    await persistDocsExclusive([
+      { collection: "mfr_users", id: userId, data: newSuperAdmin },
+      { collection: "mfr_user_credentials", id: userId, data: { pinHash, updatedAt: new Date().toISOString() } }
+    ]);
 
     const token = await issueAuthToken(userId);
 
@@ -2363,25 +2478,11 @@ async function startServer() {
         details: `Generated job card ${upperJobNo} for ${jobCard.partyName} (${jobCard.orderQty} ${unitLabel})`
       };
 
-      if (true) {
-        try {
-          const dbAdmin = getFirestoreAdmin();
-          if (dbAdmin) {
-            await dbAdmin.collection("mfr_job_cards").doc(upperJobNo).set(newJob);
-            await dbAdmin.collection("mfr_movements").doc(initialMovement.movementId).set(initialMovement);
-            await dbAdmin.collection("mfr_notifications").doc(notifId).set(notifData);
-            await dbAdmin.collection("mfr_audit_logs").doc(auditId).set(auditData);
-          }
-        } catch (e) {
-          console.warn("[JOB_CARDS] Admin SDK write failed, falling back to REST:", e);
-        }
-      }
-
-      await Promise.all([
-        firestoreRestSetDoc("mfr_job_cards", upperJobNo, newJob),
-        firestoreRestSetDoc("mfr_movements", initialMovement.movementId, initialMovement),
-        firestoreRestSetDoc("mfr_notifications", notifId, notifData),
-        firestoreRestSetDoc("mfr_audit_logs", auditId, auditData)
+      await persistDocsExclusive([
+        { collection: "mfr_job_cards", id: upperJobNo, data: newJob },
+        { collection: "mfr_movements", id: initialMovement.movementId, data: initialMovement },
+        { collection: "mfr_notifications", id: notifId, data: notifData },
+        { collection: "mfr_audit_logs", id: auditId, data: auditData }
       ]);
 
       inMemoryJobCards.set(upperJobNo, newJob);
@@ -2648,25 +2749,6 @@ async function startServer() {
   // ----------------------------------------------------
   // SERVER-AUTHORITATIVE MATERIAL MOVEMENT & TRANSACTION ENDPOINT
   // ----------------------------------------------------
-  const VALID_MANUFACTURING_DEPARTMENTS = [
-    "Purchase",
-    "Raw Material Store",
-    "Dispatch",
-    "Production",
-    "Heat Treatment",
-    "Plating",
-    "Packing",
-    "Store",
-    "Admin",
-    "Management",
-    "Cutting",
-    "Machining",
-    "Welding",
-    "Assembly",
-    "Painting",
-    "Quality",
-    "Completed"
-  ];
 
   // GET /api/audit-logs — Authoritative Server Audit Logs Fetch
   app.get("/api/audit-logs", requireFirebaseAuth, async (req, res) => {
@@ -2805,346 +2887,120 @@ async function startServer() {
     }
   });
 
-  app.post("/api/inventory/movement", requireFirebaseAuth, async (req, res) => {
+
+  async function handleAuthoritativeMovementCommit(req: express.Request, res: express.Response) {
     try {
       const authUid = (req as any).authUid;
       const requester = (req as any).user;
-
       if (!authUid || !requester) {
         return res.status(401).json({ success: false, error: "Unauthorized: Missing authoritative user profile." });
       }
 
-      const {
+      const body = req.body || {};
+      const movement = body.movement || body;
+      const operationId = String(body.operationId || movement.operationId || "").trim();
+      const jobCardNo = String(movement.jobCardNo || body.jobCardNo || "").trim();
+      const fromDepartment = String(movement.fromDepartment || body.fromDepartment || "").trim();
+      const toDepartment = String(movement.toDepartment || body.toDepartment || "").trim();
+      const quantity = movement.quantity !== undefined ? movement.quantity : body.quantity;
+
+      const input = {
         operationId,
-        movementId,
+        movementId: movement.movementId || body.movementId,
         jobCardNo,
         fromDepartment,
         toDepartment,
         quantity,
-        remarks,
-        processDetails,
-        isIssueRequest
-      } = req.body;
-
-      if (!operationId || typeof operationId !== "string" || !operationId.trim()) {
-        return res.status(400).json({ success: false, error: "operationId is required." });
-      }
-
-      if (!jobCardNo || !fromDepartment || !toDepartment) {
-        return res.status(400).json({ success: false, error: "jobCardNo, fromDepartment, and toDepartment are required." });
-      }
-
-      const reqQty = Number(quantity);
-      if (quantity === null || quantity === undefined || isNaN(reqQty) || !isFinite(reqQty) || reqQty <= 0) {
-        return res.status(400).json({ success: false, error: "Movement quantity must be a positive number greater than 0." });
-      }
-
-      // Department format validation
-      const normFrom = fromDepartment.trim();
-      const normTo = toDepartment.trim();
-      
-      const isValidFrom = VALID_MANUFACTURING_DEPARTMENTS.some(d => d.toLowerCase() === normFrom.toLowerCase());
-      const isValidTo = VALID_MANUFACTURING_DEPARTMENTS.some(d => d.toLowerCase() === normTo.toLowerCase());
-
-      if (!isValidFrom || !isValidTo) {
-        return res.status(400).json({
-          success: false,
-          error: `Invalid department specified. Must be one of: ${VALID_MANUFACTURING_DEPARTMENTS.join(", ")}`
-        });
-      }
-
-      if (normFrom.toLowerCase() === normTo.toLowerCase()) {
-        return res.status(400).json({
-          success: false,
-          error: "Source and target departments cannot be identical."
-        });
-      }
-
-      // Server-Authoritative Role & Department Authorization (Never trust client role/department)
-      const userRole = String(requester.role || "staff").toLowerCase();
-      const userDept = String(requester.department || "").toLowerCase();
-      const allowedDepts: string[] = [
-        ...(Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : []),
-        ...(Array.isArray(requester.accessList) ? requester.accessList : [])
-      ].map((d: string) => String(d).toLowerCase());
-
-      const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
-      const isDeptAuthorized = isSuperOrAdmin || 
-        userDept === normFrom.toLowerCase() ||
-        allowedDepts.includes(normFrom.toLowerCase());
-
-      if (!isDeptAuthorized) {
-        return res.status(403).json({
-          success: false,
-          error: `Forbidden: User '${requester.name || requester.userId}' (${requester.department}) is not authorized to initiate material movements from '${normFrom}'.`
-        });
-      }
-
-      // Authoritative User Identities (Overriding any client-supplied spoofed parameters)
-      const authoritativeUserId = authUid;
-      const authoritativeUserName = requester.name || requester.userId || "Authorized User";
-
-      const opKey = operationId.trim();
-      const movId = movementId || `M-${Date.now()}`;
-      const now = new Date().toISOString();
-      let txResult: any = null;
-
-      if (true) {
-        try {
-          const db = getFirestoreAdmin();
-          if (db) {
-            const opDocRef = db.collection("mfr_idempotency_keys").doc(opKey);
-            const activeJobId = jobCardNo.toUpperCase().trim();
-            const activeJobRef = db.collection("mfr_job_cards").doc(activeJobId);
-
-            // Execute atomic Firestore transaction
-            const txPromise = db.runTransaction(async (transaction) => {
-              // --- 1. ALL TRANSACTION READS FIRST ---
-              const idempSnap = await transaction.get(opDocRef);
-              const jobUpperSnap = await transaction.get(activeJobRef);
-
-              // Idempotency check: Return existing result if already processed
-              if (idempSnap.exists) {
-                return {
-                  isCached: true,
-                  data: idempSnap.data()
-                };
-              }
-
-              const memCard = inMemoryJobCards.get(jobCardNo.toUpperCase()) || inMemoryJobCards.get(jobCardNo);
-              const jobCardData: any = memCard || (jobUpperSnap.exists ? jobUpperSnap.data() : null);
-              if (!jobCardData) {
-                const notFoundErr: any = new Error(`Job Card '${jobCardNo}' not found.`);
-                notFoundErr.statusCode = 404;
-                throw notFoundErr;
-              }
-
-              // --- 2. QUANTITY & BUSINESS VALIDATIONS ---
-              const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
-              if (!isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
-                if (reqQty > currentAvailableQty) {
-                  const qtyErr: any = new Error(`Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`);
-                  qtyErr.statusCode = 400;
-                  throw qtyErr;
-                }
-              }
-
-              const newBalance = Math.max(0, currentAvailableQty - reqQty);
-              const nextVersion = (jobCardData.version || 1) + 1;
-
-              // --- 3. ALL TRANSACTION WRITES ---
-              const updatedJobCard = {
-                ...jobCardData,
-                currentDepartment: normTo,
-                currentQty: newBalance,
-                version: nextVersion,
-                updatedAt: now,
-                updatedBy: authoritativeUserName,
-                updatedByUserId: authoritativeUserId
-              };
-              transaction.set(activeJobRef, updatedJobCard);
-
-              // 2. Write Movement Record
-              const movDocRef = db.collection("mfr_movements").doc(movId);
-              const movData = {
-                movementId: movId,
-                jobCardNo: jobCardData.jobCardNo || activeJobId,
-                fromDepartment: normFrom,
-                toDepartment: normTo,
-                quantity: reqQty,
-                transferDate: now,
-                transferBy: authoritativeUserName,
-                initiatedByUserId: authoritativeUserId,
-                initiatedByUserName: authoritativeUserName,
-                accepted: false,
-                operationId: opKey,
-                isIssueRequest: Boolean(isIssueRequest),
-                issueStatus: isIssueRequest ? "Requested" : undefined,
-                createdAt: now
-              };
-              transaction.set(movDocRef, movData);
-
-              // 3. Write Idempotency Lock
-              const idempData = {
-                operationId: opKey,
-                createdAt: now,
-                userId: authUid,
-                result: {
-                  success: true,
-                  movement: movData,
-                  updatedJobCardVersion: nextVersion
-                }
-              };
-              transaction.set(opDocRef, idempData);
-
-              return {
-                isCached: false,
-                movement: movData,
-                updatedJobCardVersion: nextVersion
-              };
-            });
-
-            txResult = await Promise.race([
-              txPromise,
-              new Promise((_, reject) => setTimeout(() => reject(new Error("Admin SDK inventory transaction timeout")), 3500))
-            ]);
-          }
-        } catch (adminErr: any) {
-          if (adminErr.statusCode === 400 || adminErr.statusCode === 404) {
-            throw adminErr;
-          }
-          console.warn("[INVENTORY] Admin SDK transaction unavailable, using REST API:", adminErr?.message || adminErr);
-        }
-      }
-
-      // REST Fallback for material movement
-      if (!txResult) {
-        // Idempotency check via REST
-        const existingIdemp = await firestoreRestGetDoc("mfr_idempotency_keys", opKey);
-        if (existingIdemp) {
-          return res.json(existingIdemp.result || { success: true, cached: true, ...existingIdemp });
-        }
-
-        // Job Card lookup via inMemory & REST
-        let activeJobId = jobCardNo.toUpperCase();
-        let jobCardData = inMemoryJobCards.get(activeJobId) || inMemoryJobCards.get(jobCardNo);
-        if (!jobCardData) {
-          jobCardData = await firestoreRestGetDoc("mfr_job_cards", activeJobId);
-          if (!jobCardData && jobCardNo !== activeJobId) {
-            jobCardData = await firestoreRestGetDoc("mfr_job_cards", jobCardNo);
-            activeJobId = jobCardNo;
-          }
-        }
-
-        if (!jobCardData) {
-          return res.status(404).json({ success: false, error: `Job Card '${jobCardNo}' not found.` });
-        }
-
-        const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
-        if (!isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
-          if (reqQty > currentAvailableQty) {
-            return res.status(400).json({
-              success: false,
-              error: `Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
-            });
-          }
-        }
-
-        const newBalance = Math.max(0, currentAvailableQty - reqQty);
-        const nextVersion = (jobCardData.version || 1) + 1;
-
-        const updatedJobCard = {
-          ...jobCardData,
-          currentDepartment: normTo,
-          status: normTo === "Completed" ? "Completed" : "Pending Acceptance",
-          currentQty: newBalance,
-          balanceQty: normTo === "Completed" ? 0 : newBalance,
-          version: nextVersion,
-          updatedAt: now,
-          updatedBy: authoritativeUserName
-        };
-
-        const movData = {
-          movementId: movId,
-          jobCardNo: jobCardData.jobCardNo || activeJobId,
-          fromDepartment: normFrom,
-          toDepartment: normTo,
-          quantity: reqQty,
-          transferBy: authoritativeUserName,
-          transferDate: now,
-          accepted: false,
-          initiatedByUserId: authoritativeUserId,
-          initiatedByUserName: authoritativeUserName,
-          authUid: authUid,
-          remarks: remarks || "",
-          processDetails: processDetails || null,
-          isIssueRequest: !!isIssueRequest
-        };
-
-        const idempData = {
-          operationId: opKey,
-          movementId: movId,
-          jobCardNo: jobCardData.jobCardNo || activeJobId,
-          quantity: reqQty,
-          processedAt: now,
-          userId: authoritativeUserId,
-          authUid: authUid,
-          result: {
-            success: true,
-            cached: true,
-            movement: movData,
-            updatedJobCardVersion: nextVersion
-          }
-        };
-
-        const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-        const auditData = {
-          id: auditId,
-          timestamp: now,
+        remarks: movement.remarks || body.remarks,
+        processDetails: movement.processDetails || body.processDetails,
+        isIssueRequest: Boolean(movement.isIssueRequest || body.isIssueRequest),
+        requestedQty: movement.requestedQty || body.requestedQty,
+        requestedUnit: movement.requestedUnit || body.requestedUnit,
+        transactionType: movement.transactionType || body.transactionType,
+        extra: movement,
+        actor: {
           userId: authUid,
-          userName: authoritativeUserName,
-          action: "MATERIAL_MOVEMENT",
-          details: `Transferred ${reqQty} KG of Job Card ${jobCardData.jobCardNo || activeJobId} from ${normFrom} to ${normTo} (Version ${nextVersion})`
-        };
-
-        await Promise.all([
-          firestoreRestSetDoc("mfr_job_cards", activeJobId, updatedJobCard),
-          firestoreRestSetDoc("mfr_movements", movId, movData),
-          firestoreRestSetDoc("mfr_idempotency_keys", opKey, idempData),
-          firestoreRestSetDoc("mfr_audit_logs", auditId, auditData)
-        ]);
-
-        inMemoryMovements.set(movId, movData);
-        inMemoryJobCards.set(activeJobId.toUpperCase(), updatedJobCard);
-
-        return res.json({
-          success: true,
-          cached: false,
-          movement: movData,
-          updatedJobCardVersion: nextVersion
-        });
-      }
-
-      if (txResult.isCached) {
-        const cached = txResult.data;
-        if (cached?.result) {
-          return res.json(cached.result);
+          userName: requester.name || requester.userId || "Authorized User",
+          role: requester.role || "staff",
+          department: requester.department || "",
+          allowedDepartments: Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : [],
+          accessList: Array.isArray(requester.accessList) ? requester.accessList : []
         }
-        return res.json({
-          success: true,
-          cached: true,
-          movement: cached?.movement || {
-            movementId: cached?.movementId,
-            jobCardNo: cached?.jobCardNo,
-            quantity: cached?.quantity,
-            authUid: cached?.authUid
-          },
-          updatedJobCardVersion: cached?.updatedJobCardVersion,
-          ...cached
-        });
+      };
+
+      let result;
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          result = await db.runTransaction(async (t: any) => {
+            const txStore: SimpleStore = {
+              async get(collection: string, id: string) {
+                const snap = await t.get(db.collection(collection).doc(id));
+                return snap.exists ? snap.data() : null;
+              },
+              async set(collection: string, id: string, data: any) {
+                t.set(db.collection(collection).doc(id), data);
+              },
+              async list() {
+                return [];
+              }
+            };
+            return commitMaterialMovementTx(txStore, input);
+          });
+        } catch (txErr: any) {
+          console.warn("[MOVEMENT COMMIT] Admin transaction failed, using exclusive persist fallback:", txErr?.message || txErr);
+        }
       }
 
-      if (txResult && txResult.movement) {
-        inMemoryMovements.set(txResult.movement.movementId, txResult.movement);
+      if (result && !result.success) {
+        return res.status(result.statusCode || 400).json({ success: false, error: result.error });
       }
-      if (txResult && txResult.updatedJobCard) {
-        inMemoryJobCards.set(String(txResult.updatedJobCard.jobCardNo).toUpperCase(), txResult.updatedJobCard);
+
+      if (!result) {
+        const backing = createFirestoreSimpleStore();
+        const preloadedMovements = await backing.list("mfr_movements");
+        const store: SimpleStore = {
+          get: (c, id) => backing.get(c, id),
+          list: async () => preloadedMovements,
+          set: async () => {}
+        };
+        result = await commitMaterialMovementTx(store, { ...input, preloadedMovements });
+        if (result.success && !result.cached && result.writes && result.writes.length > 0) {
+          await persistDocsExclusive(result.writes);
+        }
       }
+
+      if (!result.success) {
+        return res.status(result.statusCode || 400).json({ success: false, error: result.error });
+      }
+
+      if (result.movement) inMemoryMovements.set(result.movement.movementId, result.movement);
+      if (result.updatedJobCard) {
+        inMemoryJobCards.set(String(result.updatedJobCard.jobCardNo).toUpperCase(), result.updatedJobCard);
+      }
+
+      broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: result.movement?.movementId, jobCardNo: result.movement?.jobCardNo });
+      if (result.updatedJobCard) {
+        broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: result.updatedJobCard.jobCardNo });
+      }
+      broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
 
       return res.json({
         success: true,
-        cached: false,
-        movement: txResult.movement,
-        updatedJobCardVersion: txResult.updatedJobCardVersion
+        cached: Boolean(result.cached),
+        movement: result.movement,
+        updatedJobCard: result.updatedJobCard,
+        updatedJobCardVersion: result.updatedJobCard?.version
       });
     } catch (err: any) {
-      console.error("[INVENTORY] Material transaction error:", err);
-      const status = err.statusCode || (err.message && err.message.includes("Insufficient") ? 400 : (err.message && err.message.includes("not found") ? 404 : 400));
+      console.error("[MOVEMENT COMMIT] error:", err);
+      const status = err.statusCode || 500;
       return res.status(status).json({ success: false, error: err.message || "Material movement transaction failed." });
     }
-  });
+  }
 
-  // POST /api/movements/:movementId/accept — Authoritative Atomic Material Acceptance
+  app.post("/api/inventory/movement", requireFirebaseAuth, handleAuthoritativeMovementCommit);
+
   app.post("/api/movements/:movementId/accept", requireFirebaseAuth, async (req, res) => {
     try {
       const authUid = (req as any).authUid;
@@ -3267,17 +3123,18 @@ async function startServer() {
                 const jcData = inMemoryJobCards.get(targetJobCardNo) || (jcSnap?.exists ? jcSnap.data() : null);
                 if (jcData) {
                   const nextVersion = (jcData.version || 1) + 1;
-                  const nextStatus = updatedMov.toDepartment === 'Production' 
-                    ? 'Pending' 
-                    : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
+                  const destDept = applyAcceptanceDepartment(updatedMov);
+                  const nextStatus = nextStatusOnAccept(destDept || updatedMov.toDepartment);
+                  const pendingOutbound = clearPendingOutbound(jcData, updatedMov);
 
                   updatedJobCard = {
                     ...jcData,
-                    currentDepartment: updatedMov.toDepartment,
+                    currentDepartment: destDept,
                     status: nextStatus,
                     currentQty: updatedMov.quantity || jcData.currentQty,
                     balanceQty: updatedMov.quantity || jcData.balanceQty,
                     version: nextVersion,
+                    pendingOutbound,
                     updatedAt: now,
                     updatedBy: authoritativeUserName,
                     updatedByUserId: authoritativeUserId
@@ -3398,14 +3255,16 @@ async function startServer() {
             }
           }
           if (jcData) {
-            const nextStatus = updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
+            const destDept = applyAcceptanceDepartment(updatedMov);
+            const nextStatus = nextStatusOnAccept(destDept || updatedMov.toDepartment);
             const updatedJc = {
               ...jcData,
-              currentDepartment: updatedMov.toDepartment,
+              currentDepartment: destDept,
               status: nextStatus,
               currentQty: updatedMov.quantity || jcData.currentQty,
               balanceQty: updatedMov.quantity || jcData.balanceQty,
               version: (jcData.version || 1) + 1,
+              pendingOutbound: clearPendingOutbound(jcData, updatedMov),
               updatedAt: now,
               updatedBy: authoritativeUserName,
               updatedByUserId: authoritativeUserId
@@ -3652,107 +3511,7 @@ async function startServer() {
   });
 
   // POST /api/movements — Authoritative Movement Creation
-  app.post("/api/movements", requireFirebaseAuth, async (req, res) => {
-    try {
-      const authUid = (req as any).authUid;
-      const requester = (req as any).user;
-      if (!authUid || !requester) {
-        return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
-      }
-
-      const { movement } = req.body || {};
-      if (!movement || !movement.jobCardNo || !movement.fromDepartment || !movement.toDepartment || movement.quantity === undefined || movement.quantity === null) {
-        return res.status(400).json({ success: false, error: "jobCardNo, fromDepartment, toDepartment, and quantity are required." });
-      }
-
-      const numMovQty = Number(movement.quantity);
-      if (isNaN(numMovQty) || !isFinite(numMovQty) || numMovQty <= 0 || numMovQty > 1000000000) {
-        return res.status(400).json({ success: false, error: "Invalid movement quantity: Must be a positive finite number (1 to 1,000,000,000)." });
-      }
-
-      const normFrom = String(movement.fromDepartment).trim();
-      const normTo = String(movement.toDepartment).trim();
-
-      const isValidFrom = VALID_MANUFACTURING_DEPARTMENTS.some(d => d.toLowerCase() === normFrom.toLowerCase());
-      const isValidTo = VALID_MANUFACTURING_DEPARTMENTS.some(d => d.toLowerCase() === normTo.toLowerCase());
-
-      if (!isValidFrom || !isValidTo) {
-        return res.status(400).json({
-          success: false,
-          error: `Invalid department specified. Must be one of: ${VALID_MANUFACTURING_DEPARTMENTS.join(", ")}`
-        });
-      }
-
-      const userRole = String(requester.role || "staff").toLowerCase();
-      const userDept = String(requester.department || "").toLowerCase();
-      const allowedDepts: string[] = [
-        ...(Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : []),
-        ...(Array.isArray(requester.accessList) ? requester.accessList : [])
-      ].map((d: string) => String(d).toLowerCase());
-
-      const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
-      const isDeptAuthorized = isSuperOrAdmin || 
-        userDept === normFrom.toLowerCase() ||
-        allowedDepts.includes(normFrom.toLowerCase());
-
-      if (!isDeptAuthorized) {
-        return res.status(403).json({
-          success: false,
-          error: `Forbidden: User '${requester.name || requester.userId}' (${requester.department}) is not authorized to initiate movements from '${normFrom}'.`
-        });
-      }
-
-      const authoritativeUserId = authUid;
-      const authoritativeUserName = requester.name || requester.userId || "Authorized User";
-      const now = new Date().toISOString();
-      const movId = movement.movementId || `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-
-      const newMov = {
-        ...movement,
-        movementId: movId,
-        fromDepartment: normFrom,
-        toDepartment: normTo,
-        quantity: numMovQty,
-        transferDate: now,
-        accepted: false,
-        transferBy: authoritativeUserName,
-        initiatedByUserId: authoritativeUserId,
-        initiatedByUserName: authoritativeUserName
-      };
-
-      if (true) {
-        try {
-          const dbAdmin = getFirestoreAdmin();
-          if (dbAdmin) {
-            await dbAdmin.collection("mfr_movements").doc(movId).set(newMov);
-          }
-        } catch (e) {
-          console.warn("[MOVEMENTS] Admin SDK write failed, falling back to REST:", e);
-        }
-      }
-
-      await firestoreRestSetDoc("mfr_movements", movId, newMov);
-
-      const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-      const auditData = {
-        id: auditId,
-        timestamp: now,
-        userId: authoritativeUserId,
-        userName: authoritativeUserName,
-        action: "MATERIAL_TRANSFER",
-        details: `Dispatched ${newMov.quantity} KG for ${newMov.jobCardNo} from ${newMov.fromDepartment} to ${newMov.toDepartment}`
-      };
-      await firestoreRestSetDoc("mfr_audit_logs", auditId, auditData);
-
-      broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: movId, jobCardNo: newMov.jobCardNo });
-      broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
-
-      return res.json({ success: true, movement: newMov });
-    } catch (err: any) {
-      console.error("[MOVEMENTS] Error creating movement:", err);
-      return res.status(500).json({ success: false, error: err.message || "Failed to create movement." });
-    }
-  });
+  app.post("/api/movements", requireFirebaseAuth, handleAuthoritativeMovementCommit);
 
   // Global log for all triggered emails (in-memory persistent state)
   interface SentEmail {
@@ -4199,97 +3958,91 @@ async function startServer() {
     try {
       const authUid = (req as any).authUid;
       const requester = (req as any).user;
-      const { jobCardNo, poNumber, orderNo, customer, itemName, itemCode, material, currentLocation, quantity, unit, toProcess, remarks, userId, userName, idempotencyKey } = req.body;
+      const body = req.body || {};
+      const { jobCardNo, quantity, unit, toProcess, remarks, idempotencyKey } = body;
 
-      if (!jobCardNo || !quantity || quantity <= 0) {
+      if (!jobCardNo || !quantity || Number(quantity) <= 0) {
         return res.status(400).json({ success: false, error: "Valid Job Card and quantity > 0 are required." });
       }
       if (toProcess !== "Repacking" && toProcess !== "Replating") {
         return res.status(400).json({ success: false, error: "Process destination must be either 'Repacking' or 'Replating'." });
       }
 
-      const now = new Date();
-      const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-      const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-      const nowIso = now.toISOString();
+      const userRole = String(requester?.role || "").toLowerCase();
+      const userDept = String(requester?.department || "").toLowerCase();
+      const allowed = [...(requester?.allowedDepartments || []), ...(requester?.accessList || [])].map((d: string) => String(d).toLowerCase());
+      const isAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin";
+      if (!isAdmin && userDept !== "store" && !allowed.includes("store")) {
+        return res.status(403).json({ success: false, error: "Forbidden: Store department authorization is required to create process transfers." });
+      }
 
-      let createdDoc: any = null;
-
-      try {
-        const admin = getFirestoreAdmin();
-        if (admin) {
-          const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-          const newTransferNo = `STP-${String(Math.floor(Date.now() % 1000000)).padStart(6, "0")}`;
-          const initialStatus = toProcess === "Repacking" ? "Sent to Repacking" : "Sent to Replating";
-
-          const docData = {
-            transferId,
-            transferNo: newTransferNo,
-            jobCardNo,
-            poNumber: poNumber || "",
-            orderNo: orderNo || "",
-            customer: customer || "",
-            itemName: itemName || "",
-            itemCode: itemCode || "",
-            material: material || "",
-            currentLocation: currentLocation || "",
-            quantity: Number(quantity),
-            unit: unit || "PCS",
-            fromLocation: "Store",
-            toProcess,
-            status: initialStatus,
-            transferDate: dateStr,
-            transferTime: timeStr,
-            createdBy: requester?.name || userName || "Store User",
-            createdByUserId: authUid || userId || "store_user",
-            remarks: remarks || "",
-            idempotencyKey: idempotencyKey || "",
-            createdAt: nowIso,
-            updatedAt: nowIso
-          };
-
-          await admin.collection("mfr_process_transfers").doc(transferId).set(docData);
-          createdDoc = docData;
+      const idemp = String(idempotencyKey || "").trim();
+      if (idemp) {
+        const existing = await firestoreRestGetDoc("mfr_idempotency_keys", `pt-${idemp}`);
+        if (existing?.result?.transfer) {
+          return res.json({ success: true, cached: true, transfer: existing.result.transfer });
         }
-      } catch (adminErr) {
-        console.warn("[PROCESS TRANSFERS] Admin SDK write failed:", adminErr);
       }
 
-      if (!createdDoc) {
-        // Fallback to REST API
-        const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-        const newTransferNo = `STP-${String(Math.floor(Date.now() % 1000000)).padStart(6, "0")}`;
-        const initialStatus = toProcess === "Repacking" ? "Sent to Repacking" : "Sent to Replating";
-
-        createdDoc = {
-          transferId,
-          transferNo: newTransferNo,
-          jobCardNo,
-          poNumber: poNumber || "",
-          orderNo: orderNo || "",
-          customer: customer || "",
-          itemName: itemName || "",
-          itemCode: itemCode || "",
-          material: material || "",
-          currentLocation: currentLocation || "",
-          quantity: Number(quantity),
-          unit: unit || "PCS",
-          fromLocation: "Store",
-          toProcess,
-          status: initialStatus,
-          transferDate: dateStr,
-          transferTime: timeStr,
-          createdBy: requester?.name || userName || "Store User",
-          createdByUserId: authUid || userId || "store_user",
-          remarks: remarks || "",
-          idempotencyKey: idempotencyKey || "",
-          createdAt: nowIso,
-          updatedAt: nowIso
-        };
-
-        await firestoreRestSetDoc("mfr_process_transfers", transferId, createdDoc);
+      const job = await firestoreRestGetDoc("mfr_job_cards", String(jobCardNo).toUpperCase())
+        || await firestoreRestGetDoc("mfr_job_cards", jobCardNo);
+      if (!job) {
+        return res.status(404).json({ success: false, error: `Job Card '${jobCardNo}' not found.` });
+      }
+      const available = Number(job.storeDetails?.qtyRemaining ?? job.currentQty ?? job.orderQty ?? 0);
+      if (Number(quantity) > available) {
+        return res.status(400).json({ success: false, error: `Insufficient store quantity. Requested ${quantity}, available ${available}.` });
       }
 
+      const db = getFirestoreAdmin();
+      let nextSeq = 1;
+      if (db) {
+        await db.runTransaction(async (t: any) => {
+          const seqRef = db.collection("mfr_system_state").doc("process_transfer_seq");
+          const snap = await t.get(seqRef);
+          nextSeq = (snap.exists ? Number(snap.data()?.next || 1) : 1);
+          t.set(seqRef, { next: nextSeq + 1, updatedAt: new Date().toISOString() }, { merge: true });
+        });
+      } else {
+        const seqDoc = await firestoreRestGetDoc("mfr_system_state", "process_transfer_seq");
+        nextSeq = Number(seqDoc?.next || 1);
+        await persistDocsExclusive([{ collection: "mfr_system_state", id: "process_transfer_seq", data: { next: nextSeq + 1, updatedAt: new Date().toISOString() } }]);
+      }
+
+      const now = new Date();
+      const transferId = `STP_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+      const kind = toProcess as ProcessKind;
+      const createdDoc = {
+        transferId,
+        transferNo: formatStpNumber(nextSeq),
+        jobCardNo,
+        poNumber: body.poNumber || "",
+        orderNo: body.orderNo || "",
+        customer: body.customer || "",
+        itemName: body.itemName || "",
+        itemCode: body.itemCode || "",
+        material: body.material || "",
+        currentLocation: body.currentLocation || "",
+        quantity: Number(quantity),
+        unit: unit || "PCS",
+        fromLocation: "Store",
+        toProcess,
+        status: initialProcessTransferStatus(kind),
+        transferDate: now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
+        transferTime: now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+        createdBy: requester?.name || "Store User",
+        createdByUserId: authUid,
+        remarks: remarks || "",
+        idempotencyKey: idemp,
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString()
+      };
+
+      const docs: any[] = [{ collection: "mfr_process_transfers", id: transferId, data: createdDoc }];
+      if (idemp) {
+        docs.push({ collection: "mfr_idempotency_keys", id: `pt-${idemp}`, data: { operationId: `pt-${idemp}`, result: { transfer: createdDoc }, createdAt: now.toISOString() } });
+      }
+      await persistDocsExclusive(docs);
       return res.json({ success: true, transfer: createdDoc });
     } catch (err: any) {
       console.error("POST /api/process-transfers error:", err);
@@ -4297,105 +4050,87 @@ async function startServer() {
     }
   });
 
-  // POST /api/process-transfers/:id/receive
-  app.post("/api/process-transfers/:id/receive", requireFirebaseAuth, async (req, res) => {
-    try {
-      const { id } = req.params;
-      const authUid = (req as any).authUid;
-      const requester = (req as any).user;
-      const { remarks } = req.body || {};
-      const nowIso = new Date().toISOString();
-
-      let currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
-      if (!currentData) {
-        return res.status(404).json({ success: false, error: "Transfer not found" });
-      }
-
-      const newStatus = currentData.toProcess === "Repacking" ? "Received at Repacking" : "Received at Replating";
-      const updates = {
-        ...currentData,
-        status: newStatus,
-        receivedBy: requester?.name || "Operator",
-        receivedByUserId: authUid || "user",
-        receivedAt: nowIso,
-        remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}Received: ${remarks}` : currentData.remarks,
-        updatedAt: nowIso
-      };
-
-      await firestoreRestSetDoc("mfr_process_transfers", id, updates);
-      return res.json({ success: true, transfer: updates });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+  async function mutateProcessTransfer(id: string, action: "receive" | "start" | "complete", req: express.Request, res: express.Response) {
+    const authUid = (req as any).authUid;
+    const requester = (req as any).user;
+    const body = req.body || {};
+    const db = getFirestoreAdmin();
+    let currentData = null as any;
+    if (db) {
+      const snap = await db.collection("mfr_process_transfers").doc(id).get();
+      if (snap.exists) currentData = snap.data();
     }
-  });
-
-  // POST /api/process-transfers/:id/start
-  app.post("/api/process-transfers/:id/start", requireFirebaseAuth, async (req, res) => {
-    try {
-      const { id } = req.params;
-      const authUid = (req as any).authUid;
-      const requester = (req as any).user;
-      const { remarks } = req.body || {};
-      const nowIso = new Date().toISOString();
-
-      let currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
-      if (!currentData) {
-        return res.status(404).json({ success: false, error: "Transfer not found" });
-      }
-
-      const newStatus = currentData.toProcess === "Repacking" ? "Repacking in Process" : "Replating in Process";
-      const updates = {
-        ...currentData,
-        status: newStatus,
-        inProcessBy: requester?.name || "Operator",
-        inProcessByUserId: authUid || "user",
-        inProcessAt: nowIso,
-        remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}In-Process: ${remarks}` : currentData.remarks,
-        updatedAt: nowIso
-      };
-
-      await firestoreRestSetDoc("mfr_process_transfers", id, updates);
-      return res.json({ success: true, transfer: updates });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+    if (!currentData) currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
+    if (!currentData) {
+      return res.status(404).json({ success: false, error: "Transfer not found" });
     }
-  });
+    const kind = currentData.toProcess as ProcessKind;
+    const gate = assertProcessTransferTransition(kind, currentData.status, action);
+    if (gate.ok === false) {
+      return res.status(400).json({ success: false, error: gate.error });
+    }
+    const nowIso = new Date().toISOString();
+    let updates: any = { ...currentData, status: nextStatusForAction(kind, action), updatedAt: nowIso };
+    if (action === "receive") {
+      updates.receivedBy = requester?.name;
+      updates.receivedByUserId = authUid;
+      updates.receivedAt = nowIso;
+    } else if (action === "start") {
+      updates.inProcessBy = requester?.name;
+      updates.inProcessByUserId = authUid;
+      updates.inProcessAt = nowIso;
+    } else {
+      updates.status = "Returned to Store";
+      updates.completedBy = requester?.name;
+      updates.completedByUserId = authUid;
+      updates.completedAt = nowIso;
+      updates.completedQty = Number(body.completedQty);
+      updates.rejectionQty = Number(body.rejectionQty || 0);
+      updates.rejectionReason = body.rejectionReason || "";
+      updates.returnedBy = requester?.name;
+      updates.returnedByUserId = authUid;
+      updates.returnedAt = nowIso;
+      updates.returnedQty = Number(body.completedQty);
+      updates.returnLocationBin = body.returnBin || "";
+      updates.returnRackNo = body.returnRack || "";
+    }
+    if (body.remarks) {
+      updates.remarks = `${currentData.remarks ? currentData.remarks + " | " : ""}${action}: ${body.remarks}`;
+    }
+    await persistDocsExclusive([{ collection: "mfr_process_transfers", id: currentData.transferId || id, data: updates }]);
+    return res.json({ success: true, transfer: updates });
+  }
 
-  // POST /api/process-transfers/:id/complete
-  app.post("/api/process-transfers/:id/complete", requireFirebaseAuth, async (req, res) => {
+  app.post("/api/process-transfers/:id/receive", requireFirebaseAuth, (req, res) => mutateProcessTransfer(req.params.id, "receive", req, res));
+  app.post("/api/process-transfers/:id/start", requireFirebaseAuth, (req, res) => mutateProcessTransfer(req.params.id, "start", req, res));
+  app.post("/api/process-transfers/:id/complete", requireFirebaseAuth, (req, res) => mutateProcessTransfer(req.params.id, "complete", req, res));
+
+  app.get("/api/rm-sku-master", requireFirebaseAuth, async (_req, res) => {
     try {
-      const { id } = req.params;
-      const { completedQty, rejectionQty, rejectionReason, returnBin, returnRack, userId, userName, remarks } = req.body;
-      const nowIso = new Date().toISOString();
-
-      let currentData = await firestoreRestGetDoc("mfr_process_transfers", id);
-      if (!currentData) {
-        return res.status(404).json({ success: false, error: "Transfer not found" });
+      const capturedAt = new Date().toISOString();
+      const list: any[] = [];
+      for (const seed of INVENTORY_RAW_MATERIALS_SEED) {
+        let existing: any = null;
+        const db = getFirestoreAdmin();
+        if (db) {
+          try {
+            const snap = await db.collection("mfr_rm_sku_master").doc(seed.code).get();
+            if (snap.exists) existing = snap.data();
+          } catch (_) {}
+        }
+        if (!existing) {
+          existing = await firestoreRestGetDoc("mfr_rm_sku_master", seed.code);
+        }
+        const incoming = seedToMasterDoc(seed, capturedAt);
+        const merged = mergeCreateIfMissing(existing, incoming);
+        if (!existing) {
+          await persistDocsExclusive([{ collection: "mfr_rm_sku_master", id: seed.code, data: merged }]);
+        }
+        list.push(existing ? existing : merged);
       }
-
-      const updates = {
-        ...currentData,
-        status: "Returned to Store",
-        completedBy: userName || "Operator",
-        completedByUserId: userId || "user",
-        completedAt: nowIso,
-        completedQty: Number(completedQty),
-        rejectionQty: Number(rejectionQty || 0),
-        rejectionReason: rejectionReason || "",
-        returnedBy: userName || "Operator",
-        returnedByUserId: userId || "user",
-        returnedAt: nowIso,
-        returnedQty: Number(completedQty),
-        returnLocationBin: returnBin || "",
-        returnRackNo: returnRack || "",
-        remarks: remarks ? `${currentData.remarks ? currentData.remarks + ' | ' : ''}Completed & Returned: ${remarks}` : currentData.remarks,
-        updatedAt: nowIso
-      };
-
-      await firestoreRestSetDoc("mfr_process_transfers", id, updates);
-      return res.json({ success: true, transfer: updates });
+      return res.json({ success: true, skus: list });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+      return res.status(500).json({ success: false, error: err.message });
     }
   });
 
