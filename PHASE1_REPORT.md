@@ -9,7 +9,7 @@ PHASE: 0–11
 STATUS: COMPLETE (rules/hosting/Cloud Run deploy NOT performed — requires separate approval)
 PROGRESS: 100% of in-repo hardening
 FILES CHANGED: see below
-TESTS: 33 PASS / 0 FAIL (`npm test`)
+TESTS: 45 PASS / 0 FAIL (`npm test`)
 BLOCKERS: none for merge of code; production rollout needs SESSION_SECRET + separate rules deploy approval
 NEXT STEP: human review; do not auto-deploy
 ```
@@ -46,6 +46,7 @@ Post-change validation (this revision):
 - `package.json` — `test` script
 - `BASELINE_REPORT.md`, `PHASE1_REPORT.md`
 - New: `src/hardening/*`, `test/hardening.test.ts`
+- `test-production-hardening.ts` — no longer calls live `/verify-pin` or production Firestore; delegates to mocked tests
 
 ## Files untouched (intentionally)
 
