@@ -1,8 +1,8 @@
 import { MemoryStore } from "../src/hardening/memoryStore";
 import { commitMaterialMovementTx, applyAcceptanceDepartment, isDeptAuthorized } from "../src/hardening/commitMaterialMovement";
-import { assertSessionSecretSafe, createSessionToken, verifySessionToken, isValidFourDigitPin, requireUserPin, extractBearerToken } from "../src/hardening/hmacSession";
+import { assertSessionSecretSafe, createSessionToken, verifySessionToken, isValidFourDigitPin, requireUserPin, extractBearerToken, hmacBearerAuthStatus } from "../src/hardening/hmacSession";
 import { assertProcessTransferTransition } from "../src/hardening/processTransferMachine";
-import { isProtectedSuperAdmin, shouldDeleteUserOnFactoryReset, operationalCollectionsForFactoryReset } from "../src/hardening/factoryResetPolicy";
+import { isProtectedSuperAdmin, shouldDeleteUserOnFactoryReset, operationalCollectionsForFactoryReset, applyFactoryResetToStore } from "../src/hardening/factoryResetPolicy";
 import { INVENTORY_RAW_MATERIALS_SEED, mergeCreateIfMissing, seedToMasterDoc, computeRmRuntimeStock } from "../src/hardening/rmSkuMaster";
 
 let passed = 0;
@@ -88,7 +88,9 @@ async function run() {
     quantity: 50,
     actor: a
   });
+  const jobUnchanged = await store2.get("mfr_job_cards", "JC-1001");
   assert("3 insufficient quantity rejected", rInsuf.success === false && (rInsuf.error || "").toLowerCase().includes("insufficient"));
+  assert("3b job unchanged after insufficient qty", jobUnchanged.currentQty === 20 && jobUnchanged.currentDepartment === "Production" && jobUnchanged.version === 1);
 
   const purchaseStore = new MemoryStore();
   await purchaseStore.set("mfr_job_cards", "PUR-1002", {
@@ -108,7 +110,7 @@ async function run() {
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"], userId: "u-pur" })
   });
   assert("4 Purchase → Raw Material Store dest authoritative", rRm.updatedJobCard?.currentDepartment === "Raw Material Store");
-  assert("accept helper keeps RM dest", applyAcceptanceDepartment(rRm.movement) === "Raw Material Store");
+  assert("4 accept keeps Raw Material Store", applyAcceptanceDepartment(rRm.movement) === "Raw Material Store");
 
   const storeForFg = new MemoryStore();
   await storeForFg.set("mfr_job_cards", "PUR-1003", {
@@ -127,8 +129,8 @@ async function run() {
     quantity: 10,
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"], userId: "u-pur" })
   });
-  // pending dup? from purchase to store is different from RM so OK unless first still pending from same from-to
   assert("5 Purchase → Store dest authoritative", rStore.success && rStore.updatedJobCard?.currentDepartment === "Store");
+  assert("5 accept keeps Store", applyAcceptanceDepartment(rStore.movement) === "Store");
 
   const rUnauth = await commitMaterialMovementTx(store2, {
     operationId: "op-unauth",
@@ -300,6 +302,93 @@ async function run() {
   });
   const conc = await Promise.all([p1, p2]);
   assert("1b two concurrent independent movements succeed", conc[0].success && conc[1].success);
+
+  const concJob = new MemoryStore();
+  await seedJob(concJob);
+  const [cA, cB] = await Promise.all([
+    commitMaterialMovementTx(concJob, {
+      operationId: "conc-a",
+      jobCardNo: "JC-1001",
+      fromDepartment: "Production",
+      toDepartment: "Heat Treatment",
+      quantity: 4,
+      actor: a
+    }),
+    commitMaterialMovementTx(concJob, {
+      operationId: "conc-b",
+      jobCardNo: "JC-1001",
+      fromDepartment: "Production",
+      toDepartment: "Heat Treatment",
+      quantity: 4,
+      actor: a
+    })
+  ]);
+  const pendingHandovers = (await concJob.list("mfr_movements")).filter(
+    (m) => !m.accepted && m.fromDepartment === "Production" && m.toDepartment === "Heat Treatment"
+  );
+  assert(
+    "1c concurrent same-route handovers do not duplicate",
+    pendingHandovers.length === 1 && ((cA.success && !cB.success) || (!cA.success && cB.success) || (cA.cached || cB.cached))
+  );
+
+  const collide = new MemoryStore();
+  await seedJob(collide);
+  const firstId = await commitMaterialMovementTx(collide, {
+    operationId: "op-id-1",
+    movementId: "M-FIXED",
+    jobCardNo: "JC-1001",
+    fromDepartment: "Production",
+    toDepartment: "Plating",
+    quantity: 1,
+    actor: a
+  });
+  const secondId = await commitMaterialMovementTx(collide, {
+    operationId: "op-id-2",
+    movementId: "M-FIXED",
+    jobCardNo: "JC-1001",
+    fromDepartment: "Production",
+    toDepartment: "Packing",
+    quantity: 1,
+    actor: a
+  });
+  assert("movementId collision rejected", firstId.success && secondId.success === false && secondId.statusCode === 409);
+
+  const unknownSku = await commitMaterialMovementTx(new MemoryStore(), {
+    operationId: "op-unknown-sku",
+    jobCardNo: "STOCK-IN-NEW-ALLOY",
+    fromDepartment: "Purchase",
+    toDepartment: "Raw Material Store",
+    quantity: 8,
+    actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
+  });
+  const createdSku = unknownSku.writes?.find((w) => w.collection === "mfr_rm_sku_master");
+  assert("unknown STOCK-IN sku openingQty 0", unknownSku.success && createdSku?.data.openingQty === 0);
+
+  const resetStore = new MemoryStore();
+  await resetStore.set("mfr_users", "super-1", { userId: "super-1", role: "super_admin", name: "Boss", active: true });
+  await resetStore.set("mfr_user_credentials", "super-1", { pinHash: "hash" });
+  await resetStore.set("mfr_users", "staff-1", { userId: "staff-1", role: "staff", name: "Staff" });
+  await resetStore.set("mfr_job_cards", "JC-GONE", { jobCardNo: "JC-GONE", currentDepartment: "Production" });
+  const resetOut = await applyFactoryResetToStore(resetStore, "gen-after-reset");
+  const jobsAfter = await resetStore.list("mfr_job_cards");
+  const usersAfter = await resetStore.list("mfr_users");
+  const credAfter = await resetStore.get("mfr_user_credentials", "super-1");
+  assert("13 factory reset keeps super_admin and credentials", resetOut.preservedSuperAdmins.length === 1 && credAfter?.pinHash === "hash");
+  assert("13b operational jobs disappear", jobsAfter.length === 0 && !usersAfter.some((u) => u.role === "staff"));
+
+  const secret2 = "unit-test-secret-please-change";
+  const oldTok = createSessionToken(secret2, "super-1", "gen-old", 60_000);
+  assert("13c old HMAC invalid after generation rotate", hmacBearerAuthStatus(`Bearer ${oldTok}`, secret2, "gen-after-reset").status === 401);
+  assert("14 tampered token → 401", hmacBearerAuthStatus(`Bearer ${oldTok.slice(0, -3)}zzz`, secret2, "gen-old").status === 401);
+  const expiredTok = createSessionToken(secret2, "super-1", "gen-old", -5);
+  assert("14 expired token → 401", hmacBearerAuthStatus(`Bearer ${expiredTok}`, secret2, "gen-old").status === 401);
+  assert("14 missing bearer → 401", hmacBearerAuthStatus(undefined, secret2, "gen-old").status === 401);
+
+  const specStock = computeRmRuntimeStock(100, [
+    { fromDepartment: "Purchase", toDepartment: "Raw Material Store", accepted: true, quantity: 50, processDetails: { rawMaterialCode: seed.code } },
+    { fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", quantity: 20, processDetails: { rawMaterialCode: seed.code } }
+  ], seed.code);
+  assert("17 SKU reconciliation 100+50-20=130", specStock === 130);
 
   console.log(`\n${passed} PASS / ${failed} FAIL`);
   if (failed > 0) process.exit(1);

@@ -87,3 +87,19 @@ export function extractBearerToken(authorizationHeader: string | undefined | nul
   const token = trimmed.slice(7).trim();
   return token.length > 0 ? token : null;
 }
+
+export function hmacBearerAuthStatus(
+  authorizationHeader: string | undefined | null,
+  secret: string,
+  currentGeneration?: string
+): { status: 200; uid: string } | { status: 401; error: string } {
+  const token = extractBearerToken(authorizationHeader);
+  if (!token) {
+    return { status: 401, error: "Unauthorized: Missing or invalid Authorization header." };
+  }
+  const verified = verifySessionToken(secret, token, currentGeneration);
+  if (!verified.ok) {
+    return { status: 401, error: "Unauthorized: Invalid or expired authentication token." };
+  }
+  return { status: 200, uid: verified.payload.uid || verified.payload.userId };
+}

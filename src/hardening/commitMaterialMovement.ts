@@ -43,6 +43,7 @@ export interface SimpleStore {
   get(collection: string, id: string): Promise<any | null>;
   set(collection: string, id: string, data: any): Promise<void>;
   list(collection: string): Promise<any[]>;
+  runSerialized?: <T>(key: string, fn: () => Promise<T>) => Promise<T>;
 }
 
 function normalizeDept(d: string): string {
@@ -85,6 +86,17 @@ export function isWireRejection(input: MovementCommitInput): boolean {
  * Sets job status Pending Acceptance and currentDepartment = toDepartment for normal transfers.
  */
 export async function commitMaterialMovementTx(
+  store: SimpleStore,
+  input: MovementCommitInput
+): Promise<MovementCommitResult> {
+  const serializeKey = String(input.jobCardNo || input.operationId || "movement").toUpperCase();
+  if (store.runSerialized) {
+    return store.runSerialized(`mov:${serializeKey}`, () => commitMaterialMovementTxInner(store, input));
+  }
+  return commitMaterialMovementTxInner(store, input);
+}
+
+async function commitMaterialMovementTxInner(
   store: SimpleStore,
   input: MovementCommitInput
 ): Promise<MovementCommitResult> {
@@ -176,7 +188,18 @@ export async function commitMaterialMovementTx(
     }
   }
 
-  const movId = input.movementId || `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  let movId = input.movementId || `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  const existingMov = await store.get("mfr_movements", movId);
+  if (existingMov) {
+    if (existingMov.operationId && existingMov.operationId === opKey) {
+      return { success: true, cached: true, movement: existingMov, updatedJobCard: jobCardData, writes: [] };
+    }
+    return {
+      success: false,
+      statusCode: 409,
+      error: `Movement ID '${movId}' already exists.`
+    };
+  }
   const movement = {
     ...(input.extra || {}),
     movementId: movId,
@@ -255,6 +278,28 @@ export async function commitMaterialMovementTx(
   }
   writes.push({ collection: "mfr_audit_logs", id: auditId, data: audit });
   writes.push({ collection: "mfr_notifications", id: notifId, data: notification });
+
+  if (stockIn) {
+    const code = jobCardNo.replace(/^STOCK-IN-/i, "").trim();
+    if (code) {
+      const existingSku = await store.get("mfr_rm_sku_master", code);
+      if (!existingSku) {
+        writes.push({
+          collection: "mfr_rm_sku_master",
+          id: code,
+          data: {
+            code,
+            name: code,
+            category: "",
+            unit: "KG",
+            location: "",
+            openingQty: 0,
+            openingCapturedAt: now
+          }
+        });
+      }
+    }
+  }
 
   const resultPayload = {
     success: true,

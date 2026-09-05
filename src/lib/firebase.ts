@@ -1844,9 +1844,13 @@ export class DBService {
         throw new Error(errJson.error || `Failed to accept cargo (status ${res.status}).`);
       }
     } catch (apiErr: any) {
-      if (apiErr.message && (apiErr.message.includes("authorized") || apiErr.message.includes("session") || apiErr.message.includes("already been accepted") || apiErr.message.includes("not found"))) {
-        throw apiErr;
-      }
+      const msg = String(apiErr?.message || apiErr || '');
+      const isNetwork =
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError') ||
+        msg.includes('abort') ||
+        msg.includes('Load failed');
+      if (!isNetwork) throw apiErr;
       console.warn("[ACCEPT API] Backend API call failed:", apiErr);
     }
 

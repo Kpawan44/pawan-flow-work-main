@@ -3931,15 +3931,17 @@ async function startServer() {
   app.get("/api/process-transfers", requireFirebaseAuth, async (req, res) => {
     try {
       let transfersList: any[] = [];
+      let readViaAdmin = false;
       try {
         const admin = getFirestoreAdmin();
         if (admin) {
           const snap = await admin.collection("mfr_process_transfers").orderBy("createdAt", "desc").get();
           transfersList = snap.docs.map((d: any) => d.data());
+          readViaAdmin = true;
         }
       } catch (adminErr) {}
 
-      if (transfersList.length === 0) {
+      if (!readViaAdmin) {
         const restResult = await firestoreRestQueryAll("mfr_process_transfers");
         if (Array.isArray(restResult)) {
           transfersList = restResult;
@@ -4097,7 +4099,39 @@ async function startServer() {
     if (body.remarks) {
       updates.remarks = `${currentData.remarks ? currentData.remarks + " | " : ""}${action}: ${body.remarks}`;
     }
-    await persistDocsExclusive([{ collection: "mfr_process_transfers", id: currentData.transferId || id, data: updates }]);
+    const docs: Array<{ collection: string; id: string; data: any }> = [
+      { collection: "mfr_process_transfers", id: currentData.transferId || id, data: updates }
+    ];
+    if (action === "complete") {
+      const auditId = `AL-${Date.now()}-pt`;
+      docs.push({
+        collection: "mfr_audit_logs",
+        id: auditId,
+        data: {
+          id: auditId,
+          timestamp: nowIso,
+          userId: authUid,
+          userName: requester?.name || authUid,
+          action: "PROCESS_TRANSFER_COMPLETE",
+          details: `Completed process transfer ${currentData.transferNo || id} and returned ${updates.completedQty || 0} to Store.`
+        }
+      });
+      const notifId = `N-${Date.now()}-pt`;
+      docs.push({
+        collection: "mfr_notifications",
+        id: notifId,
+        data: {
+          notificationId: notifId,
+          department: "Store",
+          title: "Process Transfer Returned",
+          message: `${requester?.name || "Store"} returned ${updates.completedQty || 0} of ${currentData.jobCardNo} to Store from ${currentData.toProcess}.`,
+          userId: "all_store",
+          read: false,
+          createdAt: nowIso
+        }
+      });
+    }
+    await persistDocsExclusive(docs);
     return res.json({ success: true, transfer: updates });
   }
 

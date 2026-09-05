@@ -2,6 +2,7 @@ import { SimpleStore } from "./commitMaterialMovement";
 
 export class MemoryStore implements SimpleStore {
   private data = new Map<string, Map<string, any>>();
+  private serializeTail: Promise<unknown> = Promise.resolve();
 
   private col(name: string): Map<string, any> {
     if (!this.data.has(name)) this.data.set(name, new Map());
@@ -23,5 +24,19 @@ export class MemoryStore implements SimpleStore {
 
   async delete(collection: string, id: string): Promise<void> {
     this.col(collection).delete(id);
+  }
+
+  async clearCollection(collection: string): Promise<void> {
+    this.data.delete(collection);
+  }
+
+  async runSerialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    void key;
+    const run = this.serializeTail.then(fn, fn);
+    this.serializeTail = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
   }
 }

@@ -28,7 +28,7 @@ Post-change validation (this revision):
 
 | Check | Result |
 |---|---|
-| `npm test` | **33 PASS / 0 FAIL** |
+| `npm test` | **45 PASS / 0 FAIL** (mocked MemoryStore; production Firestore not used) |
 | `npm run lint` (`tsc --noEmit`) | **PASS** |
 | `npm run build` | **PASS** (Vite + `dist/server.cjs`) |
 | Production Firestore | **Not touched** |

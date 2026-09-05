@@ -24,7 +24,7 @@ import { JobCard, MaterialMovement, Department, UserProfile, ProcessTransfer } f
 import { getJobCardProcessMetrics, getJobCardDepartmentPending, getWireScrapQty } from '../lib/metrics';
 import PendingBreakdownModal from './PendingBreakdownModal';
 import RawMaterialReportView from './RawMaterialReportView';
-import { INVENTORY_RAW_MATERIALS } from './RawMaterialRequestModal';
+import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 
 interface ReportViewProps {
   jobCards: JobCard[];
@@ -510,7 +510,8 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
         break;
       }
       case 'raw_material_summary': {
-        baseData = INVENTORY_RAW_MATERIALS.map(item => {
+        baseData = getDynamicRawMaterialsStock(movements).map(item => {
+          const opening = INVENTORY_RAW_MATERIALS.find(s => s.code === item.code)?.availableStock ?? item.availableStock;
           const totalIssued = movements
             .filter(m => 
               m.fromDepartment === 'Raw Material Store' && 
@@ -534,17 +535,17 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
               (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-'))
             )
             .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
-          const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
+          const currentStock = item.availableStock;
           return {
             'Material Code': item.code,
             'Material Name': item.name,
             'Category': item.category,
             'Bin Location': item.location,
-            'Starting Stock (KG)': item.availableStock,
+            'Starting Stock (KG)': opening,
             'Inwarded Stock (KG)': totalPurchased,
             'Total Issued (KG)': totalIssued,
             'Current Stock (KG)': currentStock,
-            'Reserve Status (%)': Math.round(item.availableStock > 0 ? (currentStock / item.availableStock) * 100 : 0)
+            'Reserve Status (%)': Math.round(opening > 0 ? (currentStock / opening) * 100 : 0)
           };
         });
         break;
