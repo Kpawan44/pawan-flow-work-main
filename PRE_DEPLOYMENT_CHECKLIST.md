@@ -43,9 +43,10 @@ Commit validated locally: latest on this branch (source-only audit; no productio
 | Factory Reset preserves `super_admin` | PASS (mocked) | never run against production |
 | SESSION_SECRET fail-closed in production | PASS | `assertSessionSecretSafe` |
 | Server user create requires 4-digit PIN | PASS | `requireUserPin` |
-| AdminConsole still defaults empty PIN to `1234` | **OPEN** | UI path; server would accept an explicit `1234` if sent. Fix before or immediately after first backend release. **Not auto-changed in Phase 2.** |
-| `updateResetGeneration` Admin then REST | **OPEN** | same document may be written twice. **Not auto-changed in Phase 2.** |
-| `POST /api/users/:id/set-pin` REST-only | **OPEN** | not movement path |
+| AdminConsole empty PIN | PASS | `resolveExplicitUserPin`; placeholder `1234` is format hint only |
+| `updateResetGeneration` Admin then REST | PASS | `persistExclusive`; REST only if Admin unavailable/fails |
+| Other leftover Admin+REST same-document writes | PASS (source audit) | `initSystemState`, deleted-user tombstone, job-card delete/purge use `persistExclusive` |
+| `POST /api/users/:id/set-pin` REST-only | **OPEN** | not a dual Admin+REST write; REST credential persist |
 
 ---
 
