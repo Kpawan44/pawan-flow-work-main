@@ -1,5 +1,6 @@
 import { MemoryStore } from "../src/hardening/memoryStore";
-import { commitMaterialMovementTx, applyAcceptanceDepartment, isDeptAuthorized } from "../src/hardening/commitMaterialMovement";
+import { commitMaterialMovementTx, applyAcceptanceDepartment, isDeptAuthorized, nextStatusOnAccept, clearPendingOutbound } from "../src/hardening/commitMaterialMovement";
+import { isJobInDepartmentOperationsQueue } from "../src/hardening/departmentWorkbench";
 import { assertSessionSecretSafe, createSessionToken, verifySessionToken, isValidFourDigitPin, requireUserPin, extractBearerToken, hmacBearerAuthStatus, resolveExplicitUserPin } from "../src/hardening/hmacSession";
 import { persistExclusive } from "../src/hardening/exclusivePersist";
 import { assertProcessTransferTransition } from "../src/hardening/processTransferMachine";
@@ -435,6 +436,76 @@ async function run() {
     restCalls += 1;
   });
   assert("B REST when Admin SDK unavailable", !noAdmin.wroteViaAdmin && noAdmin.restCalled && adminCalls === 0 && restCalls === 1);
+
+  // Production ACCEPT: persist same job, status Pending, still on operations after reload
+  {
+    const store = new MemoryStore();
+    const jobNo = "JC-PROD-ACC-1";
+    await store.set("mfr_job_cards", jobNo, {
+      jobCardNo: jobNo,
+      itemName: "EN8 Shaft",
+      processType: "Purchase",
+      orderQty: 80,
+      currentQty: 80,
+      currentDepartment: "Purchase",
+      status: "In Process",
+      version: 1
+    });
+    const send = await commitMaterialMovementTx(store, {
+      operationId: "op-prod-acc-send",
+      jobCardNo: jobNo,
+      fromDepartment: "Purchase",
+      toDepartment: "Production",
+      quantity: 80,
+      actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"], userId: "u-pur" })
+    });
+    const pendingJob = await store.get("mfr_job_cards", jobNo);
+    const pendingMov = send.movement;
+    const incomingPending =
+      pendingMov && pendingMov.toDepartment === "Production" && pendingMov.accepted === false;
+    const opsWhilePending = isJobInDepartmentOperationsQueue("Production", pendingJob, [pendingMov]);
+    assert("C pending Production receipt is not on operations queue", incomingPending && opsWhilePending === false);
+    assert("C pending job is persisted (not deleted)", Boolean(pendingJob) && pendingJob.status === "Pending Acceptance");
+
+    const dest = applyAcceptanceDepartment(pendingMov);
+    const nextStatus = nextStatusOnAccept(dest || pendingMov.toDepartment);
+    const acceptedMov = {
+      ...pendingMov,
+      accepted: true,
+      acceptedBy: "Prod User",
+      acceptedDate: "2026-09-05T12:00:00.000Z",
+      modifiedAction: "ACCEPT"
+    };
+    const acceptedJob = {
+      ...pendingJob,
+      currentDepartment: dest,
+      status: nextStatus,
+      currentQty: acceptedMov.quantity || pendingJob.currentQty,
+      pendingOutbound: clearPendingOutbound(pendingJob, acceptedMov),
+      version: (pendingJob.version || 1) + 1
+    };
+    await store.set("mfr_movements", acceptedMov.movementId, acceptedMov);
+    await store.set("mfr_job_cards", jobNo, acceptedJob);
+
+    const reloadedJobs = await store.list("mfr_job_cards");
+    const reloadedMovements = await store.list("mfr_movements");
+    const stillThere = reloadedJobs.find((j: any) => j.jobCardNo === jobNo);
+    const stillMov = reloadedMovements.find((m: any) => m.movementId === acceptedMov.movementId);
+    const opsAfterAccept = isJobInDepartmentOperationsQueue("Production", stillThere, reloadedMovements);
+    const incomingAfterAccept = reloadedMovements.some(
+      (m: any) => m.toDepartment === "Production" && !m.accepted && !m.deletedDate && m.jobCardNo === jobNo
+    );
+
+    assert("C accept does not delete job or movement", Boolean(stillThere) && Boolean(stillMov) && reloadedJobs.length === 1);
+    assert("C accept status is Pending at Production", stillThere.status === "Pending" && stillThere.currentDepartment === "Production");
+    assert("C Purchase processType job remains on Production operations after accept", opsAfterAccept === true);
+    assert("C accepted movement leaves incoming inbox", incomingAfterAccept === false && stillMov.accepted === true);
+    assert("C job identity and qty retained", stillThere.jobCardNo === jobNo && stillThere.itemName === "EN8 Shaft" && stillThere.currentQty === 80);
+
+    const dest2 = applyAcceptanceDepartment(stillMov);
+    const status2 = nextStatusOnAccept(dest2 || stillMov.toDepartment);
+    assert("C second accept is idempotent (same job, same status, no extra job)", status2 === "Pending" && reloadedJobs.length === 1);
+  }
 
   console.log(`\n${passed} PASS / ${failed} FAIL`);
   if (failed > 0) process.exit(1);

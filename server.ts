@@ -3088,10 +3088,27 @@ async function startServer() {
 
               let jcSnap: any = null;
               let jcRef: any = null;
-              const targetJobCardNo = (movData.jobCardNo || '').toUpperCase().trim();
-              if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
-                jcRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
-                jcSnap = await transaction.get(jcRef);
+              const rawJobCardNo = String(movData.jobCardNo || "").trim();
+              const targetJobCardNo = rawJobCardNo.toUpperCase();
+              if (targetJobCardNo && !targetJobCardNo.startsWith("STOCK-IN-")) {
+                const upperRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
+                const upperSnap = await transaction.get(upperRef);
+                let asIsSnap: any = null;
+                let asIsRef: any = null;
+                if (rawJobCardNo && rawJobCardNo !== targetJobCardNo) {
+                  asIsRef = db.collection("mfr_job_cards").doc(rawJobCardNo);
+                  asIsSnap = await transaction.get(asIsRef);
+                }
+                if (upperSnap.exists) {
+                  jcRef = upperRef;
+                  jcSnap = upperSnap;
+                } else if (asIsSnap?.exists) {
+                  jcRef = asIsRef;
+                  jcSnap = asIsSnap;
+                } else {
+                  jcRef = upperRef;
+                  jcSnap = upperSnap;
+                }
               }
 
               // ============================================================
@@ -3133,8 +3150,11 @@ async function startServer() {
               transaction.set(movRef, updatedMov);
 
               let updatedJobCard: any = null;
-              if (jcRef && (jcSnap?.exists || inMemoryJobCards.has(targetJobCardNo))) {
-                const jcData = inMemoryJobCards.get(targetJobCardNo) || (jcSnap?.exists ? jcSnap.data() : null);
+              if (jcRef && (jcSnap?.exists || inMemoryJobCards.has(targetJobCardNo) || inMemoryJobCards.has(rawJobCardNo))) {
+                const jcData =
+                  inMemoryJobCards.get(targetJobCardNo) ||
+                  inMemoryJobCards.get(rawJobCardNo) ||
+                  (jcSnap?.exists ? jcSnap.data() : null);
                 if (jcData) {
                   const nextVersion = (jcData.version || 1) + 1;
                   const destDept = applyAcceptanceDepartment(updatedMov);
