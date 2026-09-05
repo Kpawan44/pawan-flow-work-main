@@ -1451,7 +1451,6 @@ async function startServer() {
         success: true,
         token: sessionToken,
         sessionToken,
-        customToken: sessionToken,
         user: {
           userId: userData.userId,
           name: userData.name || "",
