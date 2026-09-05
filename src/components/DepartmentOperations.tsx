@@ -36,6 +36,7 @@ import {
 } from 'lucide-react';
 import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer } from '../types';
 import { DBService } from '../lib/firebase';
+import { isJobInDepartmentOperationsQueue } from '../hardening/departmentWorkbench';
 import RawMaterialRequestModal, { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
@@ -1638,6 +1639,10 @@ Please adjust the quantity or request additional raw material issue.`);
         
         // Mark as done
         setAcceptedMovementIds(prev => ({ ...prev, [mov.movementId]: 'done' }));
+        // Incoming inbox drops accepted movements by design; show the same job on operations.
+        if (activeDept !== 'Dispatch' && activeDept !== 'Purchase') {
+          setActiveSubView('operations');
+        }
       } catch (err) {
         console.error("Failed to accept movement:", err);
         // Revert UI state on error so user can try again
@@ -1680,76 +1685,8 @@ Please adjust the quantity or request additional raw material issue.`);
            m.issueStatus !== 'Rejected';
   });
 
-  // B. Job cards currently assigned to this department
-  const activeDepartmentJobs = jobCards.filter(c => {
-    if (c.completed) return false;
-    
-    // If the job card is pending custody acceptance BY THE CURRENT DEPARTMENT,
-    // it shouldn't show up in the operational/processing queue until accepted.
-    if (c.status === 'Pending Acceptance' && activeDept !== 'Dispatch') {
-      const hasUnacceptedIncomingToMe = movements.some(m => 
-        m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && 
-        m.toDepartment === activeDept && 
-        !m.accepted
-      );
-      if (hasUnacceptedIncomingToMe) {
-        return false;
-      }
-    }
-    // Dispatch owns tracking when completed or creating, otherwise matches exactly
-    if (activeDept === 'Dispatch') {
-      return true;
-    }
-    if (activeDept === 'Purchase') {
-      const totalMovedFromPurchase = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Purchase')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingPurchaseQty = c.orderQty - totalMovedFromPurchase;
-      return (c.processType === 'Purchase' && (c.currentDepartment === 'Purchase' || pendingPurchaseQty > 0));
-    }
-    if (activeDept === 'Production') {
-      const totalMovedFromProd = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingProdQty = c.orderQty - totalMovedFromProd;
-      return (c.processType !== 'Purchase' && (c.currentDepartment === 'Production' || pendingProdQty > 0));
-    }
-    if (activeDept === 'Heat Treatment') {
-      const totalReceivedAtHT = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Heat Treatment' && m.accepted)
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const totalRoutedFromHT = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Heat Treatment')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingHTQty = totalReceivedAtHT - totalRoutedFromHT - (c.heatTreatmentDetails?.rejectionQty || 0);
-      
-      const isHTRequiredOrRouted = c.heatTreatmentRequired || totalReceivedAtHT > 0 || c.currentDepartment === 'Heat Treatment';
-      if (!isHTRequiredOrRouted) return false;
-
-      return c.currentDepartment === 'Heat Treatment' || (totalReceivedAtHT > 0 && pendingHTQty > 0);
-    }
-    if (activeDept === 'Plating') {
-      const totalReceivedAtPlating = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Plating' && m.accepted)
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const totalRoutedFromPlating = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Plating')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingPlatingQty = totalReceivedAtPlating - totalRoutedFromPlating - (c.platingDetails?.rejectionQty || 0);
-      return c.currentDepartment === 'Plating' || (totalReceivedAtPlating > 0 && pendingPlatingQty > 0);
-    }
-    if (activeDept === 'Packing') {
-      const totalReceivedAtPacking = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Packing' && m.accepted)
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const totalRoutedFromPacking = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Packing')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingPackingQty = totalReceivedAtPacking - totalRoutedFromPacking - (c.packingDetails?.rejectionQty || 0);
-      return c.currentDepartment === 'Packing' || (totalReceivedAtPacking > 0 && pendingPackingQty > 0);
-    }
-    return c.currentDepartment === activeDept;
-  });
+  // B. Job cards currently assigned to this department (operations queue, not incoming inbox)
+  const activeDepartmentJobs = jobCards.filter(c => isJobInDepartmentOperationsQueue(activeDept, c, movements));
 
   // Calculate WIP quantity for each job in the active department
   const getJobWipQtyForDept = (job: JobCard): number => {

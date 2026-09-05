@@ -14,6 +14,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import { GoogleAuth } from "google-auth-library";
 import { commitMaterialMovementTx, nextStatusOnAccept, SimpleStore, applyAcceptanceDepartment, clearPendingOutbound } from "./src/hardening/commitMaterialMovement";
+import { resolveExistingJobCardDocId } from "./src/hardening/departmentWorkbench";
 import { assertSessionSecretSafe, createSessionToken, verifySessionToken, isValidFourDigitPin, extractBearerToken, requireUserPin } from "./src/hardening/hmacSession";
 import { operationalCollectionsForFactoryReset, isProtectedSuperAdmin, shouldDeleteUserOnFactoryReset } from "./src/hardening/factoryResetPolicy";
 import {
@@ -3087,10 +3088,29 @@ async function startServer() {
 
               let jcSnap: any = null;
               let jcRef: any = null;
-              const targetJobCardNo = (movData.jobCardNo || '').toUpperCase().trim();
-              if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
-                jcRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
-                jcSnap = await transaction.get(jcRef);
+              const rawJobCardNo = String(movData.jobCardNo || "").trim();
+              const targetJobCardNo = rawJobCardNo.toUpperCase();
+              if (targetJobCardNo && !targetJobCardNo.startsWith("STOCK-IN-")) {
+                const upperRef = db.collection("mfr_job_cards").doc(targetJobCardNo);
+                const upperSnap = await transaction.get(upperRef);
+                let asIsSnap: any = null;
+                let asIsRef: any = null;
+                if (rawJobCardNo && rawJobCardNo !== targetJobCardNo) {
+                  asIsRef = db.collection("mfr_job_cards").doc(rawJobCardNo);
+                  asIsSnap = await transaction.get(asIsRef);
+                }
+                const resolvedId = resolveExistingJobCardDocId(rawJobCardNo, (id) => {
+                  if (id === targetJobCardNo) return Boolean(upperSnap.exists);
+                  if (id === rawJobCardNo) return Boolean(asIsSnap?.exists);
+                  return false;
+                });
+                if (resolvedId === targetJobCardNo) {
+                  jcRef = upperRef;
+                  jcSnap = upperSnap;
+                } else if (resolvedId === rawJobCardNo && asIsRef) {
+                  jcRef = asIsRef;
+                  jcSnap = asIsSnap;
+                }
               }
 
               // ============================================================
@@ -3132,8 +3152,8 @@ async function startServer() {
               transaction.set(movRef, updatedMov);
 
               let updatedJobCard: any = null;
-              if (jcRef && (jcSnap?.exists || inMemoryJobCards.has(targetJobCardNo))) {
-                const jcData = inMemoryJobCards.get(targetJobCardNo) || (jcSnap?.exists ? jcSnap.data() : null);
+              if (jcRef && jcSnap?.exists) {
+                const jcData = jcSnap.data();
                 if (jcData) {
                   const nextVersion = (jcData.version || 1) + 1;
                   const destDept = applyAcceptanceDepartment(updatedMov);
@@ -3153,7 +3173,9 @@ async function startServer() {
                     updatedByUserId: authoritativeUserId
                   };
                   transaction.set(jcRef, updatedJobCard);
+                  inMemoryJobCards.set(String(jcRef.id), updatedJobCard);
                   inMemoryJobCards.set(targetJobCardNo, updatedJobCard);
+                  if (rawJobCardNo) inMemoryJobCards.set(rawJobCardNo, updatedJobCard);
                 }
               }
 

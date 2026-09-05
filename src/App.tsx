@@ -1704,8 +1704,7 @@ export default function App() {
     if (!currentUser) return;
     try {
       await DBService.acceptMovement(movementId, currentUser.userId, currentUser.name, remarks, extraFields);
-
-      refreshAllStates();
+      await refreshAllStates();
     } catch (err: any) {
       console.error("Failed to accept movement", err);
       showToast(`Failed to accept material transfer: ${err instanceof Error ? err.message : String(err)}`, "error");
