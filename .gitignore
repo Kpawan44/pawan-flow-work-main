@@ -26,3 +26,5 @@ android/local.properties
 .idea/
 node
 pawan-flow-work-main-git/
+.firebase/
+FETCH_HEAD
