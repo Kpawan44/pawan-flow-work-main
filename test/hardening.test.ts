@@ -200,6 +200,23 @@ async function run() {
   assert("11 process transfer receive from Sent is valid", t1.ok);
   assert("12 process transfer cannot skip to complete", !tSkip.ok);
 
+  // Chained Replating flow testing (Store -> Plating -> Packing -> Store Rack)
+  const pRecv = assertProcessTransferTransition("Replating", "Sent to Replating", "receive");
+  const pStart = assertProcessTransferTransition("Replating", "Received at Replating", "start");
+  const pCompToPacking = assertProcessTransferTransition("Replating", "Replating in Process", "complete");
+  const packRecv = assertProcessTransferTransition("Replating", "Plating Completed - Sent to Packing", "receive");
+  const packStart = assertProcessTransferTransition("Replating", "Received at Packing", "start");
+  const packCompToStore = assertProcessTransferTransition("Replating", "Packing in Process", "complete");
+  const storeAssignRack = assertProcessTransferTransition("Replating", "Packing Completed - Sent to Store", "assign_rack");
+  const prematureRack = assertProcessTransferTransition("Replating", "Replating in Process", "assign_rack");
+
+  assert("12a Plating receives and transitions correctly", pRecv.ok && pRecv.nextStatus === "Received at Replating");
+  assert("12b Plating completes to Sent to Packing", pCompToPacking.ok && pCompToPacking.nextStatus === "Plating Completed - Sent to Packing");
+  assert("12c Packing receives from Plating", packRecv.ok && packRecv.nextStatus === "Received at Packing");
+  assert("12d Packing completes and sends to Store", packCompToStore.ok && packCompToStore.nextStatus === "Packing Completed - Sent to Store");
+  assert("12e Store assigns rack and completes to Returned to Store", storeAssignRack.ok && storeAssignRack.nextStatus === "Returned to Store");
+  assert("12f Premature rack assignment is rejected", !prematureRack.ok);
+
   assert("13 factory reset preserves super_admin", isProtectedSuperAdmin({ role: "super_admin" }) && !shouldDeleteUserOnFactoryReset({ role: "super_admin" }));
   assert("factory reset deletes staff", shouldDeleteUserOnFactoryReset({ role: "staff" }));
   assert("factory reset does not purge mfr_users wholesale", !operationalCollectionsForFactoryReset().includes("mfr_users"));

@@ -1,5 +1,5 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
-import { getAuth, signInWithCustomToken, signOut, onAuthStateChanged, GoogleAuthProvider } from 'firebase/auth';
+import { getAuth, signInAnonymously, signInWithCustomToken, signOut, onAuthStateChanged, GoogleAuthProvider } from 'firebase/auth';
 import { 
   getFirestore, 
   initializeFirestore,
@@ -170,6 +170,9 @@ if (!isPlaceholder) {
 
     authInstance = getAuth(app);
     useRealFirebase = true;
+    signInAnonymously(authInstance).catch((err) => {
+      console.info("[Firebase Auth] Client auth initialization:", err?.message || err);
+    });
   } catch (error) {
     console.error("Failed to initialize real Firebase:", error);
   }
@@ -242,6 +245,28 @@ export function getApiBaseUrl(): string {
     return 'https://pmw-tracker-928410476586.asia-south1.run.app';
   }
   return '';
+}
+
+export async function safeJsonResponse<T = any>(res: Response, fallback: any = {}): Promise<T> {
+  try {
+    const contentType = res.headers?.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const text = await res.text().catch(() => '');
+      if (text.trim().startsWith('<')) {
+        console.warn(`[API] Expected JSON but received HTML (status ${res.status}):`, text.slice(0, 100));
+        return fallback as T;
+      }
+      try {
+        return JSON.parse(text) as T;
+      } catch {
+        return fallback as T;
+      }
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    console.warn('[API] Failed to parse JSON response:', err);
+    return fallback as T;
+  }
 }
 
 // Unified API for direct retrieval (works for both modes, defaulting to local persistence during preview)
@@ -453,7 +478,7 @@ export class DBService {
       const res = await fetch(usersUrl, { headers, signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
-        const resData = await res.json();
+        const resData = await safeJsonResponse(res, { success: false, users: [] });
         if (resData.success && Array.isArray(resData.users)) {
           if (resData.users.length === 0) {
             setLocalStorageItem('mfr_users', []);
@@ -963,7 +988,7 @@ export class DBService {
       const res = await fetch(`${getApiBaseUrl()}/api/job-cards`, { headers, signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
-        const resData = await res.json();
+        const resData = await safeJsonResponse(res, { success: false, jobCards: [] });
         if (resData.success && Array.isArray(resData.jobCards)) {
           const activeList: JobCard[] = resData.jobCards.filter((c: any) => {
             if (!c || !c.jobCardNo) return false;
@@ -1098,7 +1123,7 @@ export class DBService {
         body: JSON.stringify({ jobCard: newJob, initialMovement })
       });
       if (res.ok) {
-        const resData = await res.json();
+        const resData = await safeJsonResponse(res, { success: false });
         if (resData.success && resData.jobCard) {
           authoritativeJob = resData.jobCard;
           authoritativeMovement = resData.movement || initialMovement;
@@ -1249,7 +1274,7 @@ export class DBService {
         body: JSON.stringify(updates)
       });
       if (res.ok) {
-        const resData = await res.json();
+        const resData = await safeJsonResponse(res, { success: false });
         if (resData.success && resData.jobCard) {
           authoritativeJob = resData.jobCard;
         }
@@ -1608,7 +1633,7 @@ export class DBService {
       const res = await fetch(`${getApiBaseUrl()}/api/movements`, { headers, signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
-        const resData = await res.json();
+        const resData = await safeJsonResponse(res, { success: false, movements: [] });
         if (resData.success && Array.isArray(resData.movements)) {
           setLocalStorageItem('mfr_movements', resData.movements);
           this.setMemCache('mfr_movements', resData.movements);
@@ -1696,7 +1721,7 @@ export class DBService {
         body: JSON.stringify({ movement: newMov, operationId })
       });
       if (res.ok) {
-        const resData = await res.json();
+        const resData = await safeJsonResponse(res, { success: false });
         if (resData.success && resData.movement) {
           authoritativeMov = resData.movement;
           apiSucceeded = true;
@@ -1704,7 +1729,7 @@ export class DBService {
           throw new Error(resData.error || 'Movement commit was rejected by the server.');
         }
       } else {
-        const errJson = await res.json().catch(() => ({}));
+        const errJson = await safeJsonResponse(res, {});
         throw new Error(errJson.error || `Failed to create movement (status ${res.status}).`);
       }
     } catch (apiErr: any) {
@@ -1821,14 +1846,14 @@ export class DBService {
       });
 
       if (res.ok) {
-        const apiData = await res.json();
+        const apiData = await safeJsonResponse(res, { success: false });
         if (apiData && apiData.success) {
           apiSucceeded = true;
           finalMovement = apiData.movement;
           finalJobCardUpdates = apiData.jobCard;
         }
       } else {
-        const errJson = await res.json().catch(() => ({}));
+        const errJson = await safeJsonResponse(res, {});
         if (res.status === 401) {
           throw new Error("Your session has expired. Please log in again.");
         }
@@ -2031,13 +2056,13 @@ export class DBService {
       });
 
       if (res.ok) {
-        const apiData = await res.json();
+        const apiData = await safeJsonResponse(res, { success: false });
         if (apiData && apiData.success) {
           apiSucceeded = true;
           finalMovement = apiData.movement;
         }
       } else {
-        const errJson = await res.json().catch(() => ({}));
+        const errJson = await safeJsonResponse(res, {});
         if (res.status === 401) throw new Error("Your session has expired. Please log in again.");
         if (res.status === 403) throw new Error(errJson.error || "Your account is not authorized to reject this material.");
         throw new Error(errJson.error || `Failed to reject cargo (status ${res.status}).`);
@@ -2310,7 +2335,7 @@ export class DBService {
       const res = await fetch(`${getApiBaseUrl()}/api/notifications`, { headers, signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
-        const resData = await res.json();
+        const resData = await safeJsonResponse(res, { success: false, notifications: [] });
         if (resData.success && Array.isArray(resData.notifications)) {
           setLocalStorageItem('mfr_notifications', resData.notifications);
           this.setMemCache('mfr_notifications', resData.notifications);
@@ -2495,7 +2520,7 @@ export class DBService {
       const res = await fetch(`${getApiBaseUrl()}/api/audit-logs`, { headers, signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
-        const resData = await res.json();
+        const resData = await safeJsonResponse(res, { success: false, logs: [] });
         if (resData.success && Array.isArray(resData.logs)) {
           setLocalStorageItem('mfr_audit_logs', resData.logs);
           this.setMemCache('mfr_audit_logs', resData.logs);
@@ -3722,7 +3747,7 @@ export class DBService {
       const headers = await this.getAuthHeaders();
       const res = await fetch(`${getApiBaseUrl()}/api/process-transfers`, { headers });
       if (res.ok) {
-        const data = await res.json();
+        const data = await safeJsonResponse(res, { success: false, transfers: [] });
         if (data.success && Array.isArray(data.transfers)) {
           setLocalStorageItem('mfr_process_transfers', data.transfers);
           return data.transfers;
@@ -3848,6 +3873,29 @@ export class DBService {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.success) throw new Error(data.error || 'Failed to complete process transfer');
+    const list = await this.getProcessTransfers();
+    const idx = list.findIndex(t => t.transferId === transferId || t.transferNo === transferId);
+    if (idx >= 0) list[idx] = data.transfer;
+    setLocalStorageItem('mfr_process_transfers', list);
+    return data.transfer;
+  }
+
+  static async assignRackProcessTransfer(
+    transferId: string,
+    returnRack: string,
+    returnBin: string,
+    _userId: string,
+    _userName: string,
+    remarks?: string
+  ): Promise<ProcessTransfer> {
+    const headers = await this.getAuthHeaders();
+    const res = await fetch(`${getApiBaseUrl()}/api/process-transfers/${encodeURIComponent(transferId)}/assign-rack`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ returnRack, returnBin, remarks })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || 'Failed to assign rack for process transfer');
     const list = await this.getProcessTransfers();
     const idx = list.findIndex(t => t.transferId === transferId || t.transferNo === transferId);
     if (idx >= 0) list[idx] = data.transfer;

@@ -9,7 +9,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import nodemailer from "nodemailer";
 import bcrypt from "bcryptjs";
-import { initializeApp, getApps, getApp, applicationDefault } from "firebase-admin/app";
+import { initializeApp, getApps, getApp, cert, applicationDefault } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import { GoogleAuth } from "google-auth-library";
@@ -50,34 +50,63 @@ process.on('unhandledRejection', (reason: any) => {
 
 let adminApp: any = null;
 let firestoreAdminDb: any = null;
+let adminInitChecked = false;
 
 function getFirestoreAdmin() {
-  if (!firestoreAdminDb) {
-    try {
-      if (getApps().length === 0) {
-        try {
-          adminApp = initializeApp({
-            credential: applicationDefault(),
-            projectId: firebaseProjectId,
-          });
-        } catch (_) {
-          adminApp = initializeApp({
-            projectId: firebaseProjectId,
-          });
-        }
-      } else {
-        adminApp = getApp();
-      }
-      firestoreAdminDb = firestoreDbId && firestoreDbId !== "(default)"
-        ? getFirestore(adminApp, firestoreDbId)
-        : getFirestore(adminApp);
+  if (adminInitChecked) {
+    return firestoreAdminDb;
+  }
+  adminInitChecked = true;
+
+  try {
+    let credential: any = null;
+
+    if (process.env.FIREBASE_SERVICE_ACCOUNT) {
       try {
-        firestoreAdminDb.settings({ ignoreUndefinedProperties: true });
+        const raw = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
+        const sa = raw.startsWith("{") ? JSON.parse(raw) : JSON.parse(fs.readFileSync(raw, "utf8"));
+        credential = cert(sa);
+      } catch (saErr) {
+        console.warn("[Firebase Admin] Could not parse FIREBASE_SERVICE_ACCOUNT:", saErr);
+      }
+    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
+      try {
+        const sa = JSON.parse(fs.readFileSync(process.env.GOOGLE_APPLICATION_CREDENTIALS, "utf8"));
+        if (sa.project_id === firebaseProjectId) {
+          credential = cert(sa);
+        }
       } catch (_) {}
-    } catch (err: any) {
-      console.warn("[Firebase Admin] Initialization note:", err?.message || err);
+    } else if (process.env.GCP_PROJECT === firebaseProjectId || process.env.GOOGLE_CLOUD_PROJECT === firebaseProjectId) {
+      try {
+        credential = applicationDefault();
+      } catch (_) {}
+    }
+
+    if (!credential) {
+      // In web applet environments without a dedicated service account key for firebaseProjectId,
+      // Admin SDK is bypassed in favor of authenticated REST and authoritative local persistence.
+      firestoreAdminDb = null;
       return null;
     }
+
+    if (getApps().length === 0) {
+      adminApp = initializeApp({
+        credential,
+        projectId: firebaseProjectId,
+      });
+    } else {
+      adminApp = getApp();
+    }
+    firestoreAdminDb = firestoreDbId && firestoreDbId !== "(default)"
+      ? getFirestore(adminApp, firestoreDbId)
+      : getFirestore(adminApp);
+    try {
+      firestoreAdminDb.settings({ ignoreUndefinedProperties: true });
+    } catch (_) {}
+  } catch (err: any) {
+    console.warn("[Firebase Admin] Initialization note:", err?.message || err);
+    firestoreAdminDb = null;
+    return null;
   }
   return firestoreAdminDb;
 }
@@ -183,12 +212,17 @@ async function startServer() {
   }
 
   let gcpAuthClient: GoogleAuth | null = null;
+  let gcpAuthProjectId: string | null = null;
   async function getGcpAccessToken(): Promise<string | null> {
     try {
       if (!gcpAuthClient) {
         gcpAuthClient = new GoogleAuth({
           scopes: ["https://www.googleapis.com/auth/datastore", "https://www.googleapis.com/auth/cloud-platform"]
         });
+        gcpAuthProjectId = await gcpAuthClient.getProjectId().catch(() => null);
+      }
+      if (!gcpAuthProjectId || gcpAuthProjectId !== firebaseProjectId) {
+        return null;
       }
       const directToken = await gcpAuthClient.getAccessToken();
       if (typeof directToken === "string" && directToken.length > 10) return directToken;
@@ -202,12 +236,51 @@ async function startServer() {
     }
   }
 
-  function buildFirestoreRestUrl(docPath: string, hasGcpToken: boolean, queryParams: Record<string, string> = {}): string {
+  let cachedFirebaseAuthToken: string | null = null;
+  let cachedFirebaseAuthExpiresAt = 0;
+
+  async function getFirebaseAuthToken(): Promise<string | null> {
+    const apiKey = firebaseConfig?.apiKey;
+    if (!apiKey) return null;
+    if (cachedFirebaseAuthToken && Date.now() < cachedFirebaseAuthExpiresAt) {
+      return cachedFirebaseAuthToken;
+    }
+    try {
+      const authUrl = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${apiKey}`;
+      const res = await fetch(authUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ returnSecureToken: true })
+      });
+      if (res.ok) {
+        const data: any = await res.json();
+        if (data?.idToken) {
+          cachedFirebaseAuthToken = data.idToken;
+          const expiresInSec = parseInt(data.expiresIn || "3600", 10);
+          cachedFirebaseAuthExpiresAt = Date.now() + Math.max(300, expiresInSec - 300) * 1000;
+          return cachedFirebaseAuthToken;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  async function getRestHeaders(): Promise<Record<string, string>> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const gcpToken = await getGcpAccessToken();
+    const token = gcpToken || (await getFirebaseAuthToken());
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+    return headers;
+  }
+
+  function buildFirestoreRestUrl(docPath: string, queryParams: Record<string, string> = {}): string {
     const apiKey = firebaseConfig?.apiKey || "";
     const projId = firebaseProjectId;
     const dbId = firestoreDbId;
     const params = new URLSearchParams();
-    if (!hasGcpToken && apiKey) {
+    if (apiKey) {
       params.append("key", apiKey);
     }
     for (const [k, v] of Object.entries(queryParams)) {
@@ -219,10 +292,8 @@ async function startServer() {
 
   async function firestoreRestGetDoc(collectionName: string, docId: string): Promise<any> {
     try {
-      const gcpToken = await getGcpAccessToken();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
-      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken));
+      const headers = await getRestHeaders();
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`);
 
       const res = await fetch(url, { headers });
       if (res.status === 404) return null;
@@ -253,10 +324,8 @@ async function startServer() {
           limit: 1
         }
       };
-      const gcpToken = await getGcpAccessToken();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
-      const url = buildFirestoreRestUrl(`:runQuery`, Boolean(gcpToken));
+      const headers = await getRestHeaders();
+      const url = buildFirestoreRestUrl(`:runQuery`);
 
       const res = await fetch(url, {
         method: "POST",
@@ -278,13 +347,11 @@ async function startServer() {
   }
 
   async function firestoreRestQueryAll(collectionName: string): Promise<any[]> {
-    const gcpToken = await getGcpAccessToken();
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+    const headers = await getRestHeaders();
 
     // 1. Try simple collection list (documents endpoint with pageSize=300)
     try {
-      const listUrl = buildFirestoreRestUrl(`/${collectionName}`, Boolean(gcpToken), { pageSize: "300" });
+      const listUrl = buildFirestoreRestUrl(`/${collectionName}`, { pageSize: "300" });
       const listRes = await fetch(listUrl, { headers });
       if (listRes.ok) {
         const listData: any = await listRes.json();
@@ -307,7 +374,7 @@ async function startServer() {
 
     // 2. Fallback to runQuery
     try {
-      const runQueryUrl = buildFirestoreRestUrl(`:runQuery`, Boolean(gcpToken));
+      const runQueryUrl = buildFirestoreRestUrl(`:runQuery`);
       const queryBody = {
         structuredQuery: {
           from: [{ collectionId: collectionName }]
@@ -343,10 +410,8 @@ async function startServer() {
   async function firestoreRestSetDoc(collectionName: string, docId: string, data: any): Promise<boolean> {
     try {
       const encodedFields = encodeFirestoreFields(data);
-      const gcpToken = await getGcpAccessToken();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
-      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken));
+      const headers = await getRestHeaders();
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`);
 
       const res = await fetch(url, {
         method: "PATCH",
@@ -361,10 +426,8 @@ async function startServer() {
 
   async function firestoreRestDeleteDoc(collectionName: string, docId: string): Promise<boolean> {
     try {
-      const gcpToken = await getGcpAccessToken();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
-      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken));
+      const headers = await getRestHeaders();
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`);
 
       const res = await fetch(url, { method: "DELETE", headers });
       return res.ok || res.status === 404;
@@ -386,7 +449,7 @@ async function startServer() {
         await batch.commit();
         return { wroteViaAdmin: true };
       } catch (err: any) {
-        console.warn("[PERSIST] Admin SDK write failed, using REST fallback:", err?.message || err);
+        // Fallback to REST persistence gracefully
       }
     }
     await Promise.all(docs.map((d) => firestoreRestSetDoc(d.collection, d.id, d.data)));
@@ -3983,6 +4046,9 @@ async function startServer() {
         return res.status(400).json({ success: false, error: "Process destination must be either 'Repacking' or 'Replating'." });
       }
 
+      // Enforce KGS strictly when sending to Plating
+      const finalUnit = toProcess === "Replating" ? "KGS" : (unit || "PCS");
+
       const userRole = String(requester?.role || "").toLowerCase();
       const userDept = String(requester?.department || "").toLowerCase();
       const allowed = [...(requester?.allowedDepartments || []), ...(requester?.accessList || [])].map((d: string) => String(d).toLowerCase());
@@ -4039,9 +4105,10 @@ async function startServer() {
         material: body.material || "",
         currentLocation: body.currentLocation || "",
         quantity: Number(quantity),
-        unit: unit || "PCS",
+        unit: finalUnit,
         fromLocation: "Store",
         toProcess,
+        flowType: toProcess === "Replating" ? "STORE_PLATING_PACKING_STORE" : "STORE_PACKING_STORE",
         status: initialProcessTransferStatus(kind),
         transferDate: now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
         transferTime: now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
@@ -4065,7 +4132,7 @@ async function startServer() {
     }
   });
 
-  async function mutateProcessTransfer(id: string, action: "receive" | "start" | "complete", req: express.Request, res: express.Response) {
+  async function mutateProcessTransfer(id: string, action: "receive" | "start" | "complete" | "assign_rack", req: express.Request, res: express.Response) {
     const authUid = (req as any).authUid;
     const requester = (req as any).user;
     const body = req.body || {};
@@ -4085,38 +4152,140 @@ async function startServer() {
       return res.status(400).json({ success: false, error: gate.error });
     }
     const nowIso = new Date().toISOString();
-    let updates: any = { ...currentData, status: nextStatusForAction(kind, action), updatedAt: nowIso };
+    let updates: any = { ...currentData, status: nextStatusForAction(kind, action, currentData.status), updatedAt: nowIso };
+
+    const docs: Array<{ collection: string; id: string; data: any }> = [];
+
     if (action === "receive") {
+      if (currentData.status === "Sent to Replating") {
+        updates.platingReceivedBy = requester?.name;
+        updates.platingReceivedByUserId = authUid;
+        updates.platingReceivedAt = nowIso;
+      } else {
+        updates.packingReceivedBy = requester?.name;
+        updates.packingReceivedByUserId = authUid;
+        updates.packingReceivedAt = nowIso;
+      }
       updates.receivedBy = requester?.name;
       updates.receivedByUserId = authUid;
       updates.receivedAt = nowIso;
     } else if (action === "start") {
+      if (currentData.status === "Received at Replating") {
+        updates.platingInProcessBy = requester?.name;
+        updates.platingInProcessByUserId = authUid;
+        updates.platingInProcessAt = nowIso;
+      } else {
+        updates.packingInProcessBy = requester?.name;
+        updates.packingInProcessByUserId = authUid;
+        updates.packingInProcessAt = nowIso;
+      }
       updates.inProcessBy = requester?.name;
       updates.inProcessByUserId = authUid;
       updates.inProcessAt = nowIso;
-    } else {
+    } else if (action === "complete") {
+      // If Plating was in process, it completes Plating and routes to Packing
+      if (currentData.status === "Replating in Process" || (kind === "Replating" && currentData.status !== "Packing in Process")) {
+        updates.status = "Plating Completed - Sent to Packing";
+        updates.platingCompletedBy = requester?.name;
+        updates.platingCompletedByUserId = authUid;
+        updates.platingCompletedAt = nowIso;
+        updates.platingCompletedQty = Number(body.completedQty);
+        updates.platingRejectionQty = Number(body.rejectionQty || 0);
+        updates.platingRejectionReason = body.rejectionReason || "";
+        updates.platingRemarks = body.remarks || "";
+
+        // Backward compatibility
+        updates.completedBy = requester?.name;
+        updates.completedByUserId = authUid;
+        updates.completedAt = nowIso;
+        updates.completedQty = Number(body.completedQty);
+
+        const notifId = `N-${Date.now()}-pt-pack`;
+        docs.push({
+          collection: "mfr_notifications",
+          id: notifId,
+          data: {
+            notificationId: notifId,
+            department: "Packing",
+            title: "Process Material from Plating",
+            message: `${requester?.name || "Plating"} completed plating for ${currentData.jobCardNo} (${updates.platingCompletedQty} KGS) and sent it to Packing.`,
+            userId: "all_packing",
+            read: false,
+            createdAt: nowIso
+          }
+        });
+      } else {
+        // Packing was in process -> completes Packing and dispatches to Store for Rack Assignment
+        updates.status = "Packing Completed - Sent to Store";
+        updates.packingCompletedBy = requester?.name;
+        updates.packingCompletedByUserId = authUid;
+        updates.packingCompletedAt = nowIso;
+        updates.packingCompletedQty = Number(body.completedQty);
+        updates.packingRejectionQty = Number(body.rejectionQty || 0);
+        updates.packingRejectionReason = body.rejectionReason || "";
+        updates.packingRemarks = body.remarks || "";
+
+        // Backward compatibility
+        updates.completedBy = requester?.name;
+        updates.completedByUserId = authUid;
+        updates.completedAt = nowIso;
+        updates.completedQty = Number(body.completedQty);
+
+        const notifId = `N-${Date.now()}-pt-store`;
+        docs.push({
+          collection: "mfr_notifications",
+          id: notifId,
+          data: {
+            notificationId: notifId,
+            department: "Store",
+            title: "Material Arrived — Assign Rack",
+            message: `${requester?.name || "Packing"} completed packing for ${currentData.jobCardNo} (${updates.packingCompletedQty} ${currentData.unit}). Arrived at Store — please assign Rack & Bin location.`,
+            userId: "all_store",
+            read: false,
+            createdAt: nowIso
+          }
+        });
+      }
+    } else if (action === "assign_rack") {
+      // Store Department assigns Rack and completes return into inventory
+      const rack = body.returnRack || body.rackNo || "RACK-01";
+      const bin = body.returnBin || body.binLocation || "BIN-A1";
+      const qtyReturned = Number(currentData.packingCompletedQty ?? currentData.platingCompletedQty ?? currentData.completedQty ?? currentData.quantity);
+
       updates.status = "Returned to Store";
-      updates.completedBy = requester?.name;
-      updates.completedByUserId = authUid;
-      updates.completedAt = nowIso;
-      updates.completedQty = Number(body.completedQty);
-      updates.rejectionQty = Number(body.rejectionQty || 0);
-      updates.rejectionReason = body.rejectionReason || "";
-      updates.returnedBy = requester?.name;
+      updates.returnRackNo = rack;
+      updates.returnLocationBin = bin;
+      updates.rackAssignedBy = requester?.name || "Store User";
+      updates.rackAssignedByUserId = authUid;
+      updates.rackAssignedAt = nowIso;
+      updates.returnedBy = requester?.name || "Store User";
       updates.returnedByUserId = authUid;
       updates.returnedAt = nowIso;
-      updates.returnedQty = Number(body.completedQty);
-      updates.returnLocationBin = body.returnBin || "";
-      updates.returnRackNo = body.returnRack || "";
-    }
-    if (body.remarks) {
-      updates.remarks = `${currentData.remarks ? currentData.remarks + " | " : ""}${action}: ${body.remarks}`;
-    }
-    const docs: Array<{ collection: string; id: string; data: any }> = [
-      { collection: "mfr_process_transfers", id: currentData.transferId || id, data: updates }
-    ];
-    if (action === "complete") {
-      const auditId = `AL-${Date.now()}-pt`;
+      updates.returnedQty = qtyReturned;
+      updates.storeRemarks = body.remarks || "";
+
+      // Update Job Card's store details with assigned rack & bin
+      const job = await firestoreRestGetDoc("mfr_job_cards", String(currentData.jobCardNo).toUpperCase())
+        || await firestoreRestGetDoc("mfr_job_cards", currentData.jobCardNo);
+      if (job) {
+        const updatedStore = {
+          ...(job.storeDetails || {}),
+          rackNo: rack,
+          locationBin: bin
+        };
+        docs.push({
+          collection: "mfr_job_cards",
+          id: job.jobCardNo || currentData.jobCardNo,
+          data: {
+            ...job,
+            storeDetails: updatedStore,
+            currentLocation: `${bin} / ${rack}`,
+            updatedAt: nowIso
+          }
+        });
+      }
+
+      const auditId = `AL-${Date.now()}-pt-rack`;
       docs.push({
         collection: "mfr_audit_logs",
         id: auditId,
@@ -4125,25 +4294,18 @@ async function startServer() {
           timestamp: nowIso,
           userId: authUid,
           userName: requester?.name || authUid,
-          action: "PROCESS_TRANSFER_COMPLETE",
-          details: `Completed process transfer ${currentData.transferNo || id} and returned ${updates.completedQty || 0} to Store.`
-        }
-      });
-      const notifId = `N-${Date.now()}-pt`;
-      docs.push({
-        collection: "mfr_notifications",
-        id: notifId,
-        data: {
-          notificationId: notifId,
-          department: "Store",
-          title: "Process Transfer Returned",
-          message: `${requester?.name || "Store"} returned ${updates.completedQty || 0} of ${currentData.jobCardNo} to Store from ${currentData.toProcess}.`,
-          userId: "all_store",
-          read: false,
-          createdAt: nowIso
+          action: "STORE_RACK_ASSIGNMENT",
+          details: `Store assigned Rack ${rack} (Bin ${bin}) for transfer ${currentData.transferNo} (${currentData.jobCardNo}).`
         }
       });
     }
+
+    if (body.remarks && action !== "complete" && action !== "assign_rack") {
+      updates.remarks = `${currentData.remarks ? currentData.remarks + " | " : ""}${action}: ${body.remarks}`;
+    }
+
+    docs.unshift({ collection: "mfr_process_transfers", id: currentData.transferId || id, data: updates });
+
     await persistDocsExclusive(docs);
     return res.json({ success: true, transfer: updates });
   }
@@ -4151,6 +4313,7 @@ async function startServer() {
   app.post("/api/process-transfers/:id/receive", requireFirebaseAuth, (req, res) => mutateProcessTransfer(req.params.id, "receive", req, res));
   app.post("/api/process-transfers/:id/start", requireFirebaseAuth, (req, res) => mutateProcessTransfer(req.params.id, "start", req, res));
   app.post("/api/process-transfers/:id/complete", requireFirebaseAuth, (req, res) => mutateProcessTransfer(req.params.id, "complete", req, res));
+  app.post("/api/process-transfers/:id/assign-rack", requireFirebaseAuth, (req, res) => mutateProcessTransfer(req.params.id, "assign_rack", req, res));
 
   app.get("/api/rm-sku-master", requireFirebaseAuth, async (_req, res) => {
     try {
@@ -4182,13 +4345,25 @@ async function startServer() {
   });
 
   // Unmatched API routes return 404 JSON (preventing Vite SPA HTML fallback on API endpoints)
-  app.all("/api/*", (req, res) => {
+  app.all(["/api", "/api/*"], (req, res) => {
     res.status(404).json({ success: false, error: `API endpoint ${req.method} ${req.path} not found.` });
+  });
+
+  // Global JSON error handler for Express middleware errors (ensures no HTML stacktrace)
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (res.headersSent) {
+      return next(err);
+    }
+    console.error(`[Server Error] Uncaught error on ${req.method} ${req.path}:`, err);
+    return res.status(err.status || err.statusCode || 500).json({
+      success: false,
+      error: err.message || "Internal Server Error"
+    });
   });
 
   // Static asset serving for production / compiled frontend with aggressive immutable caching
   const distPath = path.join(process.cwd(), 'dist');
-  if (process.env.NODE_ENV === "production" || fs.existsSync(path.join(distPath, 'index.html'))) {
+  if (process.env.NODE_ENV === "production") {
     app.use('/assets', express.static(path.join(distPath, 'assets'), {
       maxAge: '1y',
       immutable: true

@@ -25,6 +25,7 @@ import { getJobCardProcessMetrics, getJobCardDepartmentPending, getWireScrapQty 
 import PendingBreakdownModal from './PendingBreakdownModal';
 import RawMaterialReportView from './RawMaterialReportView';
 import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
+import { DBService, getApiBaseUrl, safeJsonResponse } from '../lib/firebase';
 
 interface ReportViewProps {
   jobCards: JobCard[];
@@ -80,12 +81,15 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
   // Fetch email logs from outbox backend API
   const fetchOutboxHistory = async () => {
     try {
-      const response = await fetch('/api/sent-emails');
+      const headers = await DBService.getAuthHeaders();
+      const response = await fetch(`${getApiBaseUrl()}/api/sent-emails`, { headers });
       if (response.ok) {
-        const data = await response.json();
-        setOutboxHistory(data);
-        if (data.length > 0 && !selectedEmailRecord) {
-          setSelectedEmailRecord(data[0]);
+        const data = await safeJsonResponse(response, []);
+        if (Array.isArray(data)) {
+          setOutboxHistory(data);
+          if (data.length > 0 && !selectedEmailRecord) {
+            setSelectedEmailRecord(data[0]);
+          }
         }
       }
     } catch (e) {
@@ -102,11 +106,10 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
     setEmailErrorMessage('');
     setEmailSuccessMessage('');
     try {
-      const response = await fetch('/api/trigger-daily-summary', {
+      const headers = await DBService.getAuthHeaders();
+      const response = await fetch(`${getApiBaseUrl()}/api/trigger-daily-summary`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers,
         body: JSON.stringify({
           jobCards,
           movements,
@@ -115,11 +118,11 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
       });
 
       if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.details || "Failed to trigger daily email");
+        const errData = await safeJsonResponse(response, { details: 'Failed to trigger daily email' });
+        throw new Error(errData.details || errData.error || `Failed to trigger daily email (status ${response.status})`);
       }
 
-      const data = await response.json();
+      const data = await safeJsonResponse(response, { smtpConfigured: false });
       setEmailSuccessMessage(`Daily automated email report successfully generated! ${data.smtpConfigured ? 'Transmitted to admin team inbox.' : 'Logged to local Outbox system for preview.'}`);
       setSmtpConfigured(data.smtpConfigured);
       

@@ -52,7 +52,13 @@ async function sheetsFetch(url: string, options: RequestInit = {}) {
     console.error(`Google Sheets API Error [${response.status}]:`, errText);
     throw new Error(`Google API: ${response.statusText} (${response.status})`);
   }
-  return response.json();
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    console.error(`Failed to parse Google Sheets response as JSON [${response.status}]:`, text.slice(0, 100));
+    throw new Error(`Google API returned invalid JSON response (${response.status})`);
+  }
 }
 
 /**

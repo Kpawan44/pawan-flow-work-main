@@ -93,6 +93,12 @@ interface DepartmentOperationsProps {
     rack: string, 
     remarks?: string
   ) => Promise<void>;
+  onAssignRackProcessTransfer?: (
+    transferId: string,
+    returnRack: string,
+    returnBin: string,
+    remarks?: string
+  ) => Promise<void>;
 }
 
 export const PREDEFINED_RAW_MATERIALS = [
@@ -121,7 +127,8 @@ export default function DepartmentOperations({
   onCreateProcessTransfer,
   onReceiveProcessTransfer,
   onStartProcessTransfer,
-  onCompleteProcessTransfer
+  onCompleteProcessTransfer,
+  onAssignRackProcessTransfer
 }: DepartmentOperationsProps) {
   const isRawMaterialCompulsory = companyConfig?.requireRawMaterialForProduction !== false;
   
@@ -2214,10 +2221,10 @@ Please adjust the quantity or request additional raw material issue.`);
                     }`}
                   >
                     <PackageCheck className="h-3.5 w-3.5 text-pink-300" />
-                    <span>Repacking (Store)</span>
-                    {(processTransfers || []).filter(t => t.toProcess === 'Repacking' && t.status !== 'Returned to Store').length > 0 && (
+                    <span>Packing Queue</span>
+                    {(processTransfers || []).filter(t => (t.toProcess === 'Repacking' || t.status === 'Plating Completed - Sent to Packing' || t.status === 'Sent to Packing' || t.status === 'Received at Packing' || t.status === 'Packing in Process') && t.status !== 'Returned to Store' && t.status !== 'Packing Completed - Sent to Store').length > 0 && (
                       <span className="bg-pink-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
-                        {(processTransfers || []).filter(t => t.toProcess === 'Repacking' && t.status !== 'Returned to Store').length}
+                        {(processTransfers || []).filter(t => (t.toProcess === 'Repacking' || t.status === 'Plating Completed - Sent to Packing' || t.status === 'Sent to Packing' || t.status === 'Received at Packing' || t.status === 'Packing in Process') && t.status !== 'Returned to Store' && t.status !== 'Packing Completed - Sent to Store').length}
                       </span>
                     )}
                   </button>
@@ -2245,10 +2252,10 @@ Please adjust the quantity or request additional raw material issue.`);
                   }`}
                 >
                   <Sparkles className="h-3.5 w-3.5 text-purple-300" />
-                  <span>Replating (Store)</span>
-                  {(processTransfers || []).filter(t => t.toProcess === 'Replating' && t.status !== 'Returned to Store').length > 0 && (
+                  <span>Replating (KGS)</span>
+                  {(processTransfers || []).filter(t => t.toProcess === 'Replating' && (t.status === 'Sent to Replating' || t.status === 'Received at Replating' || t.status === 'Replating in Process')).length > 0 && (
                     <span className="bg-purple-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
-                      {(processTransfers || []).filter(t => t.toProcess === 'Replating' && t.status !== 'Returned to Store').length}
+                      {(processTransfers || []).filter(t => t.toProcess === 'Replating' && (t.status === 'Sent to Replating' || t.status === 'Received at Replating' || t.status === 'Replating in Process')).length}
                     </span>
                   )}
                 </button>
@@ -6827,6 +6834,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 onReceive={onReceiveProcessTransfer || (async () => {})}
                 onStartProcess={onStartProcessTransfer || (async () => {})}
                 onCompleteAndReturn={onCompleteProcessTransfer || (async () => {})}
+                onAssignRack={onAssignRackProcessTransfer}
               />
             </div>
           )}
@@ -6837,10 +6845,10 @@ Please adjust the quantity or request additional raw material issue.`);
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2 text-pink-600 dark:text-pink-400">
                   <PackageCheck className="h-4 w-4" />
-                  <span>Repacking Queue (Transfers from Store)</span>
+                  <span>Packing Queue (Transfers from Store & Plating)</span>
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Receive material from Store, perform custom repacking/boxing, and return completed batches back to Store stock.
+                  Receive material from Store or Plating, perform packing/boxing, and return completed batches to Store for Rack Assignment.
                 </p>
               </div>
 
@@ -6851,6 +6859,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 onReceive={onReceiveProcessTransfer || (async () => {})}
                 onStartProcess={onStartProcessTransfer || (async () => {})}
                 onCompleteAndReturn={onCompleteProcessTransfer || (async () => {})}
+                onAssignRack={onAssignRackProcessTransfer}
               />
             </div>
           )}
@@ -6861,10 +6870,10 @@ Please adjust the quantity or request additional raw material issue.`);
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                 <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2 text-purple-600 dark:text-purple-400">
                   <Sparkles className="h-4 w-4" />
-                  <span>Replating Queue (Transfers from Store)</span>
+                  <span>Replating Queue (Transfers from Store - Strictly in KGS)</span>
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Receive material from Store, perform surface replating/treatment, and return completed batches back to Store stock.
+                  Receive material weighed in KGS from Store, perform plating treatment, and forward completed batches to Packing.
                 </p>
               </div>
 
@@ -6875,6 +6884,7 @@ Please adjust the quantity or request additional raw material issue.`);
                 onReceive={onReceiveProcessTransfer || (async () => {})}
                 onStartProcess={onStartProcessTransfer || (async () => {})}
                 onCompleteAndReturn={onCompleteProcessTransfer || (async () => {})}
+                onAssignRack={onAssignRackProcessTransfer}
               />
             </div>
           )}

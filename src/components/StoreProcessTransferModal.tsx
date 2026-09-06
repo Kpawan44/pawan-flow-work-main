@@ -53,7 +53,7 @@ export default function StoreProcessTransferModal({
   onSubmit
 }: StoreProcessTransferModalProps) {
   const [selectedJobCardNo, setSelectedJobCardNo] = useState<string>('');
-  const [toProcess, setToProcess] = useState<ProcessTransferType>('Repacking');
+  const [toProcess, setToProcess] = useState<ProcessTransferType>('Replating');
   const [transferQty, setTransferQty] = useState<number | string>('');
   const [remarks, setRemarks] = useState<string>('');
   const [searchFilter, setSearchFilter] = useState<string>('');
@@ -87,6 +87,7 @@ export default function StoreProcessTransferModal({
       setSuccess('');
       setIsSubmitting(false);
       setRemarks('');
+      setToProcess('Replating'); // Default to Replating as requested
       
       if (preselectedJobCardNo) {
         setSelectedJobCardNo(preselectedJobCardNo);
@@ -107,6 +108,9 @@ export default function StoreProcessTransferModal({
   const activeItem = React.useMemo(() => {
     return storeAvailableItems.find(i => i.jobCard.jobCardNo.toLowerCase() === selectedJobCardNo.toLowerCase());
   }, [storeAvailableItems, selectedJobCardNo]);
+
+  // When toProcess is Replating, unit is strictly KGS. For Repacking, it uses the item unit.
+  const activeUnit: 'PCS' | 'KGS' = toProcess === 'Replating' ? 'KGS' : (activeItem?.unit || 'PCS');
 
   // Update quantity default when user changes selected card
   const handleSelectJobCard = (cardNo: string) => {
@@ -136,11 +140,11 @@ export default function StoreProcessTransferModal({
       return;
     }
     if (isOverAllocated) {
-      setError(`Cannot transfer ${parsedQty.toLocaleString()} ${activeItem.unit}. Available in Store is only ${availableQty.toLocaleString()} ${activeItem.unit}.`);
+      setError(`Cannot transfer ${parsedQty.toLocaleString()} ${activeUnit}. Available in Store is only ${availableQty.toLocaleString()} ${activeItem.unit}.`);
       return;
     }
     if (!toProcess) {
-      setError('Please select a destination process (Repacking or Replating).');
+      setError('Please select a destination process.');
       return;
     }
 
@@ -156,12 +160,12 @@ export default function StoreProcessTransferModal({
         material: activeItem.jobCard.materialType || 'Finished Goods',
         currentLocation: activeItem.location,
         quantity: parsedQty,
-        unit: activeItem.unit,
+        unit: activeUnit,
         toProcess,
         remarks: remarks.trim()
       });
 
-      setSuccess(`Successfully sent ${parsedQty.toLocaleString()} ${activeItem.unit} to ${toProcess}!`);
+      setSuccess(`Successfully initiated transfer of ${parsedQty.toLocaleString()} ${activeUnit} to ${toProcess === 'Replating' ? 'Plating (KGS)' : 'Packing'}!`);
       setTimeout(() => {
         onClose();
       }, 900);
@@ -221,49 +225,102 @@ export default function StoreProcessTransferModal({
           )}
 
           {/* 1. Destination Selection (Mandatory) */}
-          <div className="space-y-2">
-            <label className="block text-xs font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">
-              Select Destination Process <span className="text-red-500">*</span>
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              {/* Repacking Option */}
-              <button
-                type="button"
-                onClick={() => setToProcess('Repacking')}
-                className={`p-3.5 rounded-2xl border-2 transition-all flex items-center gap-3 cursor-pointer text-left ${
-                  toProcess === 'Repacking'
-                    ? 'bg-pink-50/80 dark:bg-pink-950/30 border-pink-500 text-pink-900 dark:text-pink-100 shadow-md shadow-pink-500/10 scale-[1.01]'
-                    : 'bg-slate-50 dark:bg-slate-850 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
-                }`}
-              >
-                <div className={`p-2.5 rounded-xl ${toProcess === 'Repacking' ? 'bg-pink-500 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
-                  <PackageCheck className="h-5 w-5" />
-                </div>
-                <div>
-                  <span className="text-sm font-extrabold block">Repacking</span>
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block mt-0.5">Custom boxing & labeling</span>
-                </div>
-              </button>
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">
+                Select Process Workflow <span className="text-red-500">*</span>
+              </label>
+              <span className="text-[10.5px] font-mono font-semibold text-slate-500 dark:text-slate-400">
+                {toProcess === 'Replating' ? 'Flow: Store ➔ Plating (KGS) ➔ Packing ➔ Store' : 'Flow: Store ➔ Packing ➔ Store'}
+              </span>
+            </div>
 
-              {/* Replating Option */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Replating Option (Plating -> Packing -> Store) */}
               <button
                 type="button"
                 onClick={() => setToProcess('Replating')}
-                className={`p-3.5 rounded-2xl border-2 transition-all flex items-center gap-3 cursor-pointer text-left ${
+                className={`p-3.5 rounded-2xl border-2 transition-all flex flex-col justify-between cursor-pointer text-left relative overflow-hidden ${
                   toProcess === 'Replating'
-                    ? 'bg-purple-50/80 dark:bg-purple-950/30 border-purple-500 text-purple-900 dark:text-purple-100 shadow-md shadow-purple-500/10 scale-[1.01]'
+                    ? 'bg-purple-50/90 dark:bg-purple-950/40 border-purple-500 text-purple-950 dark:text-purple-100 shadow-md shadow-purple-500/10 ring-1 ring-purple-500'
                     : 'bg-slate-50 dark:bg-slate-850 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
                 }`}
               >
-                <div className={`p-2.5 rounded-xl ${toProcess === 'Replating' ? 'bg-purple-500 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
-                  <Sparkles className="h-5 w-5" />
+                <div className="flex items-start justify-between gap-2 w-full">
+                  <div className="flex items-center gap-2.5">
+                    <div className={`p-2 rounded-xl ${toProcess === 'Replating' ? 'bg-purple-600 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
+                      <Sparkles className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <span className="text-sm font-extrabold block leading-tight">Plating ➔ Packing ➔ Store</span>
+                      <span className="text-[10px] text-purple-700 dark:text-purple-300 font-semibold block mt-0.5">Surface Replating Workflow</span>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full text-[9px] font-extrabold bg-purple-600 text-white uppercase tracking-wider shrink-0">
+                    KGS Only
+                  </span>
                 </div>
-                <div>
-                  <span className="text-sm font-extrabold block">Replating</span>
-                  <span className="text-[10px] text-slate-500 dark:text-slate-400 block mt-0.5">Surface recoating & touch-up</span>
+                <div className="mt-2.5 pt-2 border-t border-purple-200/50 dark:border-purple-900/40 text-[10px] text-slate-500 dark:text-slate-400 flex items-center gap-1 font-mono">
+                  <span>Store</span>
+                  <ArrowRight className="h-3 w-3 text-purple-500 shrink-0" />
+                  <span>Plating</span>
+                  <ArrowRight className="h-3 w-3 text-purple-500 shrink-0" />
+                  <span>Packing</span>
+                  <ArrowRight className="h-3 w-3 text-emerald-500 shrink-0" />
+                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">Store (Rack)</span>
+                </div>
+              </button>
+
+              {/* Repacking Option (Packing -> Store) */}
+              <button
+                type="button"
+                onClick={() => setToProcess('Repacking')}
+                className={`p-3.5 rounded-2xl border-2 transition-all flex flex-col justify-between cursor-pointer text-left relative overflow-hidden ${
+                  toProcess === 'Repacking'
+                    ? 'bg-pink-50/90 dark:bg-pink-950/40 border-pink-500 text-pink-950 dark:text-pink-100 shadow-md shadow-pink-500/10 ring-1 ring-pink-500'
+                    : 'bg-slate-50 dark:bg-slate-850 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-slate-300'
+                }`}
+              >
+                <div className="flex items-start justify-between gap-2 w-full">
+                  <div className="flex items-center gap-2.5">
+                    <div className={`p-2 rounded-xl ${toProcess === 'Repacking' ? 'bg-pink-600 text-white' : 'bg-slate-200 dark:bg-slate-800 text-slate-500'}`}>
+                      <PackageCheck className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <span className="text-sm font-extrabold block leading-tight">Packing ➔ Store</span>
+                      <span className="text-[10px] text-pink-700 dark:text-pink-300 font-semibold block mt-0.5">Custom Boxing & Packaging</span>
+                    </div>
+                  </div>
+                  <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-pink-100 dark:bg-pink-950/60 text-pink-700 dark:text-pink-300 border border-pink-200 dark:border-pink-800 shrink-0">
+                    Direct Packing
+                  </span>
+                </div>
+                <div className="mt-2.5 pt-2 border-t border-pink-200/50 dark:border-pink-900/40 text-[10px] text-slate-500 dark:text-slate-400 flex items-center gap-1 font-mono">
+                  <span>Store</span>
+                  <ArrowRight className="h-3 w-3 text-pink-500 shrink-0" />
+                  <span>Packing</span>
+                  <ArrowRight className="h-3 w-3 text-emerald-500 shrink-0" />
+                  <span className="text-emerald-600 dark:text-emerald-400 font-bold">Store (Rack)</span>
                 </div>
               </button>
             </div>
+
+            {/* Explanatory banner based on selection */}
+            {toProcess === 'Replating' ? (
+              <div className="p-3 bg-purple-50/70 dark:bg-purple-950/25 border border-purple-200/80 dark:border-purple-900/40 rounded-xl text-xs text-purple-900 dark:text-purple-200 flex items-start gap-2.5">
+                <Info className="h-4 w-4 text-purple-600 dark:text-purple-400 shrink-0 mt-0.5" />
+                <div className="text-[11px] leading-relaxed">
+                  <strong className="font-bold">Strict Rule:</strong> Store sends material to Plating <strong>strictly in Kilograms (KGS)</strong>. Upon completion at Plating, the material is routed to <strong>Packing</strong>, and after packing is completed, it returns to Store where <strong>Store will assign the Rack & Bin</strong>.
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 bg-pink-50/70 dark:bg-pink-950/25 border border-pink-200/80 dark:border-pink-900/40 rounded-xl text-xs text-pink-900 dark:text-pink-200 flex items-start gap-2.5">
+                <Info className="h-4 w-4 text-pink-600 dark:text-pink-400 shrink-0 mt-0.5" />
+                <div className="text-[11px] leading-relaxed">
+                  Material moves from Store to <strong>Packing</strong> for re-boxing/labeling. Once packed, it arrives in Store where <strong>Store will assign the Rack & Bin location</strong> into inventory.
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 2. Material Selection from Store */}
@@ -324,7 +381,7 @@ export default function StoreProcessTransferModal({
                   <span className="font-bold text-slate-800 dark:text-white">{activeItem.jobCard.partyName || '-'}</span>
                 </div>
                 <div>
-                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Location</span>
+                  <span className="text-[10px] text-slate-400 uppercase font-bold block">Current Location</span>
                   <span className="font-bold text-slate-800 dark:text-white">{activeItem.location}</span>
                 </div>
               </div>
@@ -333,14 +390,22 @@ export default function StoreProcessTransferModal({
 
           {/* 3. Quantity & Live Stock Calculation */}
           <div className="space-y-3 pt-1">
-            <label htmlFor="transfer-quantity" className="block text-xs font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">
-              Transfer Quantity ({activeItem?.unit || 'PCS'}) <span className="text-red-500">*</span>
-            </label>
+            <div className="flex items-center justify-between">
+              <label htmlFor="transfer-quantity" className="block text-xs font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">
+                Transfer Quantity ({activeUnit}) <span className="text-red-500">*</span>
+              </label>
+              {toProcess === 'Replating' && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-extrabold bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800">
+                  Strictly in KGS
+                </span>
+              )}
+            </div>
+
             <div className="relative">
               <input
                 id="transfer-quantity"
                 type="number"
-                min={1}
+                min={0.01}
                 max={availableQty}
                 step="any"
                 required
@@ -349,7 +414,7 @@ export default function StoreProcessTransferModal({
                   setTransferQty(e.target.value);
                   setError('');
                 }}
-                placeholder={`Enter quantity to send (max ${availableQty})`}
+                placeholder={toProcess === 'Replating' ? `Enter weight in KGS to send to Plating` : `Enter quantity to send (max ${availableQty})`}
                 className={`w-full min-h-[48px] h-12 bg-[#F8FAFC] dark:bg-slate-950 border rounded-xl px-4 py-3 text-sm font-mono font-bold text-slate-800 dark:text-white focus:outline-none ${
                   isOverAllocated ? 'border-red-500 focus:border-red-500' : 'border-slate-200 dark:border-slate-800 focus:border-emerald-500'
                 }`}
@@ -373,9 +438,9 @@ export default function StoreProcessTransferModal({
               </div>
 
               <div className="p-3 bg-purple-50/70 dark:bg-purple-950/30 border border-purple-100 dark:border-purple-900/40 rounded-xl text-center">
-                <span className="text-[9.5px] font-bold uppercase text-purple-600 dark:text-purple-400 block font-mono">Send for {toProcess}</span>
+                <span className="text-[9.5px] font-bold uppercase text-purple-600 dark:text-purple-400 block font-mono">Send to {toProcess === 'Replating' ? 'Plating' : 'Packing'}</span>
                 <span className={`text-xs sm:text-sm font-extrabold font-mono mt-0.5 block ${isOverAllocated ? 'text-red-600' : 'text-purple-700 dark:text-purple-300'}`}>
-                  {parsedQty.toLocaleString()} {activeItem?.unit}
+                  {parsedQty.toLocaleString()} {activeUnit}
                 </span>
               </div>
 

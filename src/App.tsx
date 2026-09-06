@@ -47,7 +47,7 @@ import {
   Info,
   RotateCcw
 } from 'lucide-react';
-import { DBService, auth, signInWithCustomToken, signOut, onAuthStateChanged, getApiBaseUrl } from './lib/firebase';
+import { DBService, auth, signInWithCustomToken, signOut, onAuthStateChanged, getApiBaseUrl, safeJsonResponse } from './lib/firebase';
 import { runDailyAutoBackupIfNeeded } from './lib/backup';
 import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SyncQueueItem, ProcessTransfer } from './types';
 import { 
@@ -755,7 +755,7 @@ export default function App() {
     try {
       const res = await fetch(`${getApiBaseUrl()}/api/system/state`);
       if (res.ok) {
-        const state = await res.json();
+        const state = await safeJsonResponse(res, { success: false });
         if (state.success && state.factoryResetGeneration) {
           const localGen = localStorage.getItem('mfr_system_generation');
           if (localGen && localGen !== state.factoryResetGeneration) {
@@ -840,7 +840,7 @@ export default function App() {
             setCurrentUser(null);
             return;
           }
-          const data = await res.json();
+          const data = await safeJsonResponse(res, { success: false });
           if (data.success && data.user) {
             setCurrentUser(data.user);
             sessionStorage.setItem('mfr_active_user_profile', JSON.stringify(data.user));
@@ -1654,6 +1654,31 @@ export default function App() {
     }
   };
 
+  const handleAssignRackProcessTransfer = async (
+    transferId: string, 
+    returnRack: string, 
+    returnBin: string, 
+    remarks?: string
+  ) => {
+    if (!currentUser) return;
+    try {
+      const updated = await DBService.assignRackProcessTransfer(
+        transferId, 
+        returnRack, 
+        returnBin, 
+        currentUser.userId, 
+        currentUser.name, 
+        remarks
+      );
+      showToast(`Assigned Rack ${returnRack} (Bin ${returnBin}) for ${updated.transferNo} in Store`, 'success');
+      refreshAllStates();
+    } catch (err: any) {
+      console.error("Assign rack process transfer failed:", err);
+      showToast(err.message || 'Failed to assign rack for process transfer', 'error');
+      throw err;
+    }
+  };
+
   const handleBulkTransfer = async (transfers: any[]) => {
     if (!currentUser) return;
     try {
@@ -2317,7 +2342,7 @@ export default function App() {
                   department: 'Admin'
                 })
               });
-              const data = await res.json();
+              const data = await safeJsonResponse(res, { success: false });
               if (!res.ok || !data.success) {
                 throw new Error(data.error || 'Failed to initialize Super Admin.');
               }
@@ -2770,6 +2795,7 @@ export default function App() {
                 onReceiveProcessTransfer={handleReceiveProcessTransfer}
                 onStartProcessTransfer={handleStartProcessTransfer}
                 onCompleteProcessTransfer={handleCompleteProcessTransfer}
+                onAssignRackProcessTransfer={handleAssignRackProcessTransfer}
               />
             </Suspense>
           )}

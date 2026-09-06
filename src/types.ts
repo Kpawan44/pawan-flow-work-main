@@ -345,6 +345,11 @@ export type ProcessTransferStatus =
   | 'Received at Replating'
   | 'Replating in Process'
   | 'Replating Completed'
+  | 'Plating Completed - Sent to Packing'
+  | 'Sent to Packing'
+  | 'Received at Packing'
+  | 'Packing in Process'
+  | 'Packing Completed - Sent to Store'
   | 'Returned to Store';
 
 export interface ProcessTransfer {
@@ -362,13 +367,53 @@ export interface ProcessTransfer {
   unit: 'PCS' | 'KGS';
   fromLocation: string; // 'Store'
   toProcess: ProcessTransferType; // 'Repacking' | 'Replating'
+  flowType?: 'STORE_PLATING_PACKING_STORE' | 'STORE_PACKING_STORE';
   status: ProcessTransferStatus;
   transferDate: string;
   transferTime: string;
   createdBy: string;
   createdByUserId: string;
 
-  // Lifecycle progression fields
+  // Plating Lifecycle Fields
+  platingReceivedBy?: string;
+  platingReceivedByUserId?: string;
+  platingReceivedAt?: string;
+  platingInProcessBy?: string;
+  platingInProcessByUserId?: string;
+  platingInProcessAt?: string;
+  platingCompletedBy?: string;
+  platingCompletedByUserId?: string;
+  platingCompletedAt?: string;
+  platingCompletedQty?: number;
+  platingRejectionQty?: number;
+  platingRejectionReason?: string;
+  platingRemarks?: string;
+
+  // Packing Lifecycle Fields
+  packingReceivedBy?: string;
+  packingReceivedByUserId?: string;
+  packingReceivedAt?: string;
+  packingInProcessBy?: string;
+  packingInProcessByUserId?: string;
+  packingInProcessAt?: string;
+  packingCompletedBy?: string;
+  packingCompletedByUserId?: string;
+  packingCompletedAt?: string;
+  packingCompletedQty?: number;
+  packingRejectionQty?: number;
+  packingRejectionReason?: string;
+  packingRemarks?: string;
+
+  // Store Return & Rack Assignment
+  returnRackNo?: string;
+  returnLocationBin?: string;
+  rackAssignedBy?: string;
+  rackAssignedByUserId?: string;
+  rackAssignedAt?: string;
+  storeReceivedQty?: number;
+  storeRemarks?: string;
+
+  // Lifecycle progression fields (backward-compatible)
   receivedBy?: string;
   receivedByUserId?: string;
   receivedAt?: string;
@@ -388,8 +433,6 @@ export interface ProcessTransfer {
   returnedByUserId?: string;
   returnedAt?: string;
   returnedQty?: number;
-  returnLocationBin?: string;
-  returnRackNo?: string;
 
   remarks?: string;
   idempotencyKey?: string;
