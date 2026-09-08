@@ -153,6 +153,13 @@ export interface OutsourceOrder {
 export interface JobCard {
   jobCardNo: string;
   parentJobCardNo?: string;
+  childJobCardNos?: string[];
+  splitHistory?: Array<{
+    childJobCardNo: string;
+    quantity: number;
+    splitDate: string;
+    operationId?: string;
+  }>;
   orderNo: string;
   poNumber?: string;
   partyName: string;
