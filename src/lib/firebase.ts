@@ -28,6 +28,7 @@ import {
   logMaterialMovementToSheets, 
   logActionToSheets 
 } from './googleSheets';
+import { nextStatusOnPurchaseAccept, displayUnitLabel } from '../hardening/process1Purchase';
 
 // Directly use configuration from firebase-applet-config.json
 export { firebaseConfig };
@@ -1063,17 +1064,34 @@ export class DBService {
 
     const movements = await this.getMovements();
     const newMovementId = `M-${2000 + movements.length + 1}`;
-    const unitLabel = job.unit || 'KG';
+    const unitLabel = displayUnitLabel(job.unit);
+    const destDept = (job.currentDepartment as Department) || (isPurchase ? 'Store' : 'Production');
     const defaultMovement: MaterialMovement = isPurchase ? {
       movementId: newMovementId,
       jobCardNo,
+      itemCode: job.itemCode,
+      itemName: job.itemName,
+      materialType: job.materialType,
+      unit: job.unit,
+      isWire: job.isWire,
+      rawMaterialKind: job.rawMaterialKind,
       fromDepartment: 'Purchase',
-      toDepartment: (job.currentDepartment as Department) || 'Store',
+      toDepartment: destDept,
       quantity: job.currentQty,
       transferBy: creatorName,
       transferDate: new Date().toISOString(),
       accepted: false,
-      remarks: job.purchaseDetails?.remarks || `Material inwarded from Supplier: ${job.purchaseDetails?.supplierName || job.partyName}. Total Received: ${job.purchaseDetails?.receivedQty || job.orderQty} ${unitLabel}, Sent to ${job.currentDepartment || 'Store'}: ${job.currentQty} ${unitLabel}.`
+      processDetails: {
+        materialType: job.materialType,
+        unit: job.unit,
+        isWire: job.isWire,
+        rawMaterialKind: job.rawMaterialKind,
+        rawMaterialCode: job.itemCode,
+        rawMaterialName: job.itemName,
+        supplierName: job.purchaseDetails?.supplierName || job.partyName,
+        billNo: job.purchaseDetails?.billNo
+      },
+      remarks: job.purchaseDetails?.remarks || `Material inwarded from Supplier: ${job.purchaseDetails?.supplierName || job.partyName}. Total Received: ${job.purchaseDetails?.receivedQty || job.orderQty} ${unitLabel}, Sent to ${destDept}: ${job.currentQty} ${unitLabel}.`
     } : {
       movementId: newMovementId,
       jobCardNo,
@@ -1944,7 +1962,7 @@ export class DBService {
           if (targetJcRef && jcSnap && jcSnap.exists()) {
             const jcData = jcSnap.data() as JobCard;
             const nextVersion = (jcData.version || 1) + 1;
-            const nextStatus: JobCardStatus = (updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process')) as JobCardStatus;
+            const nextStatus: JobCardStatus = nextStatusOnPurchaseAccept(updatedMov.toDepartment) as JobCardStatus;
             const jcUpdates: Partial<JobCard> = {
               currentDepartment: updatedMov.toDepartment,
               status: nextStatus,
@@ -1997,7 +2015,7 @@ export class DBService {
           ...existingCard,
           ...(finalJobCardUpdates || {
             currentDepartment: updatedMov.toDepartment,
-            status: updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process'),
+            status: nextStatusOnPurchaseAccept(updatedMov.toDepartment) as JobCardStatus,
             currentQty: updatedMov.quantity,
             version: (existingCard.version || 1) + 1,
             updatedAt: nowIso,

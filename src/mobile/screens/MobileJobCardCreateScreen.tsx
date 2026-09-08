@@ -16,7 +16,8 @@ import {
   Layers,
   Sparkles
 } from 'lucide-react';
-import { Department, UserProfile } from '../../types';
+import { Department, UserProfile, RawMaterialKind } from '../../types';
+import { resolveInitialPurchaseRoute } from '../../hardening/process1Purchase';
 
 interface MobileJobCardCreateScreenProps {
   currentUser: UserProfile;
@@ -47,6 +48,8 @@ export const MobileJobCardCreateScreen: React.FC<MobileJobCardCreateScreenProps>
   const [heatNo, setHeatNo] = useState('');
 
   const [processType, setProcessType] = useState<'Standard' | 'Purchase'>('Standard');
+  const [purchaseMaterialType, setPurchaseMaterialType] = useState<'Raw Material' | 'Semi Finished Goods' | 'Finished Goods'>('Semi Finished Goods');
+  const [purchaseRawKind, setPurchaseRawKind] = useState<RawMaterialKind>('Other');
   const [heatTreatmentRequired, setHeatTreatmentRequired] = useState(true);
   const [platingType, setPlatingType] = useState('Zinc Trivalent (Blue/Clear)');
   const [initialDepartment, setInitialDepartment] = useState<Department>('Production');
@@ -73,7 +76,14 @@ export const MobileJobCardCreateScreen: React.FC<MobileJobCardCreateScreenProps>
     }
     if (step === 3) {
       if (!orderQty || orderQty <= 0) {
-        setErrorMessage("Please enter a valid Target Order Quantity (KG).");
+        setErrorMessage("Please enter a valid Target Order Quantity.");
+        return false;
+      }
+      return true;
+    }
+    if (step === 4 && processType === 'Purchase') {
+      if (purchaseMaterialType === 'Raw Material' && !purchaseRawKind) {
+        setErrorMessage("Classify Raw Material as Wire or Other.");
         return false;
       }
       return true;
@@ -99,6 +109,50 @@ export const MobileJobCardCreateScreen: React.FC<MobileJobCardCreateScreenProps>
     setErrorMessage(null);
 
     try {
+      if (processType === 'Purchase') {
+        const route = resolveInitialPurchaseRoute({
+          materialType: purchaseMaterialType,
+          rawMaterialKind: purchaseRawKind,
+          isWire: purchaseRawKind === 'Wire',
+          selectedDestination: initialDepartment
+        });
+        if (route.error) {
+          setErrorMessage(route.error);
+          setIsSubmitting(false);
+          return;
+        }
+        const cleanItemCode = itemCode.trim() ? itemCode.trim().toUpperCase() : `PUR-${Date.now().toString().slice(-4)}`;
+        const jobPayload = {
+          itemName: itemName.trim(),
+          itemCode: cleanItemCode,
+          partyName: partyName.trim(),
+          poNumber: poNumber.trim() || undefined,
+          orderQty: Number(orderQty),
+          currentQty: Number(orderQty),
+          balanceQty: Number(orderQty),
+          unit: purchaseMaterialType === 'Finished Goods' ? unit : 'KGS',
+          processType: 'Purchase' as const,
+          materialType: purchaseMaterialType,
+          isWire: purchaseMaterialType === 'Raw Material' ? route.isWire : undefined,
+          rawMaterialKind: route.rawMaterialKind || undefined,
+          heatTreatmentRequired: route.destination === 'Heat Treatment',
+          currentDepartment: route.destination,
+          status: 'Pending Acceptance',
+          purchaseDetails: {
+            supplierName: partyName.trim(),
+            receivedQty: Number(orderQty),
+            sentToStore: Number(orderQty),
+            materialType: purchaseMaterialType,
+            unit: purchaseMaterialType === 'Finished Goods' ? unit : 'KGS',
+            isWire: purchaseMaterialType === 'Raw Material' ? route.isWire : undefined,
+            rawMaterialKind: route.rawMaterialKind || undefined
+          }
+        };
+        await onCreateJobCard(jobPayload);
+        onBack();
+        return;
+      }
+
       const cleanItemCode = itemCode.trim() ? itemCode.trim().toUpperCase() : `BOLT-${Date.now().toString().slice(-4)}`;
       const jobPayload = {
         itemName: itemName.trim(),
@@ -111,11 +165,11 @@ export const MobileJobCardCreateScreen: React.FC<MobileJobCardCreateScreenProps>
         unit,
         materialGrade,
         heatNo: heatNo.trim() || `COIL-${Date.now().toString().slice(-4)}`,
-        processType,
+        processType: 'Manufacturing' as const,
         heatTreatmentRequired,
         platingType,
         currentDepartment: initialDepartment,
-        status: 'In Process',
+        status: 'Pending Acceptance',
         createdAt: new Date().toISOString()
       };
 
@@ -352,6 +406,79 @@ export const MobileJobCardCreateScreen: React.FC<MobileJobCardCreateScreenProps>
 
             <div>
               <label className="text-xs font-bold uppercase text-slate-500 block mb-1">
+                Job Kind
+              </label>
+              <div className="grid grid-cols-2 gap-2 mb-3">
+                <button type="button" onClick={() => setProcessType('Standard')} className={`py-2.5 rounded-xl text-xs font-bold border ${processType === 'Standard' ? 'bg-blue-50 border-blue-500 text-blue-700' : 'bg-slate-50 border-slate-200'}`}>Manufacturing</button>
+                <button type="button" onClick={() => setProcessType('Purchase')} className={`py-2.5 rounded-xl text-xs font-bold border ${processType === 'Purchase' ? 'bg-teal-50 border-teal-500 text-teal-700' : 'bg-slate-50 border-slate-200'}`}>Purchase Inward</button>
+              </div>
+            </div>
+
+            {processType === 'Purchase' ? (
+              <>
+                <div>
+                  <label className="text-xs font-bold uppercase text-slate-500 block mb-1">Material Type</label>
+                  <select
+                    value={purchaseMaterialType}
+                    onChange={(e) => {
+                      const mt = e.target.value as any;
+                      setPurchaseMaterialType(mt);
+                      if (mt === 'Raw Material') setInitialDepartment(purchaseRawKind === 'Wire' ? 'Raw Material Store' : 'Incoming Store');
+                      if (mt === 'Semi Finished Goods') setInitialDepartment('Production');
+                      if (mt === 'Finished Goods') setInitialDepartment('Store');
+                    }}
+                    className="w-full px-3.5 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl text-xs font-bold"
+                  >
+                    <option value="Raw Material">Raw Material</option>
+                    <option value="Semi Finished Goods">Semi Finished Goods</option>
+                    <option value="Finished Goods">Finished Goods</option>
+                  </select>
+                </div>
+                {purchaseMaterialType === 'Raw Material' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button type="button" onClick={() => { setPurchaseRawKind('Wire'); setInitialDepartment('Raw Material Store'); }} className={`py-2 rounded-xl text-xs font-bold border ${purchaseRawKind === 'Wire' ? 'bg-emerald-600 text-white' : 'bg-slate-50'}`}>Wire</button>
+                    <button type="button" onClick={() => { setPurchaseRawKind('Other'); setInitialDepartment('Incoming Store'); }} className={`py-2 rounded-xl text-xs font-bold border ${purchaseRawKind === 'Other' ? 'bg-purple-600 text-white' : 'bg-slate-50'}`}>Other RM</button>
+                  </div>
+                )}
+                {purchaseMaterialType === 'Finished Goods' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button type="button" onClick={() => setUnit('KGS')} className={`py-2 rounded-xl text-xs font-bold border ${unit === 'KGS' ? 'bg-indigo-600 text-white' : 'bg-slate-50'}`}>KG</button>
+                    <button type="button" onClick={() => setUnit('PCS')} className={`py-2 rounded-xl text-xs font-bold border ${unit === 'PCS' ? 'bg-pink-600 text-white' : 'bg-slate-50'}`}>PCS</button>
+                  </div>
+                )}
+                <div>
+                  <label className="text-xs font-bold uppercase text-slate-500 block mb-1">Initial Destination</label>
+                  <select
+                    value={initialDepartment}
+                    onChange={(e) => setInitialDepartment(e.target.value as any)}
+                    className="w-full px-3.5 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-2xl text-xs font-bold"
+                  >
+                    {purchaseMaterialType === 'Raw Material' && (
+                      purchaseRawKind === 'Wire'
+                        ? <option value="Raw Material Store">Raw Material Store</option>
+                        : <option value="Incoming Store">Incoming Store</option>
+                    )}
+                    {purchaseMaterialType === 'Semi Finished Goods' && (
+                      <>
+                        <option value="Production">Production</option>
+                        <option value="Heat Treatment">Heat Treatment</option>
+                        <option value="Plating">Plating</option>
+                        <option value="Incoming Store">Incoming Store</option>
+                      </>
+                    )}
+                    {purchaseMaterialType === 'Finished Goods' && (
+                      <>
+                        <option value="Dispatch">Direct Dispatch</option>
+                        <option value="Store">Finished Goods Store</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+              </>
+            ) : (
+              <>
+            <div>
+              <label className="text-xs font-bold uppercase text-slate-500 block mb-1">
                 Heat Treatment Furnace Required?
               </label>
               <div className="grid grid-cols-2 gap-2">
@@ -406,9 +533,10 @@ export const MobileJobCardCreateScreen: React.FC<MobileJobCardCreateScreenProps>
               >
                 <option value="Production">Production (Heading/Forging)</option>
                 <option value="Raw Material Store">Raw Material Store</option>
-                <option value="Purchase">Purchase Inward</option>
               </select>
             </div>
+              </>
+            )}
           </div>
         )}
 

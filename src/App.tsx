@@ -160,6 +160,7 @@ const getAvatarBg = (dept: string) => {
     case 'Plating': return 'bg-pink-100 text-pink-700 dark:bg-pink-950/40 dark:text-pink-300 border-pink-200 dark:border-pink-900/30';
     case 'Packing': return 'bg-violet-100 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300 border-violet-200 dark:border-violet-900/30';
     case 'Store': return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300 border-emerald-200 dark:border-emerald-900/30';
+    case 'Incoming Store': return 'bg-purple-100 text-purple-700 dark:bg-purple-950/40 dark:text-purple-300 border-purple-200 dark:border-purple-900/30';
     default: return 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-slate-200 dark:border-slate-700';
   }
 };
@@ -1743,40 +1744,7 @@ export default function App() {
   ) => {
     if (!currentUser) return;
     try {
-      const mov = movements.find(m => m.movementId === movementId);
-
       await DBService.acceptMovement(movementId, currentUser.userId, currentUser.name, remarks, extraFields);
-
-      // Conditional logic: If a job card movement is received/transferred from the Purchase Department,
-      // inspect its 'itemFinished' status to automatically set the next currentDepartment to either 'Packing' or 'Production'/'Heat Treatment'.
-      if (mov && (mov.fromDepartment === 'Purchase' || mov.toDepartment === 'Purchase')) {
-        const card = jobCards.find(j => j.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
-        if (card) {
-          const isItemFinished = Boolean(
-            (card as any).itemFinished ||
-            (mov as any).itemFinished ||
-            card.materialType === 'Finished Goods' ||
-            card.receivedMaterialType === 'Finished Goods' ||
-            card.outsourceDetails?.outsourceMaterialType === 'Finished Goods'
-          );
-
-          const nextDepartment: Department = isItemFinished
-            ? 'Packing'
-            : (card.heatTreatmentRequired ? 'Heat Treatment' : 'Production');
-
-          if (mov.fromDepartment === 'Purchase') {
-            await DBService.updateJobCard(
-              card.jobCardNo,
-              {
-                currentDepartment: nextDepartment,
-                status: nextDepartment === 'Production' ? 'Pending' : 'In Process'
-              },
-              currentUser.userId,
-              currentUser.name
-            );
-          }
-        }
-      }
 
       refreshAllStates();
     } catch (err: any) {

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { JobCard, MaterialMovement, Department, UserProfile, ProcessTransfer } from '../types';
 import { getJobCardProcessMetrics, getJobCardDepartmentPending, getWireScrapQty } from '../lib/metrics';
+import { isHeldInIncomingStore } from '../hardening/process1Purchase';
 import PendingBreakdownModal from './PendingBreakdownModal';
 import RawMaterialReportView from './RawMaterialReportView';
 import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
@@ -276,13 +277,7 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
         });
         break;
       case 'incoming_store': {
-        const incomingCards = jobCards.filter(c => 
-          c.currentDepartment === 'Purchase' || 
-          c.processType === 'Purchase' || 
-          c.status === 'Stored' || 
-          !!c.purchaseDetails ||
-          movements.some(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && (m.toDepartment === 'Purchase' || (m.toDepartment === 'Store' && m.fromDepartment === 'Purchase')))
-        );
+        const incomingCards = jobCards.filter(c => isHeldInIncomingStore(c));
 
         baseData = incomingCards.map(c => {
           const storeMovs = movements.filter(mov => 

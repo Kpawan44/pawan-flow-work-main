@@ -1,6 +1,7 @@
 export const VALID_MANUFACTURING_DEPARTMENTS = [
   "Purchase",
   "Raw Material Store",
+  "Incoming Store",
   "Dispatch",
   "Production",
   "Heat Treatment",

@@ -50,22 +50,9 @@ export function getDynamicRawMaterialsStock(movements: MaterialMovement[] = [], 
     }
   });
 
-  // 3. Discover raw material items dynamically from saved items
-  (savedItems || []).forEach((item: any) => {
-    if (item && item.itemCode && item.itemCode !== '-') {
-      const upperCode = String(item.itemCode).trim().toUpperCase();
-      if (!materialMap.has(upperCode)) {
-        materialMap.set(upperCode, {
-          code: upperCode,
-          name: String(item.itemName || upperCode).trim(),
-          category: 'Raw Material',
-          location: 'Bin RM Store',
-          unit: 'KG',
-          baseStock: 0
-        });
-      }
-    }
-  });
+  // 3. Discover raw material items dynamically from saved items — disabled.
+  // Process 1: do not seed RM inventory from arbitrary savedItems (SFG/FG leakage).
+  void savedItems;
 
   if (materialMap.size === 0) {
     return [];

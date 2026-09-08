@@ -66,10 +66,12 @@ export function computeRmRuntimeStock(
   }>,
   code: string
 ): number {
-  const matchesCode = (m: (typeof movements)[0]) =>
-    m.processDetails?.rawMaterialCode === code ||
-    m.jobCardNo === "STOCK-IN-" + code ||
-    m.jobCardNo === code;
+  const matchesCode = (m: (typeof movements)[0]) => {
+    const target = String(code || "").trim().toUpperCase();
+    const raw = String(m.processDetails?.rawMaterialCode || "").trim().toUpperCase();
+    const jc = String(m.jobCardNo || "").trim().toUpperCase();
+    return raw === target || jc === "STOCK-IN-" + target || jc === target;
+  };
 
   const totalIssued = movements
     .filter(

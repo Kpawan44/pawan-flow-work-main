@@ -1,7 +1,8 @@
 import * as XLSX from 'xlsx';
 import { JobCard, MaterialMovement, AuditLog } from '../types';
 import { getJobCardProcessMetrics, getJobCardDepartmentPending } from './metrics';
-import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from '../components/RawMaterialRequestModal';
+import { getDynamicRawMaterialsStock } from '../components/RawMaterialRequestModal';
+import { isHeldInIncomingStore } from '../hardening/process1Purchase';
 
 export interface ComprehensiveExportData {
   jobCards: JobCard[];
@@ -168,13 +169,7 @@ export function exportComprehensiveExcelBackup(
   XLSX.utils.book_append_sheet(wb, wsPacking, '7. Packaging Weights');
 
   // 7b. Incoming Store Report
-  const incomingCards = jobCards.filter(c => 
-    c.currentDepartment === 'Purchase' || 
-    c.processType === 'Purchase' || 
-    c.status === 'Stored' || 
-    !!c.purchaseDetails ||
-    movements.some(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && (m.toDepartment === 'Purchase' || (m.toDepartment === 'Store' && m.fromDepartment === 'Purchase')))
-  );
+  const incomingCards = jobCards.filter(c => isHeldInIncomingStore(c));
 
   const incomingHeaders = [
     'Job Card No', 'Order/PO No', 'Supplier/Party', 'Item Name', 'Item Code',

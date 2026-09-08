@@ -1,4 +1,5 @@
 import { VALID_MANUFACTURING_DEPARTMENTS } from "./constants";
+import { canPurchaseUserOperateIncomingStore, isIncomingStoreDept } from "./process1Purchase";
 
 export interface MovementCommitInput {
   operationId: string;
@@ -62,10 +63,14 @@ export function isDeptAuthorized(actor: MovementCommitInput["actor"], fromDepart
     userRole === "admin" ||
     userDept === "admin" ||
     userDept === "management";
+  const fromNorm = fromDepartment.toLowerCase();
+  if (isIncomingStoreDept(fromDepartment) && canPurchaseUserOperateIncomingStore(actor)) {
+    return true;
+  }
   return (
     isSuperOrAdmin ||
-    userDept === fromDepartment.toLowerCase() ||
-    allowed.includes(fromDepartment.toLowerCase())
+    userDept === fromNorm ||
+    allowed.includes(fromNorm)
   );
 }
 
@@ -351,5 +356,6 @@ export function clearPendingOutbound(jobCard: any, movement: { movementId?: stri
 export function nextStatusOnAccept(toDepartment: string): string {
   if (toDepartment === "Production") return "Pending";
   if (toDepartment === "Completed") return "Completed";
+  if (toDepartment === "Incoming Store") return "Stored";
   return "In Process";
 }

@@ -12,6 +12,13 @@ import { initializeApp, getApps, getApp, applicationDefault } from "firebase-adm
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import { GoogleAuth } from "google-auth-library";
+import {
+  canPurchaseUserOperateIncomingStore,
+  resolveJobCurrentQtyOnCreate,
+  shouldCreateInitialMovement,
+  purchaseNotificationDepartment,
+  nextStatusOnPurchaseAccept
+} from "./src/hardening/process1Purchase";
 
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
@@ -2439,7 +2446,7 @@ async function startServer() {
         return res.status(400).json({ success: false, error: "Invalid orderQty: Must be a positive finite number (1 to 1,000,000,000)." });
       }
 
-      const isPurchase = Boolean(jobCard.purchaseDetails && Object.keys(jobCard.purchaseDetails).length > 0);
+      const isPurchase = jobCard.processType === 'Purchase' || Boolean(jobCard.purchaseDetails && Object.keys(jobCard.purchaseDetails).length > 0);
       const userRole = String(requester.role || "staff").toLowerCase();
       const userDept = String(requester.department || "").toLowerCase();
       const allowedDepts: string[] = [
@@ -2462,13 +2469,14 @@ async function startServer() {
       const authoritativeUserName = requester.name || requester.userId || "Authorized User";
       const now = new Date().toISOString();
       const upperJobNo = String(jobCard.jobCardNo).toUpperCase().trim();
-      const unitLabel = jobCard.unit || 'KG';
+      const unitLabel = jobCard.unit === 'PCS' ? 'PCS' : (jobCard.unit || 'KG');
+      const sentQty = resolveJobCurrentQtyOnCreate(jobCard.currentQty, numOrderQty);
 
       const newJob = {
         ...jobCard,
         jobCardNo: upperJobNo,
         orderQty: numOrderQty,
-        currentQty: numOrderQty,
+        currentQty: sentQty,
         status: jobCard.status || 'Pending Acceptance',
         createdBy: authoritativeUserName,
         createdByUserId: authoritativeUserId,
@@ -2478,24 +2486,46 @@ async function startServer() {
         completed: false
       };
 
+      const destDept = jobCard.currentDepartment || (isPurchase ? 'Store' : 'Production');
+      const fromDept = isPurchase ? 'Purchase' : 'Dispatch';
+      const createInitialMov = shouldCreateInitialMovement(fromDept, destDept);
       const movId = `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const purchaseMeta = isPurchase ? {
+        itemCode: jobCard.itemCode || '',
+        itemName: jobCard.itemName || '',
+        materialType: jobCard.materialType,
+        unit: jobCard.unit,
+        isWire: jobCard.isWire,
+        rawMaterialKind: jobCard.rawMaterialKind,
+        processDetails: {
+          materialType: jobCard.materialType,
+          unit: jobCard.unit,
+          isWire: jobCard.isWire,
+          rawMaterialKind: jobCard.rawMaterialKind,
+          rawMaterialCode: jobCard.itemCode,
+          rawMaterialName: jobCard.itemName,
+          supplierName: jobCard.purchaseDetails?.supplierName || jobCard.partyName,
+          billNo: jobCard.purchaseDetails?.billNo
+        }
+      } : {};
       const defaultMovement = isPurchase ? {
         movementId: movId,
         jobCardNo: upperJobNo,
         fromDepartment: 'Purchase',
-        toDepartment: jobCard.currentDepartment || 'Store',
-        quantity: Number(jobCard.currentQty || jobCard.orderQty),
+        toDepartment: destDept,
+        quantity: sentQty,
         transferBy: authoritativeUserName,
         transferDate: now,
         accepted: false,
         initiatedByUserId: authoritativeUserId,
         initiatedByUserName: authoritativeUserName,
-        remarks: jobCard.purchaseDetails?.remarks || `Material inwarded from Supplier: ${jobCard.purchaseDetails?.supplierName || jobCard.partyName}. Total Received: ${jobCard.purchaseDetails?.receivedQty || jobCard.orderQty} ${unitLabel}, Sent to ${jobCard.currentDepartment || 'Store'}: ${jobCard.currentQty || jobCard.orderQty} ${unitLabel}.`
+        remarks: jobCard.purchaseDetails?.remarks || `Material inwarded from Supplier: ${jobCard.purchaseDetails?.supplierName || jobCard.partyName}. Total Received: ${jobCard.purchaseDetails?.receivedQty || jobCard.orderQty} ${unitLabel}, Sent to ${destDept}: ${sentQty} ${unitLabel}.`,
+        ...purchaseMeta
       } : {
         movementId: movId,
         jobCardNo: upperJobNo,
         fromDepartment: 'Dispatch',
-        toDepartment: jobCard.currentDepartment || 'Production',
+        toDepartment: destDept,
         quantity: Number(jobCard.orderQty),
         transferBy: authoritativeUserName,
         transferDate: now,
@@ -2511,15 +2541,15 @@ async function startServer() {
       };
 
       const notifId = `N-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-      const targetDept = isPurchase ? 'Store' : (jobCard.currentDepartment || 'Production');
+      const targetDept = isPurchase ? purchaseNotificationDepartment(destDept) : destDept;
       const notifData = {
         notificationId: notifId,
         department: targetDept,
         title: isPurchase ? 'New Purchase Inward Receipt' : 'New Production Queue Item',
         message: isPurchase
-          ? `New Purchase Inward ${upperJobNo} generated for supplier ${jobCard.partyName}. Quantity: ${jobCard.currentQty || jobCard.orderQty} ${unitLabel}. Pending Store acceptance.`
+          ? `New Purchase Inward ${upperJobNo} generated for supplier ${jobCard.partyName}. Quantity: ${sentQty} ${unitLabel}. Pending ${targetDept} acceptance.`
           : `Job Card ${upperJobNo} generated for ${jobCard.partyName}. Quantity: ${jobCard.orderQty} ${unitLabel}. Pending material acceptance.`,
-        userId: isPurchase ? 'all_store' : 'all_production',
+        userId: isPurchase ? `all_${String(targetDept).toLowerCase().replace(/\s+/g, '_')}` : 'all_production',
         read: false,
         createdAt: now
       };
@@ -2539,7 +2569,9 @@ async function startServer() {
           const dbAdmin = getFirestoreAdmin();
           if (dbAdmin) {
             await dbAdmin.collection("mfr_job_cards").doc(upperJobNo).set(newJob);
-            await dbAdmin.collection("mfr_movements").doc(initialMovement.movementId).set(initialMovement);
+            if (createInitialMov) {
+              await dbAdmin.collection("mfr_movements").doc(initialMovement.movementId).set(initialMovement);
+            }
             await dbAdmin.collection("mfr_notifications").doc(notifId).set(notifData);
             await dbAdmin.collection("mfr_audit_logs").doc(auditId).set(auditData);
           }
@@ -2548,24 +2580,31 @@ async function startServer() {
         }
       }
 
-      await Promise.all([
+      const restWrites = [
         firestoreRestSetDoc("mfr_job_cards", upperJobNo, newJob),
-        firestoreRestSetDoc("mfr_movements", initialMovement.movementId, initialMovement),
         firestoreRestSetDoc("mfr_notifications", notifId, notifData),
         firestoreRestSetDoc("mfr_audit_logs", auditId, auditData)
-      ]);
+      ];
+      if (createInitialMov) {
+        restWrites.splice(1, 0, firestoreRestSetDoc("mfr_movements", initialMovement.movementId, initialMovement));
+      }
+      await Promise.all(restWrites);
 
       inMemoryJobCards.set(upperJobNo, newJob);
-      inMemoryMovements.set(initialMovement.movementId, initialMovement);
+      if (createInitialMov) {
+        inMemoryMovements.set(initialMovement.movementId, initialMovement);
+      }
 
       broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: upperJobNo });
-      broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: initialMovement.movementId, jobCardNo: upperJobNo });
+      if (createInitialMov) {
+        broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: initialMovement.movementId, jobCardNo: upperJobNo });
+      }
       broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
 
       return res.json({
         success: true,
         jobCard: newJob,
-        movement: initialMovement
+        movement: createInitialMov ? initialMovement : null
       });
     } catch (err: any) {
       console.error("[JOB_CARDS] Error creating job card:", err);
@@ -2936,6 +2975,7 @@ async function startServer() {
   const VALID_MANUFACTURING_DEPARTMENTS = [
     "Purchase",
     "Raw Material Store",
+    "Incoming Store",
     "Dispatch",
     "Production",
     "Heat Treatment",
@@ -3209,7 +3249,13 @@ async function startServer() {
       const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
       const isDeptAuthorized = isSuperOrAdmin || 
         userDept === normFrom.toLowerCase() ||
-        allowedDepts.includes(normFrom.toLowerCase());
+        allowedDepts.includes(normFrom.toLowerCase()) ||
+        (normFrom.toLowerCase() === "incoming store" && canPurchaseUserOperateIncomingStore({
+          department: requester.department,
+          role: requester.role,
+          allowedDepartments: requester.allowedDepartments,
+          accessList: requester.accessList
+        }));
 
       if (!isDeptAuthorized) {
         return res.status(403).json({
@@ -3588,7 +3634,13 @@ async function startServer() {
               const targetDept = (movData.toDepartment || "").trim();
               const isTargetAuthorized = isSuperOrAdmin || 
                 userDept === targetDept.toLowerCase() ||
-                allowedDepts.includes(targetDept.toLowerCase());
+                allowedDepts.includes(targetDept.toLowerCase()) ||
+                (targetDept.toLowerCase() === "incoming store" && canPurchaseUserOperateIncomingStore({
+                  department: requester.department,
+                  role: requester.role,
+                  allowedDepartments: requester.allowedDepartments,
+                  accessList: requester.accessList
+                }));
 
               if (!isTargetAuthorized) {
                 const err: any = new Error(`Forbidden: User '${authoritativeUserName}' (${requester.department}) is not authorized to accept material transfers for '${targetDept}'.`);
@@ -3647,9 +3699,7 @@ async function startServer() {
                 const jcData = inMemoryJobCards.get(targetJobCardNo) || (jcSnap?.exists ? jcSnap.data() : null);
                 if (jcData) {
                   const nextVersion = (jcData.version || 1) + 1;
-                  const nextStatus = updatedMov.toDepartment === 'Production' 
-                    ? 'Pending' 
-                    : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
+                  const nextStatus = nextStatusOnPurchaseAccept(updatedMov.toDepartment);
 
                   updatedJobCard = {
                     ...jcData,
@@ -3740,7 +3790,13 @@ async function startServer() {
         const targetDept = (movData.toDepartment || "").trim();
         const isTargetAuthorized = isSuperOrAdmin || 
           userDept === targetDept.toLowerCase() ||
-          allowedDepts.includes(targetDept.toLowerCase());
+          allowedDepts.includes(targetDept.toLowerCase()) ||
+          (targetDept.toLowerCase() === "incoming store" && canPurchaseUserOperateIncomingStore({
+            department: requester.department,
+            role: requester.role,
+            allowedDepartments: requester.allowedDepartments,
+            accessList: requester.accessList
+          }));
 
         if (!isTargetAuthorized) {
           return res.status(403).json({
@@ -3778,7 +3834,7 @@ async function startServer() {
             }
           }
           if (jcData) {
-            const nextStatus = updatedMov.toDepartment === 'Production' ? 'Pending' : (updatedMov.toDepartment === 'Completed' ? 'Completed' : 'In Process');
+            const nextStatus = nextStatusOnPurchaseAccept(updatedMov.toDepartment);
             const updatedJc = {
               ...jcData,
               currentDepartment: updatedMov.toDepartment,
@@ -4073,7 +4129,13 @@ async function startServer() {
       const isSuperOrAdmin = userRole === "super_admin" || userRole === "admin" || userDept === "admin" || userDept === "management";
       const isDeptAuthorized = isSuperOrAdmin || 
         userDept === normFrom.toLowerCase() ||
-        allowedDepts.includes(normFrom.toLowerCase());
+        allowedDepts.includes(normFrom.toLowerCase()) ||
+        (normFrom.toLowerCase() === "incoming store" && canPurchaseUserOperateIncomingStore({
+          department: requester.department,
+          role: requester.role,
+          allowedDepartments: requester.allowedDepartments,
+          accessList: requester.accessList
+        }));
 
       if (!isDeptAuthorized) {
         return res.status(403).json({

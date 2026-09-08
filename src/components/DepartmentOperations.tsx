@@ -34,9 +34,20 @@ import {
   Send,
   RotateCcw
 } from 'lucide-react';
-import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer, RawMaterialKind } from '../types';
 import { DBService } from '../lib/firebase';
 import RawMaterialRequestModal, { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
+import {
+  resolveInitialPurchaseRoute,
+  buildPurchaseMovementContract,
+  parseDecimalQuantity,
+  sanitizeDecimalInput,
+  displayUnitLabel,
+  isHeldInIncomingStore,
+  isVisibleInProductionQueue,
+  RAW_MATERIAL_STORE,
+  normalizeItemCode
+} from '../hardening/process1Purchase';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
 import StoreProcessTransferModal from './StoreProcessTransferModal';
@@ -334,8 +345,9 @@ export default function DepartmentOperations({
   const [purchaseItemCode, setPurchaseItemCode] = useState('');
   const [purchaseUnit, setPurchaseUnit] = useState<'KGS' | 'PCS'>('KGS');
   const [activePurchaseJob, setActivePurchaseJob] = useState<string | null>(null);
-  const [purchaseTargetDept, setPurchaseTargetDept] = useState<'Store' | 'Plating' | 'Heat Treatment' | 'Raw Material Store' | 'Packing' | 'Production'>('Raw Material Store');
+  const [purchaseTargetDept, setPurchaseTargetDept] = useState<Department>('Raw Material Store');
   const [purchaseMaterialType, setPurchaseMaterialType] = useState<'Raw Material' | 'Semi Finished Goods' | 'Finished Goods'>('Raw Material');
+  const [purchaseRawKind, setPurchaseRawKind] = useState<RawMaterialKind>('Wire');
   const [purchaseMultiItems, setPurchaseMultiItems] = useState<{
     itemName: string;
     itemCode: string;
@@ -344,7 +356,9 @@ export default function DepartmentOperations({
     sentQty: number;
     unit: 'KGS' | 'PCS';
     materialType: 'Raw Material' | 'Semi Finished Goods' | 'Finished Goods';
-    targetDept: 'Store' | 'Plating' | 'Heat Treatment' | 'Raw Material Store';
+    rawMaterialKind?: RawMaterialKind;
+    isWire?: boolean;
+    targetDept: Department;
     remarks?: string;
   }[]>([]);
 
@@ -746,23 +760,38 @@ export default function DepartmentOperations({
   };
 
   const handleAddItemToPurchase = async () => {
-    const recNum = typeof purchaseRecQty === 'number' ? purchaseRecQty : (parseInt(String(purchaseRecQty), 10) || 0);
-    const rejNum = typeof purchaseRejQty === 'number' ? purchaseRejQty : (parseInt(String(purchaseRejQty), 10) || 0);
+    const recNum = parseDecimalQuantity(purchaseRecQty);
+    const rejNum = parseDecimalQuantity(purchaseRejQty) || 0;
 
-    if (!purchaseItemName.trim() || recNum <= 0) {
+    if (!purchaseItemName.trim() || !(recNum > 0)) {
       alert("Please specify Item Name and Received Quantity.");
       return;
     }
+    if (purchaseMaterialType === 'Raw Material' && !purchaseRawKind) {
+      alert("Please classify Raw Material as Wire or Other Raw Material.");
+      return;
+    }
     if (purchaseSentQty > recNum) {
-      alert(`Error: Sent quantity (${purchaseSentQty} KG) cannot exceed the received quantity (${recNum} KG).`);
+      alert(`Error: Sent quantity (${purchaseSentQty}) cannot exceed the received quantity (${recNum}).`);
       return;
     }
     if (purchaseSentQty + rejNum > recNum) {
-      alert(`Error: Combined sent quantity (${purchaseSentQty} KG) and rejection quantity (${rejNum} KG) cannot exceed the received quantity (${recNum} KG).`);
+      alert(`Error: Combined sent quantity (${purchaseSentQty}) and rejection quantity (${rejNum}) cannot exceed the received quantity (${recNum}).`);
       return;
     }
 
-    const cleanCode = purchaseItemCode.trim() ? purchaseItemCode.trim().toUpperCase() : '-';
+    const route = resolveInitialPurchaseRoute({
+      materialType: purchaseMaterialType,
+      rawMaterialKind: purchaseRawKind,
+      isWire: purchaseRawKind === 'Wire',
+      selectedDestination: purchaseTargetDept
+    });
+    if (route.error) {
+      alert(route.error);
+      return;
+    }
+
+    const cleanCode = normalizeItemCode(purchaseItemCode);
     const cleanSupplier = purchaseSupplier.trim();
 
     if (cleanSupplier) {
@@ -784,7 +813,9 @@ export default function DepartmentOperations({
         sentQty: purchaseSentQty,
         unit: purchaseMaterialType === 'Finished Goods' ? purchaseUnit : 'KGS',
         materialType: purchaseMaterialType,
-        targetDept: purchaseTargetDept,
+        rawMaterialKind: purchaseMaterialType === 'Raw Material' ? purchaseRawKind : undefined,
+        isWire: purchaseMaterialType === 'Raw Material' ? purchaseRawKind === 'Wire' : undefined,
+        targetDept: route.destination as Department,
         remarks: purchaseRemarks.trim() || undefined
       }
     ]);
@@ -797,8 +828,8 @@ export default function DepartmentOperations({
     setPurchaseRejQty(0);
     setPurchaseSentQty(0);
     setPurchaseUnit('KGS');
-    // Reset to Raw Material default
     setPurchaseMaterialType('Raw Material');
+    setPurchaseRawKind('Wire');
     setPurchaseTargetDept('Raw Material Store');
   };
 
@@ -813,8 +844,119 @@ export default function DepartmentOperations({
       return;
     }
 
-    const recNum = typeof purchaseRecQty === 'number' ? purchaseRecQty : (parseInt(String(purchaseRecQty), 10) || 0);
-    const rejNum = typeof purchaseRejQty === 'number' ? purchaseRejQty : (parseInt(String(purchaseRejQty), 10) || 0);
+    const recNum = parseDecimalQuantity(purchaseRecQty);
+    const rejNum = parseDecimalQuantity(purchaseRejQty) || 0;
+
+    const applyPurchaseRoute = (opts: {
+      itemName: string;
+      itemCode: string;
+      recQty: number;
+      rejQty: number;
+      sentQty: number;
+      materialType: 'Raw Material' | 'Semi Finished Goods' | 'Finished Goods';
+      unit: 'KGS' | 'PCS';
+      rawMaterialKind?: RawMaterialKind;
+      isWire?: boolean;
+      selectedDestination: Department;
+      remarks?: string;
+      existingJob?: JobCard | null;
+    }) => {
+      const route = resolveInitialPurchaseRoute({
+        materialType: opts.materialType,
+        rawMaterialKind: opts.rawMaterialKind,
+        isWire: opts.isWire,
+        selectedDestination: opts.selectedDestination
+      });
+      const dest = route.destination as Department;
+      const contract = buildPurchaseMovementContract({
+        jobCardNo: opts.existingJob?.jobCardNo || '',
+        itemCode: opts.itemCode,
+        itemName: opts.itemName,
+        materialType: opts.materialType,
+        unit: opts.unit,
+        quantity: opts.sentQty,
+        toDepartment: dest,
+        isWire: route.isWire,
+        rawMaterialKind: route.rawMaterialKind,
+        supplierName: purchaseSupplier.trim(),
+        billNo: purchaseBill
+      });
+
+      if (opts.existingJob) {
+        onUpdateJobCard(opts.existingJob.jobCardNo, {
+          currentDepartment: dest,
+          currentQty: opts.sentQty,
+          status: 'Pending Acceptance',
+          materialType: opts.materialType,
+          isWire: route.isWire,
+          rawMaterialKind: route.rawMaterialKind || undefined,
+          unit: opts.unit
+        });
+        onCreateMovement({
+          jobCardNo: opts.existingJob.jobCardNo,
+          itemCode: contract.itemCode,
+          itemName: contract.itemName,
+          fromDepartment: 'Purchase',
+          toDepartment: dest,
+          quantity: contract.quantity,
+          remarks: `Outsource Order ${linkedOrder?.orderId} material inwarded via Purchase (Supplier: ${purchaseSupplier}, Bill/Challan: ${purchaseBill || 'N/A'}). Routed to ${dest}.`,
+          processDetails: contract.processDetails
+        });
+        return { kind: 'existing' as const };
+      }
+
+      if (opts.materialType === 'Raw Material' && route.isWire) {
+        const stockCode = contract.itemCode !== '-' ? contract.itemCode : Date.now().toString().slice(-6);
+        return {
+          kind: 'wire' as const,
+          movement: {
+            jobCardNo: 'STOCK-IN-' + stockCode,
+            itemCode: contract.itemCode,
+            itemName: contract.itemName,
+            materialType: 'Raw Material' as const,
+            unit: 'KGS' as const,
+            isWire: true,
+            rawMaterialKind: 'Wire' as const,
+            fromDepartment: 'Purchase' as Department,
+            toDepartment: RAW_MATERIAL_STORE as Department,
+            quantity: contract.quantity,
+            remarks: `Direct Purchase / Outsource Inward of Raw Material Wire (Supplier: ${purchaseSupplier}, Bill: ${purchaseBill || 'N/A'}). ${selectedOutsourceOrderId ? `Linked Outsource Order: ${selectedOutsourceOrderId}` : ''}`,
+            processDetails: contract.processDetails
+          }
+        };
+      }
+
+      return {
+        kind: 'job' as const,
+        job: {
+          partyName: purchaseSupplier.trim(),
+          itemName: opts.itemName,
+          itemCode: contract.itemCode,
+          orderQty: opts.recQty,
+          unit: opts.unit,
+          heatTreatmentRequired: dest === 'Heat Treatment',
+          currentQty: opts.sentQty,
+          currentDepartment: dest,
+          status: 'Pending Acceptance',
+          processType: 'Purchase',
+          materialType: opts.materialType,
+          isWire: opts.materialType === 'Raw Material' ? route.isWire : undefined,
+          rawMaterialKind: route.rawMaterialKind || undefined,
+          purchaseDetails: {
+            supplierName: purchaseSupplier.trim(),
+            billNo: purchaseBill,
+            receivedQty: opts.recQty,
+            rejectionQty: opts.rejQty,
+            sentToStore: opts.sentQty,
+            remarks: opts.remarks || purchaseRemarks,
+            materialType: opts.materialType,
+            unit: opts.unit,
+            isWire: opts.materialType === 'Raw Material' ? route.isWire : undefined,
+            rawMaterialKind: route.rawMaterialKind || undefined
+          }
+        }
+      };
+    };
 
     // If linked to an Outsource Order, update the Outsource Order in DB first
     let linkedOrder: OutsourceOrder | undefined = undefined;
@@ -850,83 +992,49 @@ export default function DepartmentOperations({
     }
 
     if (purchaseMultiItems.length === 0) {
-      // Fallback/backwards compatibility: register current form values as single item
-      if (!purchaseItemName || recNum <= 0) {
+      if (!purchaseItemName || !(recNum > 0)) {
         alert("Please add at least one item to the purchase list, or fill in item details.");
         return;
       }
-
+      if (!(purchaseSentQty > 0)) {
+        alert("Sent quantity must be greater than 0.");
+        return;
+      }
       if (purchaseSentQty > recNum) {
-        alert(`Error: Sent quantity (${purchaseSentQty} KG) cannot exceed the received quantity (${recNum} KG).`);
+        alert(`Error: Sent quantity (${purchaseSentQty}) cannot exceed the received quantity (${recNum}).`);
         return;
       }
       if (purchaseSentQty + rejNum > recNum) {
-        alert(`Error: Combined sent quantity (${purchaseSentQty} KG) and rejection quantity (${rejNum} KG) cannot exceed the received quantity (${recNum} KG).`);
+        alert(`Error: Combined sent quantity (${purchaseSentQty}) and rejection quantity (${rejNum}) cannot exceed the received quantity (${recNum}).`);
+        return;
+      }
+      if (purchaseMaterialType === 'Raw Material' && !purchaseRawKind) {
+        alert("Please classify Raw Material as Wire or Other Raw Material.");
         return;
       }
 
-      const effectiveCode = purchaseItemCode.trim() ? purchaseItemCode.trim().toUpperCase() : '-';
-
-      // Check if linked order has an existing job card in current production list
+      const effectiveCode = normalizeItemCode(purchaseItemCode);
       const existingJob = linkedOrder?.jobCardNo ? jobCards.find(j => j.jobCardNo.toLowerCase() === linkedOrder!.jobCardNo!.toLowerCase()) : null;
-
-      if (existingJob) {
-        // Move existing job card directly to target department!
-        onUpdateJobCard(existingJob.jobCardNo, {
-          currentDepartment: purchaseTargetDept,
-          currentQty: purchaseSentQty,
-          status: 'Pending Acceptance'
-        });
-        onCreateMovement({
-          jobCardNo: existingJob.jobCardNo,
-          fromDepartment: 'Purchase',
-          toDepartment: purchaseTargetDept,
-          quantity: purchaseSentQty,
-          remarks: `Outsource Order ${linkedOrder?.orderId} material inwarded via Purchase (Supplier: ${purchaseSupplier}, Bill/Challan: ${purchaseBill || 'N/A'}). Routed to ${purchaseTargetDept}.`
-        });
-      } else if (purchaseMaterialType === 'Raw Material' || purchaseTargetDept === 'Raw Material Store') {
-        onCreateMovement({
-          jobCardNo: 'STOCK-IN-' + (effectiveCode !== '-' ? effectiveCode : Date.now().toString().slice(-6)),
-          itemCode: effectiveCode,
-          itemName: purchaseItemName.trim(),
-          fromDepartment: 'Purchase',
-          toDepartment: 'Raw Material Store',
-          quantity: purchaseSentQty,
-          remarks: `Direct Purchase / Outsource Inward of Raw Material (Supplier: ${purchaseSupplier}, Bill: ${purchaseBill || 'N/A'}). ${selectedOutsourceOrderId ? `Linked Outsource Order: ${selectedOutsourceOrderId}` : ''}`,
-          processDetails: {
-            rawMaterialCode: effectiveCode,
-            rawMaterialName: purchaseItemName.trim(),
-            supplierName: purchaseSupplier,
-            billNo: purchaseBill
-          } as any
-        });
-      } else {
-        onCreateJobCard({
-          partyName: purchaseSupplier.trim(),
-          itemName: purchaseItemName.trim(),
-          itemCode: effectiveCode,
-          orderQty: recNum,
-          unit: purchaseMaterialType === 'Finished Goods' ? purchaseUnit : 'KGS',
-          heatTreatmentRequired: purchaseTargetDept === 'Heat Treatment',
-          currentQty: purchaseSentQty,
-          currentDepartment: purchaseTargetDept,
-          status: 'Pending Acceptance',
-          processType: 'Purchase',
-          materialType: purchaseMaterialType,
-          purchaseDetails: {
-            supplierName: purchaseSupplier.trim(),
-            billNo: purchaseBill,
-            receivedQty: recNum,
-            rejectionQty: rejNum,
-            sentToStore: purchaseSentQty,
-            remarks: purchaseRemarks,
-            materialType: purchaseMaterialType,
-            unit: purchaseMaterialType === 'Finished Goods' ? purchaseUnit : 'KGS'
-          }
-        });
+      const result = applyPurchaseRoute({
+        itemName: purchaseItemName.trim(),
+        itemCode: effectiveCode,
+        recQty: recNum,
+        rejQty: rejNum,
+        sentQty: purchaseSentQty,
+        materialType: purchaseMaterialType,
+        unit: purchaseMaterialType === 'Finished Goods' ? purchaseUnit : 'KGS',
+        rawMaterialKind: purchaseRawKind,
+        isWire: purchaseRawKind === 'Wire',
+        selectedDestination: purchaseTargetDept,
+        remarks: purchaseRemarks,
+        existingJob: existingJob || null
+      });
+      if (result.kind === 'wire' && result.movement) {
+        onCreateMovement(result.movement);
+      } else if (result.kind === 'job' && result.job) {
+        onCreateJobCard(result.job);
       }
 
-      // Reset Form
       setSelectedOutsourceOrderId('');
       setPurchaseSupplier('');
       setPurchaseBill('');
@@ -938,64 +1046,40 @@ export default function DepartmentOperations({
       setPurchaseSentQty(0);
       setPurchaseUnit('KGS');
       setPurchaseMaterialType('Raw Material');
+      setPurchaseRawKind('Wire');
       setPurchaseTargetDept('Raw Material Store');
     } else {
-      // Multiple items! We can have both raw material movements and job cards.
       const movements: any[] = [];
-      const jobCards: any[] = [];
+      const newJobCards: any[] = [];
 
       for (const item of purchaseMultiItems) {
-        if (item.materialType === 'Raw Material' || item.targetDept === 'Raw Material Store') {
-          movements.push({
-            jobCardNo: 'STOCK-IN-' + item.itemCode,
-            itemCode: item.itemCode,
-            itemName: item.itemName,
-            fromDepartment: 'Purchase',
-            toDepartment: 'Raw Material Store',
-            quantity: item.sentQty,
-            remarks: `Direct Purchase Inward of Raw Material (Supplier: ${purchaseSupplier.trim()}, Bill: ${purchaseBill || 'N/A'}). Remarks: ${item.remarks || 'None'}`,
-            processDetails: {
-              rawMaterialCode: item.itemCode,
-              rawMaterialName: item.itemName,
-              supplierName: purchaseSupplier.trim(),
-              billNo: purchaseBill
-            } as any
-          });
-        } else {
-          jobCards.push({
-            partyName: purchaseSupplier.trim(),
-            itemName: item.itemName,
-            itemCode: item.itemCode,
-            orderQty: item.recQty,
-            unit: item.unit,
-            heatTreatmentRequired: item.targetDept === 'Heat Treatment',
-            currentQty: item.sentQty,
-            currentDepartment: item.targetDept,
-            status: 'Pending Acceptance',
-            processType: 'Purchase',
-            materialType: item.materialType,
-            purchaseDetails: {
-              supplierName: purchaseSupplier.trim(),
-              billNo: purchaseBill,
-              receivedQty: item.recQty,
-              rejectionQty: item.rejQty,
-              sentToStore: item.sentQty,
-              remarks: item.remarks || '',
-              materialType: item.materialType,
-              unit: item.unit
-            }
-          });
+        const result = applyPurchaseRoute({
+          itemName: item.itemName,
+          itemCode: item.itemCode,
+          recQty: item.recQty,
+          rejQty: item.rejQty,
+          sentQty: item.sentQty,
+          materialType: item.materialType,
+          unit: item.unit,
+          rawMaterialKind: item.rawMaterialKind,
+          isWire: item.isWire,
+          selectedDestination: item.targetDept,
+          remarks: item.remarks
+        });
+        if (result.kind === 'wire' && result.movement) {
+          movements.push(result.movement);
+        } else if (result.kind === 'job' && result.job) {
+          newJobCards.push(result.job);
         }
       }
 
       if (movements.length > 0) {
         onCreateMovement(movements);
       }
-      if (jobCards.length > 0) {
-        onCreateJobCard(jobCards);
+      if (newJobCards.length > 0) {
+        onCreateJobCard(newJobCards);
       }
 
-      // Reset
       setPurchaseMultiItems([]);
       setPurchaseSupplier('');
       setPurchaseBill('');
@@ -1007,6 +1091,7 @@ export default function DepartmentOperations({
       setPurchaseSentQty(0);
       setPurchaseUnit('KGS');
       setPurchaseMaterialType('Raw Material');
+      setPurchaseRawKind('Wire');
       setPurchaseTargetDept('Raw Material Store');
     }
   };
@@ -1017,46 +1102,74 @@ export default function DepartmentOperations({
   };
 
   const handleCompletePurchase = (jCard: JobCard) => {
-    if (!purchaseSupplier || purchaseSentQty <= 0) return;
-
-    if (purchaseSentQty > purchaseRecQty) {
-      alert(`Error: Sent quantity (${purchaseSentQty} KG) cannot exceed the received quantity (${purchaseRecQty} KG).`);
+    const recNum = parseDecimalQuantity(purchaseRecQty);
+    const rejNum = parseDecimalQuantity(purchaseRejQty) || 0;
+    if (!(purchaseSentQty > 0) || !purchaseSupplier) return;
+    if (!(recNum > 0) || purchaseSentQty > recNum) {
+      alert(`Error: Sent quantity (${purchaseSentQty}) cannot exceed the received quantity (${recNum}).`);
       return;
     }
-    if (purchaseSentQty + purchaseRejQty > purchaseRecQty) {
-      alert(`Error: Combined sent quantity (${purchaseSentQty} KG) and rejection quantity (${purchaseRejQty} KG) cannot exceed the received quantity (${purchaseRecQty} KG).`);
+    if (purchaseSentQty + rejNum > recNum) {
+      alert(`Error: Combined sent quantity (${purchaseSentQty}) and rejection quantity (${rejNum}) cannot exceed the received quantity (${recNum}).`);
       return;
     }
 
-    const isHoldingInPurchase = purchaseTargetDept === 'Purchase';
+    const route = resolveInitialPurchaseRoute({
+      materialType: purchaseMaterialType,
+      rawMaterialKind: purchaseRawKind,
+      isWire: purchaseRawKind === 'Wire',
+      selectedDestination: purchaseTargetDept
+    });
+    const dest = route.destination as Department;
+    const unit = purchaseMaterialType === 'Finished Goods' ? purchaseUnit : 'KGS';
+    const contract = buildPurchaseMovementContract({
+      jobCardNo: jCard.jobCardNo,
+      itemCode: jCard.itemCode,
+      itemName: jCard.itemName,
+      materialType: purchaseMaterialType,
+      unit,
+      quantity: purchaseSentQty,
+      toDepartment: dest,
+      isWire: route.isWire,
+      rawMaterialKind: route.rawMaterialKind,
+      supplierName: purchaseSupplier,
+      billNo: purchaseBill
+    });
 
     onUpdateJobCard(jCard.jobCardNo, {
       materialType: purchaseMaterialType,
+      isWire: purchaseMaterialType === 'Raw Material' ? route.isWire : undefined,
+      rawMaterialKind: route.rawMaterialKind || undefined,
+      unit,
       purchaseDetails: {
         supplierName: purchaseSupplier,
         billNo: purchaseBill,
-        receivedQty: purchaseRecQty,
-        rejectionQty: purchaseRejQty,
+        receivedQty: recNum,
+        rejectionQty: rejNum,
         sentToStore: purchaseSentQty,
         remarks: purchaseRemarks,
-        materialType: purchaseMaterialType
+        materialType: purchaseMaterialType,
+        unit,
+        isWire: purchaseMaterialType === 'Raw Material' ? route.isWire : undefined,
+        rawMaterialKind: route.rawMaterialKind || undefined
       },
       currentQty: purchaseSentQty,
-      balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - purchaseRejQty),
-      heatTreatmentRequired: jCard.heatTreatmentRequired || purchaseTargetDept === 'Heat Treatment',
-      currentDepartment: isHoldingInPurchase ? 'Purchase' : purchaseTargetDept,
-      status: isHoldingInPurchase ? 'In Process' : 'Pending Acceptance'
+      balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - rejNum),
+      heatTreatmentRequired: jCard.heatTreatmentRequired || dest === 'Heat Treatment',
+      currentDepartment: dest,
+      status: 'Pending Acceptance'
     });
 
-    if (!isHoldingInPurchase) {
-      onCreateMovement({
-        jobCardNo: jCard.jobCardNo,
-        fromDepartment: 'Purchase',
-        toDepartment: purchaseTargetDept, // Dynamically route to selected department
-        quantity: purchaseSentQty,
-        remarks: `Material inwarded from supplier: ${purchaseSupplier}. Received: ${purchaseRecQty} KG, Dispatched to ${purchaseTargetDept}: ${purchaseSentQty} KG, Rejections: ${purchaseRejQty} KG. Remarks: ${purchaseRemarks}`
-      });
-    }
+    onCreateMovement({
+      jobCardNo: jCard.jobCardNo,
+      itemCode: contract.itemCode,
+      itemName: contract.itemName,
+      fromDepartment: 'Purchase',
+      toDepartment: dest,
+      quantity: contract.quantity,
+      remarks: `Material inwarded from supplier: ${purchaseSupplier}. Received: ${recNum} ${displayUnitLabel(unit)}, Dispatched to ${dest}: ${purchaseSentQty} ${displayUnitLabel(unit)}, Rejections: ${rejNum} ${displayUnitLabel(unit)}. Remarks: ${purchaseRemarks}`,
+      processDetails: contract.processDetails
+    });
 
     setPurchaseSupplier('');
     setPurchaseBill('');
@@ -1534,7 +1647,7 @@ Please adjust the quantity or request additional raw material issue.`);
       fromDepartment: 'Store',
       toDepartment: targetDept, // Dynamic transit target: Packing or Dispatch
       quantity: sentToNext,
-      remarks: `Stored in bin location: ${storeBinLoc}. Recv: ${receivedFromPacking} KG, Sent to ${targetDept}: ${sentToNext} KG, Rejections: ${storeRejectionQty} KG, Remaining Qty: ${remainingQty} KG.`
+      remarks: `Stored in bin location: ${storeBinLoc}. Recv: ${receivedFromPacking} ${displayUnitLabel(jCard.unit)}, Sent to ${targetDept}: ${sentToNext} ${displayUnitLabel(jCard.unit)}, Rejections: ${storeRejectionQty} ${displayUnitLabel(jCard.unit)}, Remaining Qty: ${remainingQty} ${displayUnitLabel(jCard.unit)}.`
     });
 
     setStoreRejectionQty(0);
@@ -1661,7 +1774,11 @@ Please adjust the quantity or request additional raw material issue.`);
   // --- FILTERED LISTS ---
   // A. Department Inbox Architecture: Authoritative Incoming Transfers waiting for acceptance
   const departmentIncomingTransfers = useMemo(() => {
-    return DBService.getDepartmentIncomingTransfers(activeDept, movements);
+    const primary = DBService.getDepartmentIncomingTransfers(activeDept, movements);
+    if (activeDept !== 'Purchase') return primary;
+    const incomingStore = DBService.getDepartmentIncomingTransfers('Incoming Store', movements);
+    const seen = new Set(primary.map(m => m.movementId));
+    return [...primary, ...incomingStore.filter(m => !seen.has(m.movementId))];
   }, [activeDept, movements, userDepts]);
   const incomingTransfers = departmentIncomingTransfers;
 
@@ -1700,18 +1817,15 @@ Please adjust the quantity or request additional raw material issue.`);
       return true;
     }
     if (activeDept === 'Purchase') {
-      const totalMovedFromPurchase = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Purchase')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingPurchaseQty = c.orderQty - totalMovedFromPurchase;
-      return (c.processType === 'Purchase' && (c.currentDepartment === 'Purchase' || pendingPurchaseQty > 0));
+      return c.processType === 'Purchase' && c.currentDepartment === 'Purchase';
     }
     if (activeDept === 'Production') {
+      if (isVisibleInProductionQueue(c)) return true;
       const totalMovedFromProd = movements
         .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
         .reduce((sum, m) => sum + m.quantity, 0);
       const pendingProdQty = c.orderQty - totalMovedFromProd;
-      return (c.processType !== 'Purchase' && (c.currentDepartment === 'Production' || pendingProdQty > 0));
+      return c.processType !== 'Purchase' && (c.currentDepartment === 'Production' || pendingProdQty > 0);
     }
     if (activeDept === 'Heat Treatment') {
       const totalReceivedAtHT = movements
@@ -2170,7 +2284,7 @@ Please adjust the quantity or request additional raw material issue.`);
                   </span>
                 )}
               </button>
-              {(activeDept === 'Purchase' || activeDept === 'Store' || activeDept === 'Raw Material Store') && (
+              {activeDept === 'Purchase' && (
                 <button
                   onClick={() => setActiveSubView('incoming_store')}
                   className={`w-full sm:w-auto px-3.5 py-2 sm:py-1.5 min-h-[40px] sm:min-h-[36px] rounded-lg font-bold transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer text-[11px] sm:text-xs ${
@@ -2178,9 +2292,9 @@ Please adjust the quantity or request additional raw material issue.`);
                   }`}
                 >
                   <span>🏬 Incoming Store</span>
-                  {jobCards.filter(j => !j.completed && (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails)).length > 0 && (
+                  {jobCards.filter(isHeldInIncomingStore).length > 0 && (
                     <span className="bg-purple-500 text-white text-[9.5px] font-bold px-1.5 py-0.5 rounded-full shrink-0">
-                      {jobCards.filter(j => !j.completed && (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails)).length}
+                      {jobCards.filter(isHeldInIncomingStore).length}
                     </span>
                   )}
                 </button>
@@ -3336,14 +3450,13 @@ Please adjust the quantity or request additional raw material issue.`);
                     <label className="block text-slate-455 font-semibold mb-1">Received Qty ({purchaseQtyUnitLabel})</label>
                     <input
                       type="text"
-                      inputMode="numeric"
-                      pattern="[0-9]*"
+                      inputMode="decimal"
                       value={purchaseRecQty}
                       onChange={e => {
-                        const clean = e.target.value.replace(/\D/g, '');
+                        const clean = sanitizeDecimalInput(e.target.value);
                         setPurchaseRecQty(clean);
-                        const rec = parseInt(clean, 10) || 0;
-                        const rej = typeof purchaseRejQty === 'number' ? purchaseRejQty : (parseInt(String(purchaseRejQty), 10) || 0);
+                        const rec = parseDecimalQuantity(clean) || 0;
+                        const rej = parseDecimalQuantity(purchaseRejQty) || 0;
                         setPurchaseSentQty(Math.max(0, rec - rej));
                       }}
                       placeholder="0"
@@ -3355,14 +3468,13 @@ Please adjust the quantity or request additional raw material issue.`);
                       <label className="block text-rose-500 font-semibold mb-1 text-center truncate">Rej ({purchaseQtyUnitLabel})</label>
                       <input
                         type="text"
-                        inputMode="numeric"
-                        pattern="[0-9]*"
+                        inputMode="decimal"
                         value={purchaseRejQty}
                         onChange={e => {
-                          const clean = e.target.value.replace(/\D/g, '');
+                          const clean = sanitizeDecimalInput(e.target.value);
                           setPurchaseRejQty(clean);
-                          const rej = parseInt(clean, 10) || 0;
-                          const rec = typeof purchaseRecQty === 'number' ? purchaseRecQty : (parseInt(String(purchaseRecQty), 10) || 0);
+                          const rej = parseDecimalQuantity(clean) || 0;
+                          const rec = parseDecimalQuantity(purchaseRecQty) || 0;
                           setPurchaseSentQty(Math.max(0, rec - rej));
                         }}
                         placeholder="0"
@@ -3391,6 +3503,7 @@ Please adjust the quantity or request additional raw material issue.`);
                       type="button"
                       onClick={() => {
                         setPurchaseMaterialType('Raw Material');
+                        setPurchaseRawKind('Wire');
                         setPurchaseTargetDept('Raw Material Store');
                       }}
                       className={`py-2 px-1 rounded-lg font-bold border text-center transition cursor-pointer text-[10px] ${
@@ -3405,7 +3518,7 @@ Please adjust the quantity or request additional raw material issue.`);
                       type="button"
                       onClick={() => {
                         setPurchaseMaterialType('Semi Finished Goods');
-                        setPurchaseTargetDept('Heat Treatment');
+                        setPurchaseTargetDept('Production');
                       }}
                       className={`py-2 px-1 rounded-lg font-bold border text-center transition cursor-pointer text-[10px] ${
                         purchaseMaterialType === 'Semi Finished Goods'
@@ -3431,6 +3544,47 @@ Please adjust the quantity or request additional raw material issue.`);
                     </button>
                   </div>
                 </div>
+
+                {purchaseMaterialType === 'Raw Material' && (
+                  <div>
+                    <label className="block text-slate-400 font-semibold mb-1">Raw Material Classification</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPurchaseRawKind('Wire');
+                          setPurchaseTargetDept('Raw Material Store');
+                        }}
+                        className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
+                          purchaseRawKind === 'Wire'
+                            ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
+                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-600 border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        Wire
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPurchaseRawKind('Other');
+                          setPurchaseTargetDept('Incoming Store');
+                        }}
+                        className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
+                          purchaseRawKind === 'Other'
+                            ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
+                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-600 border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        Other Raw Material
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      {purchaseRawKind === 'Wire'
+                        ? 'Routes to Raw Material Store, then issue to Production.'
+                        : 'Routes to Incoming Store, then send to Production.'}
+                    </p>
+                  </div>
+                )}
 
                 {purchaseMaterialType === 'Finished Goods' && (
                   <div>
@@ -3466,43 +3620,28 @@ Please adjust the quantity or request additional raw material issue.`);
                   <label className="block text-slate-400 font-semibold mb-1">Send / Route Material To</label>
                   <div className="space-y-1.5">
                     {purchaseMaterialType === 'Raw Material' && (
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setPurchaseTargetDept('Raw Material Store')}
-                          className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
-                            purchaseTargetDept === 'Raw Material Store'
-                              ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
-                              : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
-                          }`}
-                        >
-                          🏢 Raw Material Store
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setPurchaseTargetDept('Purchase')}
-                          className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
-                            purchaseTargetDept === 'Purchase'
-                              ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
-                              : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
-                          }`}
-                        >
-                          🛒 Purchase Incoming Store
-                        </button>
+                      <div className="grid grid-cols-1 gap-2">
+                        <div className={`py-2 px-2 rounded-lg font-bold border text-center text-xs ${
+                          purchaseRawKind === 'Wire'
+                            ? 'bg-emerald-600 text-white border-emerald-700'
+                            : 'bg-purple-600 text-white border-purple-700'
+                        }`}>
+                          {purchaseRawKind === 'Wire' ? '🏢 Raw Material Store (fixed for Wire)' : '🏬 Incoming Store (fixed for Other RM)'}
+                        </div>
                       </div>
                     )}
                     {purchaseMaterialType === 'Finished Goods' && (
-                      <div className="grid grid-cols-3 gap-1.5">
+                      <div className="grid grid-cols-2 gap-1.5">
                         <button
                           type="button"
-                          onClick={() => setPurchaseTargetDept('Packing')}
+                          onClick={() => setPurchaseTargetDept('Dispatch')}
                           className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                            purchaseTargetDept === 'Packing'
-                              ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
-                              : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
+                            purchaseTargetDept === 'Dispatch'
+                              ? 'bg-amber-600 text-white border-amber-700 shadow-sm'
+                              : 'bg-amber-50 hover:bg-amber-100 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800'
                           }`}
                         >
-                          📦 Packing
+                          🚚 Direct Dispatch
                         </button>
                         <button
                           type="button"
@@ -3514,17 +3653,6 @@ Please adjust the quantity or request additional raw material issue.`);
                           }`}
                         >
                           🏢 FG Store
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setPurchaseTargetDept('Purchase')}
-                          className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                            purchaseTargetDept === 'Purchase'
-                              ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
-                              : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
-                          }`}
-                        >
-                          🛒 Purchase Store
                         </button>
                       </div>
                     )}
@@ -3565,14 +3693,14 @@ Please adjust the quantity or request additional raw material issue.`);
                         </button>
                         <button
                           type="button"
-                          onClick={() => setPurchaseTargetDept('Purchase')}
+                          onClick={() => setPurchaseTargetDept('Incoming Store')}
                           className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                            purchaseTargetDept === 'Purchase'
+                            purchaseTargetDept === 'Incoming Store'
                               ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
                               : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
                           }`}
                         >
-                          🛒 Purchase Store
+                          🏬 Incoming Store
                         </button>
                       </div>
                     )}
@@ -3844,18 +3972,13 @@ Please adjust the quantity or request additional raw material issue.`);
                   <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
                     <span className="text-xs font-bold px-2.5 py-1 rounded-xl bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800 flex items-center gap-1.5">
                       <Box className="h-3.5 w-3.5" />
-                      {jobCards.filter(j => !j.completed && (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails)).length} Stored Items
+                      {jobCards.filter(isHeldInIncomingStore).length} Stored Items
                     </span>
                   </div>
                 </div>
 
                 {(() => {
-                  const storedItems = jobCards.filter(j => 
-                    !j.completed && 
-                    (j.currentDepartment === activeDept || (activeDept === 'Purchase' && j.processType === 'Purchase')) && 
-                    (j.status === 'In Process' || j.status === 'Stored' || j.status === 'Pending' || !!j.purchaseDetails) &&
-                    filterJobCard(j)
-                  ).sort((a, b) => {
+                  const storedItems = jobCards.filter(j => isHeldInIncomingStore(j) && filterJobCard(j)).sort((a, b) => {
                     if (deptSortBy === 'oldest') {
                       const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
                       const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
@@ -4024,9 +4147,6 @@ Please adjust the quantity or request additional raw material issue.`);
                                         { id: 'Production', label: 'Production', icon: '🪵' },
                                         { id: 'Heat Treatment', label: 'Heat Treatment', icon: '🔥' },
                                         { id: 'Plating', label: 'Plating', icon: '⚡' },
-                                        { id: 'Packing', label: 'Packing', icon: '📦' },
-                                        { id: 'Store', label: 'Store (Stock)', icon: '🏬' },
-                                        { id: 'Raw Material Store', label: 'RM Store', icon: '🏭' },
                                       ].map(dept => (
                                         <button
                                           key={dept.id}
@@ -4115,22 +4235,26 @@ Please adjust the quantity or request additional raw material issue.`);
                                             itemCode: job.itemCode,
                                             orderQty: qtyNum,
                                             currentQty: qtyNum,
-                                            unit: job.unit || 'KG',
+                                            unit: job.unit === 'PCS' ? 'PCS' : 'KGS',
                                             currentDepartment: storeReleaseDept,
                                             status: 'Pending Acceptance',
                                             heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment',
                                             materialType: job.materialType,
+                                            isWire: job.isWire,
+                                            rawMaterialKind: job.rawMaterialKind,
                                             parentJobCardNo: job.jobCardNo,
-                                            processType: job.processType,
+                                            processType: job.processType || 'Purchase',
                                             purchaseDetails: job.purchaseDetails,
                                             rawMaterialStoreDetails: job.rawMaterialStoreDetails
                                           };
 
                                           onCreateJobCard(splitJobPayload, {
-                                            fromDepartment: activeDept,
+                                            fromDepartment: 'Incoming Store',
                                             toDepartment: storeReleaseDept,
                                             quantity: qtyNum,
-                                            remarks: storeReleaseRemarks || `Material released (partial split from ${job.jobCardNo}) from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`
+                                            itemCode: job.itemCode,
+                                            itemName: job.itemName,
+                                            remarks: storeReleaseRemarks || `Material released (partial split from ${job.jobCardNo}) from Incoming Store buffer to ${storeReleaseDept}.`
                                           });
                                         } else {
                                           // Full release: Move the entire card to target department
@@ -4142,10 +4266,12 @@ Please adjust the quantity or request additional raw material issue.`);
                                           });
                                           onCreateMovement({
                                             jobCardNo: job.jobCardNo,
-                                            fromDepartment: activeDept,
+                                            itemCode: job.itemCode,
+                                            itemName: job.itemName,
+                                            fromDepartment: 'Incoming Store',
                                             toDepartment: storeReleaseDept,
                                             quantity: qtyNum,
-                                            remarks: storeReleaseRemarks || `Material released from ${activeDept} Incoming Store buffer to ${storeReleaseDept}.`
+                                            remarks: storeReleaseRemarks || `Material released from Incoming Store buffer to ${storeReleaseDept}.`
                                           });
                                         }
 
@@ -4315,17 +4441,16 @@ Please adjust the quantity or request additional raw material issue.`);
 
                               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                                 <div>
-                                  <label className="block text-slate-400 mb-1">Total Bill Weight (KG)</label>
+                                  <label className="block text-slate-400 mb-1">Total Bill Weight ({purchaseMaterialType === 'Finished Goods' && purchaseUnit === 'PCS' ? 'PCS' : 'KG'})</label>
                                   <input
                                     type="text"
-                                    inputMode="numeric"
-                                    pattern="[0-9]*"
+                                    inputMode="decimal"
                                     value={purchaseRecQty}
                                     onChange={e => {
-                                      const clean = e.target.value.replace(/\D/g, '');
+                                      const clean = sanitizeDecimalInput(e.target.value);
                                       setPurchaseRecQty(clean);
-                                      const rec = parseInt(clean, 10) || 0;
-                                      const rej = typeof purchaseRejQty === 'number' ? purchaseRejQty : (parseInt(String(purchaseRejQty), 10) || 0);
+                                      const rec = parseDecimalQuantity(clean) || 0;
+                                      const rej = parseDecimalQuantity(purchaseRejQty) || 0;
                                       setPurchaseSentQty(Math.max(0, rec - rej));
                                     }}
                                     placeholder="0"
@@ -4333,17 +4458,16 @@ Please adjust the quantity or request additional raw material issue.`);
                                   />
                                 </div>
                                 <div>
-                                  <label className="block text-rose-500 mb-1">Rejection Weight (KG)</label>
+                                  <label className="block text-rose-500 mb-1">Rejection Weight ({purchaseMaterialType === 'Finished Goods' && purchaseUnit === 'PCS' ? 'PCS' : 'KG'})</label>
                                   <input
                                     type="text"
-                                    inputMode="numeric"
-                                    pattern="[0-9]*"
+                                    inputMode="decimal"
                                     value={purchaseRejQty}
                                     onChange={e => {
-                                      const clean = e.target.value.replace(/\D/g, '');
+                                      const clean = sanitizeDecimalInput(e.target.value);
                                       setPurchaseRejQty(clean);
-                                      const rej = parseInt(clean, 10) || 0;
-                                      const rec = typeof purchaseRecQty === 'number' ? purchaseRecQty : (parseInt(String(purchaseRecQty), 10) || 0);
+                                      const rej = parseDecimalQuantity(clean) || 0;
+                                      const rec = parseDecimalQuantity(purchaseRecQty) || 0;
                                       setPurchaseSentQty(Math.max(0, rec - rej));
                                     }}
                                     placeholder="0"
@@ -4370,7 +4494,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     type="button"
                                     onClick={() => {
                                       setPurchaseMaterialType('Raw Material');
-                                      setPurchaseTargetDept('Raw Material Store');
+                                      setPurchaseTargetDept(purchaseRawKind === 'Wire' ? 'Raw Material Store' : 'Incoming Store');
                                     }}
                                     className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
                                       purchaseMaterialType === 'Raw Material'
@@ -4398,7 +4522,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     type="button"
                                     onClick={() => {
                                       setPurchaseMaterialType('Finished Goods');
-                                      setPurchaseTargetDept('Packing');
+                                      setPurchaseTargetDept('Store');
                                     }}
                                     className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
                                       purchaseMaterialType === 'Finished Goods'
@@ -4415,114 +4539,28 @@ Please adjust the quantity or request additional raw material issue.`);
                                 <label className="block text-slate-400 font-semibold mb-1">Send / Route Material To</label>
                                 <div className="space-y-1.5">
                                   {purchaseMaterialType === 'Raw Material' && (
-                                    <div className="grid grid-cols-2 gap-2">
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Raw Material Store')}
-                                        className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
-                                          purchaseTargetDept === 'Raw Material Store'
-                                            ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
-                                            : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
-                                        }`}
-                                      >
-                                        🏢 Raw Material Store
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Purchase')}
-                                        className={`py-2 px-2 rounded-lg font-bold border text-center transition cursor-pointer text-xs ${
-                                          purchaseTargetDept === 'Purchase'
-                                            ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
-                                            : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
-                                        }`}
-                                      >
-                                        🛒 Purchase Store
-                                      </button>
+                                    <div className="space-y-2">
+                                      <div className="grid grid-cols-2 gap-2">
+                                        <button type="button" onClick={() => { setPurchaseRawKind('Wire'); setPurchaseTargetDept('Raw Material Store'); }} className={`py-2 px-2 rounded-lg font-bold border text-xs ${purchaseRawKind === 'Wire' ? 'bg-emerald-600 text-white' : 'bg-slate-50 text-slate-600 border-slate-200'}`}>Wire</button>
+                                        <button type="button" onClick={() => { setPurchaseRawKind('Other'); setPurchaseTargetDept('Incoming Store'); }} className={`py-2 px-2 rounded-lg font-bold border text-xs ${purchaseRawKind === 'Other' ? 'bg-purple-600 text-white' : 'bg-slate-50 text-slate-600 border-slate-200'}`}>Other RM</button>
+                                      </div>
+                                      <div className="py-2 px-2 rounded-lg font-bold border text-center text-xs bg-slate-800 text-white">
+                                        {purchaseRawKind === 'Wire' ? '→ Raw Material Store' : '→ Incoming Store'}
+                                      </div>
                                     </div>
                                   )}
                                   {purchaseMaterialType === 'Finished Goods' && (
-                                    <div className="grid grid-cols-3 gap-1.5">
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Packing')}
-                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                                          purchaseTargetDept === 'Packing'
-                                            ? 'bg-emerald-600 text-white border-emerald-700 shadow-sm'
-                                            : 'bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800'
-                                        }`}
-                                      >
-                                        📦 Packing
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Store')}
-                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                                          purchaseTargetDept === 'Store'
-                                            ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
-                                            : 'bg-blue-50 hover:bg-blue-100 dark:bg-blue-950/40 text-blue-700 dark:text-blue-300 border-blue-300 dark:border-blue-800'
-                                        }`}
-                                      >
-                                        🏢 FG Store
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Purchase')}
-                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                                          purchaseTargetDept === 'Purchase'
-                                            ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
-                                            : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
-                                        }`}
-                                      >
-                                        🛒 Purchase Store
-                                      </button>
+                                    <div className="grid grid-cols-2 gap-1.5">
+                                      <button type="button" onClick={() => setPurchaseTargetDept('Dispatch')} className={`py-2 px-1.5 rounded-lg font-bold border text-[10.5px] ${purchaseTargetDept === 'Dispatch' ? 'bg-amber-600 text-white' : 'bg-amber-50 text-amber-700 border-amber-300'}`}>🚚 Direct Dispatch</button>
+                                      <button type="button" onClick={() => setPurchaseTargetDept('Store')} className={`py-2 px-1.5 rounded-lg font-bold border text-[10.5px] ${purchaseTargetDept === 'Store' ? 'bg-blue-600 text-white' : 'bg-blue-50 text-blue-700 border-blue-300'}`}>🏢 FG Store</button>
                                     </div>
                                   )}
                                   {purchaseMaterialType === 'Semi Finished Goods' && (
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Production')}
-                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                                          purchaseTargetDept === 'Production'
-                                            ? 'bg-blue-600 text-white border-blue-700 shadow-sm'
-                                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                        }`}
-                                      >
-                                        ⚙️ Production
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Heat Treatment')}
-                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                                          purchaseTargetDept === 'Heat Treatment'
-                                            ? 'bg-amber-600 text-white border-amber-700 shadow-sm'
-                                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                        }`}
-                                      >
-                                        🔥 Heat Treat
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Plating')}
-                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                                          purchaseTargetDept === 'Plating'
-                                            ? 'bg-indigo-600 text-white border-indigo-700 shadow-sm'
-                                            : 'bg-slate-50 hover:bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
-                                        }`}
-                                      >
-                                        ⚡ Plating
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setPurchaseTargetDept('Purchase')}
-                                        className={`py-2 px-1.5 rounded-lg font-bold border text-center transition cursor-pointer text-[10.5px] ${
-                                          purchaseTargetDept === 'Purchase'
-                                            ? 'bg-purple-600 text-white border-purple-700 shadow-sm'
-                                            : 'bg-purple-50 hover:bg-purple-100 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-800'
-                                        }`}
-                                      >
-                                        🛒 Purchase Store
-                                      </button>
+                                      <button type="button" onClick={() => setPurchaseTargetDept('Production')} className={`py-2 px-1.5 rounded-lg font-bold border text-[10.5px] ${purchaseTargetDept === 'Production' ? 'bg-blue-600 text-white' : 'bg-slate-50 border-slate-200'}`}>⚙️ Production</button>
+                                      <button type="button" onClick={() => setPurchaseTargetDept('Heat Treatment')} className={`py-2 px-1.5 rounded-lg font-bold border text-[10.5px] ${purchaseTargetDept === 'Heat Treatment' ? 'bg-amber-600 text-white' : 'bg-slate-50 border-slate-200'}`}>🔥 Heat Treat</button>
+                                      <button type="button" onClick={() => setPurchaseTargetDept('Plating')} className={`py-2 px-1.5 rounded-lg font-bold border text-[10.5px] ${purchaseTargetDept === 'Plating' ? 'bg-indigo-600 text-white' : 'bg-slate-50 border-slate-200'}`}>⚡ Plating</button>
+                                      <button type="button" onClick={() => setPurchaseTargetDept('Incoming Store')} className={`py-2 px-1.5 rounded-lg font-bold border text-[10.5px] ${purchaseTargetDept === 'Incoming Store' ? 'bg-purple-600 text-white' : 'bg-purple-50 text-purple-700 border-purple-300'}`}>🏬 Incoming Store</button>
                                     </div>
                                   )}
                                 </div>

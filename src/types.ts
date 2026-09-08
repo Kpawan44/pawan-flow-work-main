@@ -1,4 +1,5 @@
-export type Department = 'Purchase' | 'Raw Material Store' | 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
+export type Department = 'Purchase' | 'Raw Material Store' | 'Incoming Store' | 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
+export type RawMaterialKind = 'Wire' | 'Other';
 export type UserRole = 
   | 'super_admin' 
   | 'admin' 
@@ -184,6 +185,8 @@ export interface JobCard {
   outsourceStatus?: OutsourceStatus;
   outsourceDetails?: Partial<OutsourceOrder>;
   materialType?: 'Raw Material' | 'Semi Finished Goods' | 'Finished Goods';
+  isWire?: boolean;
+  rawMaterialKind?: RawMaterialKind;
   customRoutedToPlating?: number;
   customRoutedToPacking?: number;
   customRoutedToStore?: number;
@@ -210,6 +213,8 @@ export interface JobCard {
     remarks?: string;
     materialType?: 'Raw Material' | 'Semi Finished Goods' | 'Finished Goods';
     unit?: 'KGS' | 'PCS';
+    isWire?: boolean;
+    rawMaterialKind?: RawMaterialKind;
   };
   heatTreatmentDetails?: {
     hardnessRequired?: string;
@@ -288,6 +293,10 @@ export interface MaterialMovement {
   fromDepartment: Department;
   toDepartment: Department | 'Completed';
   quantity: number;
+  materialType?: 'Raw Material' | 'Semi Finished Goods' | 'Finished Goods';
+  unit?: 'KGS' | 'PCS' | 'KG';
+  isWire?: boolean;
+  rawMaterialKind?: RawMaterialKind;
   availableQtyBefore?: number;
   remainingQtyAfter?: number;
   transactionType?: 'TRANSFER' | 'REVERSAL' | 'ISSUE_REQUEST' | 'ADJUSTMENT';
