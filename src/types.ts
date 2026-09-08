@@ -344,7 +344,13 @@ export type ProcessTransferStatus =
   | 'Received at Replating'
   | 'Replating in Process'
   | 'Replating Completed'
+  | 'Sent to Packing'
+  | 'Received at Packing'
+  | 'Packing in Process'
+  | 'Plating Completed - Sent to Packing'
+  | 'Packing Completed - Sent to Store'
   | 'Returned to Store';
+
 
 export interface ProcessTransfer {
   transferId: string; // Firestore document ID
