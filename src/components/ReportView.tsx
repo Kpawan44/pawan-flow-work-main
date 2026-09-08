@@ -330,7 +330,7 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
             allottedLocation: latestStoreMov?.allottedLocation || c.storeDetails?.locationBin || 'Pending placement',
             rackNo: latestStoreMov?.rackNo || 'N/A',
             receivedAtStoreKg: m.qtyReceivedAtStore,
-            pcsReceivedFromPacking: c.packingDetails?.totalPcs !== undefined ? `${c.packingDetails.totalPcs.toLocaleString()} pcs` : 'N/A',
+            pcsReceivedFromPacking: (c.packingDetails?.totalPcs !== undefined && c.packingDetails?.totalPcs !== null) ? `${c.packingDetails.totalPcs.toLocaleString()} pcs` : 'N/A',
             qtyDispatchedKg: m.qtyDispatched,
             qtyInStockKg: m.qtyRemainingInStock,
             date: c.createdAt
@@ -347,16 +347,16 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
           itemCode: t.itemCode || '-',
           material: t.material || '-',
           toProcess: t.toProcess,
-          quantity: `${t.quantity.toLocaleString()} ${t.unit}`,
+          quantity: `${(t.quantity || 0).toLocaleString()} ${t.unit || 'KG'}`,
           status: t.status,
           fromLocation: t.fromLocation,
           binOrRack: t.currentLocation || '-',
-          transferDate: `${t.transferDate} ${t.transferTime}`,
+          transferDate: `${t.transferDate || ''} ${t.transferTime || ''}`.trim() || '-',
           sentBy: t.createdBy,
           receivedBy: t.receivedBy || '-',
           completedBy: t.completedBy || '-',
-          completedQty: t.completedQty !== undefined ? `${t.completedQty.toLocaleString()} ${t.unit}` : '-',
-          rejectionQty: t.rejectionQty ? `${t.rejectionQty.toLocaleString()} ${t.unit}` : '-',
+          completedQty: (t.completedQty !== undefined && t.completedQty !== null) ? `${t.completedQty.toLocaleString()} ${t.unit || 'KG'}` : '-',
+          rejectionQty: (t.rejectionQty !== undefined && t.rejectionQty !== null && Number(t.rejectionQty) > 0) ? `${t.rejectionQty.toLocaleString()} ${t.unit || 'KG'}` : '-',
           rejectionReason: t.rejectionReason || '-',
           returnBin: t.returnLocationBin || '-',
           returnRack: t.returnRackNo || '-',
@@ -1383,7 +1383,7 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
                         const isJobCard = colKey === 'jobCardNo' || colKey === 'Job Card No';
                         const isItemName = colKey === 'itemName' || colKey === 'Item Name';
                         const isBulkItem = isItemName && (row.qtyInStockKg >= 500 || String(val).toLowerCase().includes('bulk'));
-                        const isStatus = colKey.toLowerCase() === 'status';
+                        const isStatus = !!colKey && colKey.toLowerCase() === 'status';
                         const isPendingCol = colKey === 'pendingProdToPackKg';
 
                         return (
@@ -1415,7 +1415,7 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const jc = jobCards.find(c => c.jobCardNo.toLowerCase() === String(row.jobCardNo).toLowerCase());
+                                  const jc = jobCards.find(c => String(c.jobCardNo || '').toLowerCase() === String(row.jobCardNo || '').toLowerCase());
                                   if (jc) setPendingBreakdownJobCard(jc);
                                 }}
                                 className="inline-flex items-center gap-1 font-mono font-extrabold text-xs text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/60 px-2 py-1 rounded-lg border border-amber-200/80 dark:border-amber-800/50 transition cursor-pointer"

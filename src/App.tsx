@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef, Suspense, lazy, Component } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Factory, 
@@ -87,6 +87,61 @@ const BulkTransferModal = lazy(() => import('./components/BulkTransferModal'));
 const BulkPrintManifestModal = lazy(() => import('./components/BulkPrintManifestModal'));
 const BulkStatusUpdateModal = lazy(() => import('./components/BulkStatusUpdateModal'));
 const OutsourceManager = lazy(() => import('./components/OutsourceManager').then(m => ({ default: m.OutsourceManager })));
+
+interface ReportViewErrorBoundaryProps {
+  children: React.ReactNode;
+}
+
+interface ReportViewErrorBoundaryState {
+  hasError: boolean;
+}
+
+// @ts-ignore
+class ReportViewErrorBoundary extends React.Component<ReportViewErrorBoundaryProps, ReportViewErrorBoundaryState> {
+  // @ts-ignore
+  state: ReportViewErrorBoundaryState = {
+    hasError: false
+  };
+
+  constructor(props: ReportViewErrorBoundaryProps) {
+    super(props);
+    // @ts-ignore
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): ReportViewErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("ReportView ErrorBoundary caught error:", error, errorInfo);
+  }
+
+  render() {
+    // @ts-ignore
+    if (this.state.hasError) {
+      return (
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-8 text-center space-y-4 my-6">
+          <div className="text-3xl">⚠️</div>
+          <h3 className="text-base font-bold text-slate-800 dark:text-white">Unable to Display Reports</h3>
+          <p className="text-xs text-slate-500 max-w-md mx-auto">
+            An unexpected error occurred while compiling reports data. Click below to reset and reload the reports view.
+          </p>
+          <button
+            type="button"
+            // @ts-ignore
+            onClick={() => this.setState({ hasError: false })}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl shadow-sm cursor-pointer"
+          >
+            Reload Reports
+          </button>
+        </div>
+      );
+    }
+    // @ts-ignore
+    return this.props.children;
+  }
+}
 
 const ComponentFallback = () => (
   <div className="flex items-center justify-center p-8 w-full min-h-[200px]">
@@ -4131,15 +4186,17 @@ export default function App() {
 
           {/* REPORTS EXPORT VIEW */}
           {activeTab === 'reports' && (
-            <Suspense fallback={<ComponentFallback />}>
-              <ReportView 
-                jobCards={jobCards}
-                movements={movements}
-                processTransfers={processTransfers}
-                onCreateMovement={handleCreateMovement}
-                currentUser={currentUser}
-              />
-            </Suspense>
+            <ReportViewErrorBoundary>
+              <Suspense fallback={<ComponentFallback />}>
+                <ReportView 
+                  jobCards={jobCards}
+                  movements={movements}
+                  processTransfers={processTransfers}
+                  onCreateMovement={handleCreateMovement}
+                  currentUser={currentUser}
+                />
+              </Suspense>
+            </ReportViewErrorBoundary>
           )}
 
           {/* ADMINISTRATOR CONSOLE PORTAL */}
