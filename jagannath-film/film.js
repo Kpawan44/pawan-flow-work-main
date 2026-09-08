@@ -467,6 +467,7 @@ async function startFilm() {
   if (started) return;
   started = true;
   titleCard.hidden = true;
+  document.getElementById("title-bg")?.remove();
   hud.hidden = false;
   audio = new SacredScore();
   await audio.ctx.resume();
