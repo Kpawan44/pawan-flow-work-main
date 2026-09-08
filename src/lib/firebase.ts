@@ -234,10 +234,14 @@ function setLocalStorageItem<T>(key: string, value: T) {
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined' && Boolean(
     (window as any).Capacitor?.isNativePlatform?.() ||
+    (window as any).Capacitor?.getPlatform?.() === 'android' ||
+    (window as any).Capacitor?.getPlatform?.() === 'ios' ||
     window.location?.protocol === 'capacitor:' ||
     window.location?.protocol === 'file:' ||
-    (typeof navigator !== 'undefined' && navigator.userAgent?.toLowerCase?.()?.includes('electron')) ||
-    (window.location?.hostname === 'localhost' && window.location?.port !== '3000' && window.location?.port !== '5173')
+    window.location?.origin === 'https://localhost' ||
+    window.location?.origin === 'http://localhost' ||
+    (window.location?.hostname === 'localhost' && window.location?.port !== '3000' && window.location?.port !== '5173') ||
+    (typeof navigator !== 'undefined' && navigator.userAgent?.toLowerCase?.()?.includes('electron'))
   )) {
     return 'https://pmw-tracker-928410476586.asia-south1.run.app';
   }
@@ -620,7 +624,7 @@ export class DBService {
     // 1. Try server-authoritative API
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2500);
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
       const response = await fetch(`${apiBase}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -641,11 +645,14 @@ export class DBService {
           token: authToken
         };
       }
-      if (response.status === 401 || response.status === 403 || (result && result.error && !result.error.includes('Failed to fetch'))) {
-        throw new Error(result.error || 'Invalid credentials. Please verify your Name and Security PIN.');
+      if (!response.ok) {
+        throw new Error(result.error || `Authentication failed (HTTP ${response.status}). Please verify your credentials.`);
       }
     } catch (err: any) {
-      if (err.message && (err.message.includes('Invalid credentials') || err.message.includes('deactivated') || err.message.includes('not found in system') || err.message.includes('Security PIN'))) {
+      if (err.name === 'AbortError') {
+        throw new Error('Connection timed out. Please check your network connection and try again.');
+      }
+      if (err.message && !err.message.includes('Failed to fetch') && !err.message.includes('NetworkError')) {
         throw err;
       }
     }
@@ -1481,48 +1488,90 @@ export class DBService {
     await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Deleted Job Card: ${jobCardNo} and all related material transitions/notifications`);
   }
 
-  static async deleteAllJobCards(userId: string, userName: string): Promise<void> {
+  static async deleteAllJobCards(userId: string, userName: string): Promise<{ success: boolean; deletedCollections?: Record<string, number>; remainingDocuments: number; superAdminPreserved: boolean; message: string }> {
     await this.verifyAdmin(userId);
 
-    // 1. Invalidate caches and clear Local Storage offline caches
-    this.invalidateCache('mfr_job_cards');
-    this.invalidateCache('mfr_movements');
-    this.invalidateCache('mfr_notifications');
-    this.invalidateCache('mfr_items');
+    // 1. Invalidate caches and clear Local Storage offline caches & sync queues
+    const targetCollections = [
+      'mfr_job_cards',
+      'mfr_movements',
+      'mfr_notifications',
+      'mfr_items',
+      'mfr_outsource_orders',
+      'mfr_process_transfers',
+      'mfr_deleted_job_cards',
+      'mfr_deleted_movements',
+      'mfr_idempotency_keys'
+    ];
 
-    setLocalStorageItem('mfr_job_cards', []);
-    setLocalStorageItem('mfr_movements', []);
-    setLocalStorageItem('mfr_notifications', []);
-    setLocalStorageItem('mfr_items', []);
+    for (const col of targetCollections) {
+      this.invalidateCache(col);
+      setLocalStorageItem(col, []);
+      this.setMemCache(col, []);
+    }
+    setLocalStorageItem('mfr_sync_queue', []);
+    this.setMemCache('mfr_sync_queue', []);
 
-    this.setMemCache('mfr_job_cards', []);
-    this.setMemCache('mfr_movements', []);
-    this.setMemCache('mfr_notifications', []);
-    this.setMemCache('mfr_items', []);
-
-    // 2. Authoritative API Deletion
-    let apiPurged = false;
+    // 2. Authoritative Server API Deletion
+    let apiResult: any = null;
     try {
       const headers = await this.getAuthHeaders();
-      const res = await fetch(`${getApiBaseUrl()}/api/job-cards/delete-all`, {
+      let res = await fetch(`${getApiBaseUrl()}/api/factory/delete-all`, {
         method: 'POST',
         headers
       });
+      // Fallback: If backend exposes legacy /api/job-cards/delete-all endpoint
+      if (res.status === 404) {
+        res = await fetch(`${getApiBaseUrl()}/api/job-cards/delete-all`, {
+          method: 'POST',
+          headers
+        });
+      }
       if (res.ok) {
         const resData = await res.json().catch(() => ({}));
-        if (resData.success) {
-          apiPurged = true;
+        if (resData && resData.success) {
+          apiResult = resData;
+        }
+      } else {
+        const errJson = await res.json().catch(() => ({}));
+        // Provide specific, actionable error messages per HTTP status
+        if (res.status === 404) {
+          throw new Error(
+            'Factory purge service is not available on the connected server. ' +
+            'The backend needs to be updated/deployed. Please contact the system administrator.'
+          );
+        } else if (res.status === 401) {
+          throw new Error('Authentication required. Please sign out and sign in again before retrying.');
+        } else if (res.status === 403) {
+          throw new Error('Permission denied: Only the Master Super Admin account can execute a complete factory data purge.');
+        } else if (res.status === 409) {
+          throw new Error('Purge conflict: Another purge operation may be in progress. Please wait and retry.');
+        } else if (res.status >= 500) {
+          throw new Error(errJson.error || `Server error during purge (HTTP ${res.status}). Some records may remain — please retry.`);
+        } else {
+          throw new Error(errJson.error || `Server purge failed with status ${res.status}`);
         }
       }
-    } catch (apiErr) {
-      // Fall through to direct Firestore
+    } catch (apiErr: any) {
+      // Re-throw specific HTTP errors (404, 401, 403, 500 etc.) — these are actionable
+      const isSpecificHttpError = apiErr.message && (
+        apiErr.message.includes('not available on the connected server') ||
+        apiErr.message.includes('Authentication required') ||
+        apiErr.message.includes('Permission denied') ||
+        apiErr.message.includes('conflict') ||
+        apiErr.message.includes('Server error during purge')
+      );
+      if (isSpecificHttpError) {
+        throw apiErr;
+      }
+      // Network / fetch errors: fall through to Firestore fallback
+      console.warn("[FACTORY_PURGE] Backend API unreachable, falling back to direct Firestore:", apiErr);
     }
 
-    // 3. Physical Firestore fallback
-    if (!apiPurged && useRealFirebase && db) {
+    // 3. Physical Firestore fallback (Only if backend endpoint was unreachable)
+    if (!apiResult && useRealFirebase && db) {
       try {
-        const collectionsToPurge = ['mfr_job_cards', 'mfr_movements', 'mfr_notifications', 'mfr_items'];
-        for (const colName of collectionsToPurge) {
+        for (const colName of targetCollections) {
           const querySnapshot = await getDocs(collection(db, colName));
           for (const docSnap of querySnapshot.docs) {
             await deleteDoc(doc(db, colName, docSnap.id));
@@ -1536,11 +1585,21 @@ export class DBService {
     // 4. Broadcast instant cross-device SSE synchronization
     await this.broadcastEvent('ALL_UPDATED').catch(() => {});
     await this.broadcastEvent('JOB_UPDATED').catch(() => {});
+    await this.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
+    await this.broadcastEvent('NOTIFICATION_UPDATED').catch(() => {});
 
-    await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Deleted all job card entries, material movements, notifications, and Raw Material Store item records from database`);
+    await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Complete factory data purge executed by ${userName}. Erased all job cards, movements, raw material items, process transfers, outsource orders, and notifications. Super Admin preserved.`);
+
+    return apiResult || {
+      success: true,
+      deletedCollections: {},
+      remainingDocuments: 0,
+      superAdminPreserved: true,
+      message: "All factory operational and Raw Material data completely purged. Super Admin account preserved."
+    };
   }
 
-  static async factoryReset(pin: string): Promise<{ success: boolean; resetOperationId?: string; factoryResetGeneration?: string; activeUsersCount?: number; firstRun?: boolean; message?: string }> {
+  static async factoryReset(pin: string): Promise<{ success: boolean; resetOperationId?: string; factoryResetGeneration?: string; superAdminPreserved?: any; message?: string }> {
     const headers = await this.getAuthHeaders();
     const res = await fetch(`${getApiBaseUrl()}/api/admin/factory-reset`, {
       method: 'POST',
@@ -1557,8 +1616,10 @@ export class DBService {
     this.clearClientCaches(newGen);
 
     try {
-      localStorage.setItem('mfr_is_first_run', 'true');
-      sessionStorage.setItem('mfr_is_first_run', 'true');
+      localStorage.removeItem('mfr_is_first_run');
+      sessionStorage.removeItem('mfr_is_first_run');
+      localStorage.setItem('mfr_factory_reset_completed', 'true');
+      sessionStorage.setItem('mfr_factory_reset_completed', 'true');
       localStorage.setItem('mfr_system_generation', newGen);
       sessionStorage.setItem('mfr_system_generation', newGen);
     } catch (_) {}
@@ -1572,7 +1633,12 @@ export class DBService {
       } catch (_) {}
     }
 
-    window.dispatchEvent(new CustomEvent('factory-reset-completed', { detail: { generation: newGen, firstRun: true } }));
+    window.dispatchEvent(new CustomEvent('factory-reset-completed', { 
+      detail: { 
+        generation: newGen, 
+        superAdminPreserved: data.superAdminPreserved 
+      } 
+    }));
 
     return data;
   }
@@ -3008,13 +3074,34 @@ export class DBService {
 
   // --- COMPANY CONFIG ---
   static async getCompanyConfig(): Promise<CompanyConfig> {
+    // 1. Authoritative Backend API Fetch FIRST
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/company/config`, { headers, signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success && resData.config) {
+          setLocalStorageItem('mfr_company_config', resData.config);
+          this.setMemCache('mfr_company_config', resData.config);
+          return resData.config;
+        }
+      }
+    } catch (_) {}
+
+    // 2. Direct Firestore fallback
     if (useRealFirebase && db && !this.isOfflineMode() && auth?.currentUser) {
       try {
         await this.ensureSeeded();
         const docRef = doc(db, 'mfr_company_config', 'global');
         const snap = await getDoc(docRef);
         if (snap.exists()) {
-          return snap.data() as CompanyConfig;
+          const cfg = snap.data() as CompanyConfig;
+          setLocalStorageItem('mfr_company_config', cfg);
+          this.setMemCache('mfr_company_config', cfg);
+          return cfg;
         }
       } catch (err) {
         handleFirestoreError(err, OperationType.GET, 'mfr_company_config/global');
@@ -3024,16 +3111,39 @@ export class DBService {
   }
 
   static async saveCompanyConfig(config: CompanyConfig, userId: string, userName: string): Promise<void> {
+    // 1. Authoritative Backend API Call FIRST
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/company/config`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ config })
+      });
+      if (res.ok) {
+        const resData = await res.json();
+        if (resData.success && resData.config) {
+          setLocalStorageItem('mfr_company_config', resData.config);
+          this.setMemCache('mfr_company_config', resData.config);
+          await this.logAction(userId, userName, 'UPDATE_COMPANY_CONFIG', `Updated Company details to: ${config.companyName}`);
+          return;
+        }
+      }
+    } catch (_) {}
+
+    // 2. Direct Firestore fallback
     if (useRealFirebase && db) {
       try {
         await setDoc(doc(db, 'mfr_company_config', 'global'), config);
         await this.logAction(userId, userName, 'UPDATE_COMPANY_CONFIG', `Updated Company details to: ${config.companyName}`);
+        setLocalStorageItem('mfr_company_config', config);
+        this.setMemCache('mfr_company_config', config);
         return;
       } catch (err) {
         handleFirestoreError(err, OperationType.WRITE, 'mfr_company_config/global');
       }
     }
     setLocalStorageItem('mfr_company_config', config);
+    this.setMemCache('mfr_company_config', config);
     await this.logAction(userId, userName, 'UPDATE_COMPANY_CONFIG', `Updated Company details to: ${config.companyName}`);
   }
 

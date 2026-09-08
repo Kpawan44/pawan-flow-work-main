@@ -2576,6 +2576,7 @@ export default function App() {
           isOpen={sidebarOpen}
           onClose={() => setSidebarOpen(false)}
           companyConfig={companyConfig}
+          onLogout={handleLogout}
         />
       </div>
 

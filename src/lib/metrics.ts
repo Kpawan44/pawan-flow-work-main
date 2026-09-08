@@ -1,12 +1,34 @@
 import { JobCard, MaterialMovement, ProcessTransfer } from '../types';
 
-export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMovement[], processTransfersList: ProcessTransfer[] = []) {
+export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMovement[] = [], processTransfersList: ProcessTransfer[] = []) {
+  if (!j) return {
+    qtyReceivedFromProd: 0,
+    qtyRoutedToPlating: 0,
+    qtyRemainingAtProd: 0,
+    htRejections: 0,
+    qtyReceivedAtPlating: 0,
+    qtyRoutedToPacking: 0,
+    qtyRemainingAtPlating: 0,
+    platingRejections: 0,
+    qtyReceivedAtPacking: 0,
+    qtyRoutedToStore: 0,
+    qtyRemainingAtPacking: 0,
+    packingRejections: 0,
+    qtyReceivedAtStore: 0,
+    qtyDispatched: 0,
+    qtyInProcessTransfers: 0,
+    qtyReturnedFromProcess: 0,
+    qtyRemainingInStock: 0,
+    qtyReceivedAtRawStore: 0
+  };
+
+  const targetJc = String(j.jobCardNo || '').toLowerCase();
   // Filter movements for this job card
-  const cardMovements = movementsList.filter(m => m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase());
+  const cardMovements = (Array.isArray(movementsList) ? movementsList : []).filter(m => m && String(m.jobCardNo || '').toLowerCase() === targetJc);
   const acceptedMovements = cardMovements.filter(m => m.accepted);
 
   // Process Transfers for this job card (Store -> Repacking / Replating)
-  const cardTransfers = processTransfersList.filter(t => t.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase());
+  const cardTransfers = (Array.isArray(processTransfersList) ? processTransfersList : []).filter(t => t && String(t.jobCardNo || '').toLowerCase() === targetJc);
   const activeProcessTransfers = cardTransfers.filter(t => t.status !== 'Returned to Store');
   const qtyInProcessTransfers = activeProcessTransfers.reduce((sum, t) => sum + (t.quantity || 0), 0);
   const returnedTransfers = cardTransfers.filter(t => t.status === 'Returned to Store');
@@ -223,20 +245,24 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
   };
 }
 
-export function getWireScrapQty(job: JobCard, movements: MaterialMovement[]): number {
-  const movScrap = movements
-    .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
+export function getWireScrapQty(job: JobCard, movements: MaterialMovement[] = []): number {
+  if (!job) return 0;
+  const targetJc = String(job.jobCardNo || '').toLowerCase();
+  const movScrap = (Array.isArray(movements) ? movements : [])
+    .filter(m => m && String(m.jobCardNo || '').toLowerCase() === targetJc && m.fromDepartment === 'Production')
     .reduce((sum, m) => sum + (m.wireScrapQty || m.processDetails?.wireScrapQty || 0), 0);
 
   if (movScrap > 0) return movScrap;
   return job.wireScrapQty || job.productionDetails?.wireScrapQty || 0;
 }
 
-export function getRawMaterialIssuedQty(job: JobCard, movements: MaterialMovement[]): number {
-  if (job.processType === 'Purchase') return job.orderQty; // Purchase orders do not have raw material store issues
+export function getRawMaterialIssuedQty(job: JobCard, movements: MaterialMovement[] = []): number {
+  if (!job) return 0;
+  if (job.processType === 'Purchase') return job.orderQty || 0; // Purchase orders do not have raw material store issues
   
-  const issuedMovementsQty = movements
-    .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && 
+  const targetJc = String(job.jobCardNo || '').toLowerCase();
+  const issuedMovementsQty = (Array.isArray(movements) ? movements : [])
+    .filter(m => m && String(m.jobCardNo || '').toLowerCase() === targetJc && 
                  m.fromDepartment === 'Raw Material Store' && 
                  m.isIssueRequest && 
                  (m.issueStatus === 'Issued' || m.accepted))

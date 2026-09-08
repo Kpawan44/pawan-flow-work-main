@@ -13,17 +13,101 @@ interface RawMaterial {
   location: string;
 }
 
-export const INVENTORY_RAW_MATERIALS: RawMaterial[] = [
-  { code: 'EN8-R', name: 'EN8 Carbon Steel Round Bars', category: 'Alloy Steel', availableStock: 14500, unit: 'KG', location: 'Bin RM-101' },
-  { code: 'EN9-S', name: 'EN9 Alloy Steel Square Rods', category: 'Alloy Steel', availableStock: 8200, unit: 'KG', location: 'Bin RM-102' },
-  { code: 'MS-WC', name: 'Mild Steel Wire Coils (High Carbon)', category: 'Mild Steel', availableStock: 22000, unit: 'KG', location: 'Bin RM-204' },
-  { code: 'SS-304', name: 'Stainless Steel Sheet Coils (Grade 304)', category: 'Stainless Steel', availableStock: 6800, unit: 'KG', location: 'Bin RM-301' },
-  { code: 'HT-SB', name: 'High-Tensile Steel Billets (HT-200)', category: 'Alloy Steel', availableStock: 18300, unit: 'KG', location: 'Bin RM-105' },
-  { code: 'BR-HEX', name: 'Brass Hexagonal Rods (C360)', category: 'Copper Alloys', availableStock: 4100, unit: 'KG', location: 'Bin RM-402' },
-  { code: 'AL-6061', name: 'Aluminum Extrusion Bars (6061-T6)', category: 'Aluminum Alloys', availableStock: 9500, unit: 'KG', location: 'Bin RM-405' },
-  { code: 'CR-STEEL', name: 'Cold Rolled Steel Sheets (1.2mm)', category: 'Sheet Metal', availableStock: 11200, unit: 'KG', location: 'Bin RM-202' },
-  { code: 'FE-500', name: 'Deformed Fe-500 Reinforcing Bars', category: 'Carbon Steel', availableStock: 31000, unit: 'KG', location: 'Bin RM-208' }
-];
+export const INVENTORY_RAW_MATERIALS: RawMaterial[] = [];
+
+export function getDynamicRawMaterialsStock(movements: MaterialMovement[] = [], savedItems: any[] = []): RawMaterial[] {
+  const materialMap = new Map<string, { code: string; name: string; category: string; location: string; unit: string; baseStock: number }>();
+
+  // 1. Include base inventory catalog items if any
+  INVENTORY_RAW_MATERIALS.forEach(item => {
+    materialMap.set(item.code.toUpperCase(), {
+      code: item.code.toUpperCase(),
+      name: item.name,
+      category: item.category || 'Raw Material',
+      location: item.location || 'Bin RM Store',
+      unit: item.unit || 'KG',
+      baseStock: item.availableStock || 0
+    });
+  });
+
+  // 2. Discover raw material items dynamically from movements
+  (movements || []).forEach(m => {
+    const rawCode = m.processDetails?.rawMaterialCode || (m.toDepartment === 'Raw Material Store' || m.fromDepartment === 'Raw Material Store' ? m.itemCode : null);
+    const rawName = m.processDetails?.rawMaterialName || m.itemName || rawCode;
+    if (rawCode && rawCode !== '-' && rawCode.trim()) {
+      const upperCode = rawCode.trim().toUpperCase();
+      if (!materialMap.has(upperCode)) {
+        materialMap.set(upperCode, {
+          code: upperCode,
+          name: rawName?.trim() || upperCode,
+          category: 'Raw Material',
+          location: 'Bin RM Store',
+          unit: 'KG',
+          baseStock: 0
+        });
+      }
+    }
+  });
+
+  // 3. Discover raw material items dynamically from saved items
+  (savedItems || []).forEach((item: any) => {
+    if (item && item.itemCode && item.itemCode !== '-') {
+      const upperCode = String(item.itemCode).trim().toUpperCase();
+      if (!materialMap.has(upperCode)) {
+        materialMap.set(upperCode, {
+          code: upperCode,
+          name: String(item.itemName || upperCode).trim(),
+          category: 'Raw Material',
+          location: 'Bin RM Store',
+          unit: 'KG',
+          baseStock: 0
+        });
+      }
+    }
+  });
+
+  if (materialMap.size === 0) {
+    return [];
+  }
+
+  return Array.from(materialMap.values()).map(item => {
+    const totalIssued = (movements || [])
+      .filter(m => 
+        m.fromDepartment === 'Raw Material Store' && 
+        m.isIssueRequest && 
+        m.issueStatus === 'Issued' && 
+        (m.processDetails?.rawMaterialCode?.toUpperCase() === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.itemCode?.toUpperCase() === item.code)
+      )
+      .reduce((sum, m) => sum + (m.quantity || 0), 0);
+
+    const totalPurchased = (movements || [])
+      .filter(m => 
+        m.toDepartment === 'Raw Material Store' && 
+        m.fromDepartment === 'Purchase' && 
+        m.accepted &&
+        (m.processDetails?.rawMaterialCode?.toUpperCase() === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.itemCode?.toUpperCase() === item.code)
+      )
+      .reduce((sum, m) => sum + (m.quantity || 0), 0);
+
+    const totalRejected = (movements || [])
+      .filter(m => 
+        m.fromDepartment === 'Raw Material Store' && 
+        (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
+        (m.processDetails?.rawMaterialCode?.toUpperCase() === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-') || m.itemCode?.toUpperCase() === item.code)
+      )
+      .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
+
+    const currentStock = Math.max(0, item.baseStock + totalPurchased - totalIssued - totalRejected);
+    return {
+      code: item.code,
+      name: item.name,
+      category: item.category,
+      availableStock: currentStock,
+      unit: item.unit,
+      location: item.location
+    };
+  });
+}
 
 interface RawMaterialRequestModalProps {
   isOpen: boolean;
@@ -40,42 +124,6 @@ interface RawMaterialRequestModalProps {
   }) => Promise<void>;
   movements?: MaterialMovement[];
   initialJobCardNo?: string;
-}
-
-export function getDynamicRawMaterialsStock(movements: MaterialMovement[]): RawMaterial[] {
-  return INVENTORY_RAW_MATERIALS.map(item => {
-    const totalIssued = movements
-      .filter(m => 
-        m.fromDepartment === 'Raw Material Store' && 
-        m.isIssueRequest && 
-        m.issueStatus === 'Issued' && 
-        (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
-      )
-      .reduce((sum, m) => sum + (m.quantity || 0), 0);
-
-    const totalPurchased = movements
-      .filter(m => 
-        m.toDepartment === 'Raw Material Store' && 
-        m.fromDepartment === 'Purchase' && 
-        m.accepted &&
-        (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
-      )
-      .reduce((sum, m) => sum + (m.quantity || 0), 0);
-
-    const totalRejected = movements
-      .filter(m => 
-        m.fromDepartment === 'Raw Material Store' && 
-        (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
-        (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-'))
-      )
-      .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
-
-    const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
-    return {
-      ...item,
-      availableStock: currentStock
-    };
-  });
 }
 
 export default function RawMaterialRequestModal({

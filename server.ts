@@ -1969,6 +1969,28 @@ async function startServer() {
       return res.status(401).json({ success: false, error: "Invalid Super Admin Security PIN." });
     }
 
+    // 1. EXTRACT & PRESERVE SUPER ADMIN ACCOUNT AND CREDENTIALS
+    // ---------------------------------------------------------
+    const preservedSuperAdmin: any = {
+      userId: requester.userId,
+      name: requester.name || "Pawan",
+      email: requester.email || "admin@factory.com",
+      role: "super_admin",
+      department: requester.department || "Admin",
+      allowedDepartments: Array.isArray(requester.allowedDepartments) && requester.allowedDepartments.length > 0 
+        ? requester.allowedDepartments 
+        : ["Dispatch", "Purchase", "Raw Material Store", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Admin"],
+      accessList: Array.isArray(requester.accessList) && requester.accessList.length > 0 
+        ? requester.accessList 
+        : ["Dispatch", "Purchase", "Raw Material Store", "Production", "Heat Treatment", "Plating", "Packing", "Store", "Admin"],
+      canOutsource: Boolean(requester.canOutsource !== false),
+      isDepartmentHead: Boolean(requester.isDepartmentHead),
+      active: true,
+      createdAt: requester.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    const preservedPinHash = storedPinHash;
+
     const operationalCollections = [
       "mfr_users",
       "mfr_user_credentials",
@@ -1983,7 +2005,7 @@ async function startServer() {
       "mfr_deleted_users"
     ];
 
-    console.log(`[AUDIT] [FACTORY_RESET_PROCESSING] OpId: ${resetOpId}, Beginning purge of ${operationalCollections.length} collections...`);
+    console.log(`[AUDIT] [FACTORY_RESET_PROCESSING] OpId: ${resetOpId}, Preserving Super Admin '${preservedSuperAdmin.userId}' and beginning purge of operational collections...`);
 
     for (const col of operationalCollections) {
       console.log(`[AUDIT] [FACTORY_RESET_STAGE] OpId: ${resetOpId}, Purging ${col}...`);
@@ -1999,6 +2021,46 @@ async function startServer() {
         });
       }
     }
+
+    // 2. RE-ESTABLISH PRESERVED SUPER ADMIN IN FIRESTORE & SERVER STORES
+    // -----------------------------------------------------------------
+    if (true) {
+      try {
+        const db = getFirestoreAdmin();
+        if (db) {
+          await db.collection("mfr_users").doc(preservedSuperAdmin.userId).set(preservedSuperAdmin);
+          await db.collection("mfr_user_credentials").doc(preservedSuperAdmin.userId).set({
+            userId: preservedSuperAdmin.userId,
+            pinHash: preservedPinHash,
+            updatedAt: new Date().toISOString()
+          });
+        }
+      } catch (e) {
+        console.warn("[FACTORY_RESET] Admin SDK write warning:", e);
+      }
+    }
+
+    await firestoreRestSetDoc("mfr_users", preservedSuperAdmin.userId, preservedSuperAdmin).catch(() => {});
+    await firestoreRestSetDoc("mfr_user_credentials", preservedSuperAdmin.userId, {
+      userId: preservedSuperAdmin.userId,
+      pinHash: preservedPinHash,
+      updatedAt: new Date().toISOString()
+    }).catch(() => {});
+
+    // Clear server stores and seed preserved super_admin
+    customUsersStore = {};
+    customUsersStore[preservedSuperAdmin.userId] = preservedSuperAdmin;
+    saveUsersStore();
+
+    customCredsStore = {};
+    customCredsStore[preservedSuperAdmin.userId] = preservedPinHash;
+    saveCredsStore();
+
+    deletedUserIds.clear();
+    saveDeletedUsers();
+
+    cachedUsersDirectory = [preservedSuperAdmin];
+    cachedUsersDirectoryTimestamp = Date.now();
 
     // Advance persistent reset generation
     const newGeneration = await updateResetGeneration(resetOpId, requester.userId);
@@ -2016,28 +2078,133 @@ async function startServer() {
     };
     await firestoreRestSetDoc("mfr_company_config", "global", cleanDefaultConfig).catch(() => {});
 
-    // Clear all server-side in-memory and local JSON stores
-    customUsersStore = {};
-    saveUsersStore();
+    // Log the Factory Reset execution into freshly initialized audit log
+    const resetLogEntry = {
+      id: `AL-1-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      userId: preservedSuperAdmin.userId,
+      userName: preservedSuperAdmin.name,
+      action: "FACTORY_RESET",
+      details: `Factory operational data reset completed by Super Admin ${preservedSuperAdmin.name} (${preservedSuperAdmin.userId}). Super Admin account preserved.`
+    };
+    await firestoreRestSetDoc("mfr_audit_logs", resetLogEntry.id, resetLogEntry).catch(() => {});
 
-    customCredsStore = {};
-    saveCredsStore();
-
-    deletedUserIds.clear();
-    saveDeletedUsers();
-
-    cachedUsersDirectory = [];
-    cachedUsersDirectoryTimestamp = Date.now();
-
-    console.log(`[AUDIT] [FACTORY_RESET_COMPLETED] OpId: ${resetOpId}, All operational collections verified empty. New Generation: ${newGeneration}`);
-    broadcastRealtimeEvent("FACTORY_RESET_COMPLETED", { resetOpId, factoryResetGeneration: newGeneration, timestamp: new Date().toISOString() });
+    console.log(`[AUDIT] [FACTORY_RESET_COMPLETED] OpId: ${resetOpId}, Factory operational data erased. Super Admin '${preservedSuperAdmin.userId}' preserved. New Generation: ${newGeneration}`);
+    broadcastRealtimeEvent("FACTORY_RESET_COMPLETED", { 
+      resetOpId, 
+      factoryResetGeneration: newGeneration, 
+      preservedSuperAdmin: { userId: preservedSuperAdmin.userId, name: preservedSuperAdmin.name },
+      timestamp: new Date().toISOString() 
+    });
 
     return res.json({ 
       success: true, 
       resetOperationId: resetOpId, 
       factoryResetGeneration: newGeneration,
-      message: "Factory reset completed successfully. All operational data permanently erased." 
+      superAdminPreserved: {
+        userId: preservedSuperAdmin.userId,
+        name: preservedSuperAdmin.name,
+        role: preservedSuperAdmin.role
+      },
+      message: "Factory reset completed successfully. Factory operational data has been reset, and your Super Admin account has been preserved." 
     });
+  });
+
+  // --- Authoritative Company Configuration Store & Routes ---
+  let cachedCompanyConfig: any = null;
+  let cachedCompanyConfigTimestamp = 0;
+
+  const getAuthoritativeCompanyConfig = async (): Promise<any> => {
+    if (cachedCompanyConfig && Date.now() - cachedCompanyConfigTimestamp < 5000) {
+      return cachedCompanyConfig;
+    }
+    let config: any = null;
+    const db = getFirestoreAdmin();
+    if (db) {
+      try {
+        const snap = await db.collection("mfr_company_config").doc("global").get();
+        if (snap.exists) {
+          config = snap.data();
+        }
+      } catch (_) {}
+    }
+    if (!config) {
+      try {
+        config = await firestoreRestGetDoc("mfr_company_config", "global");
+      } catch (_) {}
+    }
+    if (!config) {
+      config = {
+        companyName: "PMW Manufacturing Tracker",
+        details: "Specialists in high-tensile fasteners, engine components, and industrial finishes.",
+        requireRawMaterialForProduction: true,
+        updatedAt: new Date().toISOString()
+      };
+    }
+    cachedCompanyConfig = config;
+    cachedCompanyConfigTimestamp = Date.now();
+    return config;
+  };
+
+  // GET /api/company/config — Retrieve authoritative company policies
+  app.get("/api/company/config", async (req, res) => {
+    try {
+      const config = await getAuthoritativeCompanyConfig();
+      return res.json({ success: true, config });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // POST /api/company/config — Save/Update company configuration (Super Admin Only)
+  app.post("/api/company/config", requireFirebaseAuth, async (req, res) => {
+    const authUid = (req as any).authUid || (req as any).user?.userId || "";
+    const requester = (req as any).user;
+    if (!requester || requester.role !== "super_admin") {
+      return res.status(403).json({
+        success: false,
+        error: "Forbidden: Only Master Super Admin users can modify company policies and configurations."
+      });
+    }
+
+    const { config } = req.body || {};
+    if (!config || typeof config !== "object") {
+      return res.status(400).json({ success: false, error: "Invalid configuration payload." });
+    }
+
+    const updatedConfig = {
+      ...config,
+      updatedBy: requester.name || requester.userId,
+      updatedAt: new Date().toISOString()
+    };
+
+    const db = getFirestoreAdmin();
+    if (db) {
+      await db.collection("mfr_company_config").doc("global").set(updatedConfig).catch(() => {});
+    }
+    await firestoreRestSetDoc("mfr_company_config", "global", updatedConfig).catch(() => {});
+
+    cachedCompanyConfig = updatedConfig;
+    cachedCompanyConfigTimestamp = Date.now();
+
+    // Audit logging
+    const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const auditData = {
+      id: auditId,
+      timestamp: new Date().toISOString(),
+      userId: requester.userId,
+      userName: requester.name || requester.userId,
+      action: "UPDATE_COMPANY_CONFIG",
+      details: `Updated company policy. Raw Material Compulsory: ${updatedConfig.requireRawMaterialForProduction !== false ? 'ENABLED' : 'DISABLED'}`
+    };
+    if (db) {
+      await db.collection("mfr_audit_logs").doc(auditId).set(auditData).catch(() => {});
+    }
+    await firestoreRestSetDoc("mfr_audit_logs", auditId, auditData).catch(() => {});
+
+    broadcastRealtimeEvent("COMPANY_CONFIG_UPDATED", { config: updatedConfig });
+
+    return res.json({ success: true, config: updatedConfig });
   });
 
   // POST /api/auth/setup-admin — Initial First-Run Super Admin Onboarding (Only permitted when 0 active users exist)
@@ -2050,8 +2217,8 @@ async function startServer() {
 
     // Strict verification: Query active users to ensure 0 active users exist
     let activeUserCount = 0;
-    if (INITIAL_USERS && INITIAL_USERS.length > 0) {
-      activeUserCount = INITIAL_USERS.length;
+    if (Array.isArray(cachedUsersDirectory) && cachedUsersDirectory.length > 0) {
+      activeUserCount = cachedUsersDirectory.length;
     }
     if (Array.isArray(cachedUsersDirectory) && cachedUsersDirectory.length > 0) {
       activeUserCount = Math.max(activeUserCount, cachedUsersDirectory.length);
@@ -2066,7 +2233,8 @@ async function startServer() {
 
     const cleanName = name.trim();
     const cleanPin = pin.trim();
-    const userId = `super-${Date.now()}`;
+    const explicitUserId = (req.body?.userId && typeof req.body.userId === 'string' && req.body.userId.trim()) ? req.body.userId.trim().toLowerCase() : '';
+    const userId = explicitUserId || (cleanName.toLowerCase().replace(/\s+/g, '') === 'pawan' ? 'pawan' : `super-${Date.now()}`);
     const pinHash = bcrypt.hashSync(cleanPin, 10);
 
     const newSuperAdmin: any = {
@@ -2607,46 +2775,160 @@ async function startServer() {
     }
   });
 
-  app.post("/api/job-cards/delete-all", requireFirebaseAuth, async (req, res) => {
+  // POST /api/job-cards/delete-all & POST /api/factory/delete-all — Authoritative Complete Factory Data Purge (Super Admin Only)
+  const handleCompleteFactoryPurge = async (req: express.Request, res: express.Response) => {
     try {
       const requester = (req as any).user;
-      if (!requester || (requester.role !== "super_admin" && requester.role !== "admin")) {
-        return res.status(403).json({ success: false, error: "Forbidden: Only Administrators can purge all Job Cards." });
+      if (!requester || requester.role !== "super_admin") {
+        return res.status(403).json({
+          success: false,
+          error: "Forbidden: Only Master Super Admin can execute complete factory data purge."
+        });
       }
 
-      const collectionsToPurge = ["mfr_job_cards", "mfr_movements", "mfr_notifications", "mfr_process_transfers", "mfr_outsource_orders"];
+      // Target collections to completely erase
+      const collectionsToPurge = [
+        "mfr_job_cards",
+        "mfr_movements",
+        "mfr_items",
+        "mfr_process_transfers",
+        "mfr_outsource_orders",
+        "mfr_notifications",
+        "mfr_deleted_job_cards",
+        "mfr_deleted_movements",
+        "mfr_idempotency_keys"
+      ];
+
+      const deletedCollections: Record<string, number> = {};
+      const dbAdmin = getFirestoreAdmin();
+      const deletionErrors: string[] = [];
+
       for (const col of collectionsToPurge) {
-        if (true) {
+        let colDeleted = 0;
+
+        // 1. Admin SDK chunked batch deletion (up to 400 docs per batch)
+        if (dbAdmin) {
           try {
-            const dbAdmin = getFirestoreAdmin();
-            if (dbAdmin) {
-              const snap = await dbAdmin.collection(col).get();
-              if (!snap.empty) {
-                const batch = dbAdmin.batch();
-                snap.docs.forEach(d => batch.delete(d.ref));
-                await batch.commit().catch(() => {});
+            let hasMore = true;
+            while (hasMore) {
+              const snap = await dbAdmin.collection(col).limit(400).get();
+              if (snap.empty) {
+                hasMore = false;
+                break;
+              }
+              const batch = dbAdmin.batch();
+              snap.docs.forEach((doc: any) => batch.delete(doc.ref));
+              await batch.commit();
+              colDeleted += snap.size;
+              if (snap.size < 400) {
+                hasMore = false;
               }
             }
-          } catch (e) {}
+          } catch (adminErr: any) {
+            console.warn(`[PURGE] Admin SDK batch delete failed for ${col}:`, adminErr);
+            deletionErrors.push(`Admin SDK error on ${col}: ${adminErr.message || adminErr}`);
+          }
         }
-        const restDocs = await firestoreRestQueryAll(col);
-        if (Array.isArray(restDocs)) {
-          await Promise.all(restDocs.map((doc: any) => {
-            const docId = doc.id || (doc.name ? doc.name.split("/").pop() : "");
-            return docId ? firestoreRestDeleteDoc(col, docId) : Promise.resolve(true);
-          }));
+
+        // 2. REST fallback deletion
+        try {
+          const restDocs = await firestoreRestQueryAll(col);
+          if (Array.isArray(restDocs) && restDocs.length > 0) {
+            for (const doc of restDocs) {
+              const docId = doc.id || (doc.name ? doc.name.split("/").pop() : "");
+              if (docId) {
+                await firestoreRestDeleteDoc(col, docId);
+                colDeleted++;
+              }
+            }
+          }
+        } catch (restErr: any) {
+          console.warn(`[PURGE] REST delete failed for ${col}:`, restErr);
+          deletionErrors.push(`REST error on ${col}: ${restErr.message || restErr}`);
+        }
+
+        deletedCollections[col] = colDeleted;
+      }
+
+      // 3. Clear all server-side in-memory caches
+      inMemoryJobCards.clear();
+      inMemoryMovements.clear();
+      inMemoryDeletedJobCards.clear();
+
+      // 4. Verify post-purge document counts across all target collections
+      let totalRemaining = 0;
+      const remainingBreakdown: Record<string, number> = {};
+
+      for (const col of collectionsToPurge) {
+        let colRemaining = 0;
+        if (dbAdmin) {
+          try {
+            const checkSnap = await dbAdmin.collection(col).limit(10).get();
+            colRemaining = checkSnap.size;
+          } catch (_) {}
+        }
+        if (colRemaining === 0) {
+          try {
+            const restCheck = await firestoreRestQueryAll(col);
+            colRemaining = Array.isArray(restCheck) ? restCheck.length : 0;
+          } catch (_) {}
+        }
+        if (colRemaining > 0) {
+          totalRemaining += colRemaining;
+          remainingBreakdown[col] = colRemaining;
         }
       }
 
-      broadcastRealtimeEvent("ALL_UPDATED");
-      broadcastRealtimeEvent("JOB_UPDATED");
+      if (totalRemaining > 0) {
+        console.error(`[PURGE_FAILURE] Purge incomplete. Remaining documents:`, remainingBreakdown);
+        return res.status(500).json({
+          success: false,
+          error: `Purge incomplete: ${totalRemaining} records remained in database.`,
+          deletedCollections,
+          remainingDocuments: totalRemaining,
+          remainingBreakdown,
+          errors: deletionErrors
+        });
+      }
 
-      return res.json({ success: true, message: "All Job Cards and related data purged successfully." });
+      // 5. Create authoritative audit log for the purge operation
+      const auditId = `AL-PURGE-${Date.now()}`;
+      const auditData = {
+        id: auditId,
+        timestamp: new Date().toISOString(),
+        userId: requester.userId || requester.name || "pawan",
+        userName: requester.name || requester.userId || "Super Admin",
+        action: "FACTORY_DATA_PURGE",
+        details: `Complete factory data purge executed by Super Admin ${requester.name || requester.userId}. Cleared all job cards, movements, raw material items, process transfers, outsource orders, and notifications. Super Admin account preserved.`
+      };
+      if (dbAdmin) {
+        await dbAdmin.collection("mfr_audit_logs").doc(auditId).set(auditData).catch(() => {});
+      }
+      await firestoreRestSetDoc("mfr_audit_logs", auditId, auditData).catch(() => {});
+
+      console.log(`[AUDIT] [FACTORY_DATA_PURGE_SUCCESS] Purged ${Object.values(deletedCollections).reduce((a, b) => a + b, 0)} items across ${collectionsToPurge.length} collections. Super Admin '${requester.userId}' preserved.`);
+
+      // 6. Broadcast Real-time SSE Events to force all connected devices to reload fresh state
+      broadcastRealtimeEvent("ALL_UPDATED", { action: "PURGE_ALL_DATA", timestamp: new Date().toISOString() });
+      broadcastRealtimeEvent("JOB_UPDATED", {});
+      broadcastRealtimeEvent("MOVEMENT_UPDATED", {});
+      broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
+
+      return res.json({
+        success: true,
+        deletedCollections,
+        remainingDocuments: 0,
+        superAdminPreserved: true,
+        message: "All factory operational and Raw Material data completely purged. Super Admin account preserved."
+      });
     } catch (err: any) {
-      console.error("[JOB_CARDS] Error purging job cards:", err);
-      return res.status(500).json({ success: false, error: "Failed to purge job cards" });
+      console.error("[FACTORY_PURGE] Error purging factory data:", err);
+      return res.status(500).json({ success: false, error: err.message || "Failed to purge factory data" });
     }
-  });
+  };
+
+  app.post("/api/job-cards/delete-all", requireFirebaseAuth, handleCompleteFactoryPurge);
+  app.post("/api/factory/delete-all", requireFirebaseAuth, handleCompleteFactoryPurge);
 
   // ----------------------------------------------------
   // SERVER-AUTHORITATIVE MATERIAL MOVEMENT & TRANSACTION ENDPOINT
@@ -2808,6 +3090,59 @@ async function startServer() {
     }
   });
 
+  // Helper to query issued raw material and total moved from Production
+  const getJobCardRMIssuedAndMovedFromProd = async (jobCardNo: string, jobCardData?: any) => {
+    const targetNo = String(jobCardNo || "").toLowerCase().trim();
+    let allMovements: any[] = [];
+
+    // 1. In-memory movements
+    const inMem = Array.from(inMemoryMovements.values()).filter(
+      (m: any) => m && String(m.jobCardNo || "").toLowerCase().trim() === targetNo
+    );
+    allMovements = inMem;
+
+    // 2. Admin SDK movements
+    if (allMovements.length === 0) {
+      const db = getFirestoreAdmin();
+      if (db) {
+        try {
+          const snap = await db.collection("mfr_movements").where("jobCardNo", "==", String(jobCardNo).toUpperCase().trim()).get();
+          if (!snap.empty) {
+            allMovements = snap.docs.map((d: any) => d.data());
+          }
+        } catch (_) {}
+      }
+    }
+
+    // 3. REST fallback
+    if (allMovements.length === 0) {
+      try {
+        const restMovs = await firestoreRestQueryAll("mfr_movements");
+        allMovements = restMovs.filter(
+          (m: any) => m && String(m.jobCardNo || "").toLowerCase().trim() === targetNo
+        );
+      } catch (_) {}
+    }
+
+    let issuedQty = allMovements
+      .filter((m: any) => 
+        String(m.fromDepartment || "").toLowerCase() === "raw material store" &&
+        m.isIssueRequest &&
+        (m.issueStatus === "Issued" || m.accepted)
+      )
+      .reduce((sum: number, m: any) => sum + Number(m.quantity || 0), 0);
+
+    if (issuedQty <= 0 && jobCardData?.rawMaterialStoreDetails?.issueStatus === "Issued") {
+      issuedQty = Number(jobCardData.rawMaterialStoreDetails.issuedQty || 0);
+    }
+
+    const totalMovedFromProd = allMovements
+      .filter((m: any) => String(m.fromDepartment || "").toLowerCase() === "production")
+      .reduce((sum: number, m: any) => sum + Number(m.quantity || 0), 0);
+
+    return { issuedQty, totalMovedFromProd };
+  };
+
   app.post("/api/inventory/movement", requireFirebaseAuth, async (req, res) => {
     try {
       const authUid = (req as any).authUid;
@@ -2932,6 +3267,26 @@ async function startServer() {
                 }
               }
 
+              // Check compulsory raw material policy when moving from Production
+              if (normFrom.toLowerCase() === "production" && !isIssueRequest && jobCardData.processType !== "Purchase") {
+                const compConfig = await getAuthoritativeCompanyConfig();
+                const isRMCompulsory = compConfig?.requireRawMaterialForProduction !== false;
+                if (isRMCompulsory) {
+                  const { issuedQty, totalMovedFromProd } = await getJobCardRMIssuedAndMovedFromProd(activeJobId, jobCardData);
+                  if (issuedQty <= 0) {
+                    const rmErr: any = new Error(`Production cannot be started or moved because raw material has not been issued yet for Job Card ${jobCardData.jobCardNo || activeJobId}.`);
+                    rmErr.statusCode = 400;
+                    throw rmErr;
+                  }
+                  const totalProducedIncludingCurrent = totalMovedFromProd + reqQty;
+                  if (totalProducedIncludingCurrent > issuedQty) {
+                    const rmErr: any = new Error(`Combined production quantity (${totalProducedIncludingCurrent} KG) cannot exceed the issued raw material quantity (${issuedQty} KG). (Already recorded: ${totalMovedFromProd} KG, trying to move: ${reqQty} KG)`);
+                    rmErr.statusCode = 400;
+                    throw rmErr;
+                  }
+                }
+              }
+
               const newBalance = Math.max(0, currentAvailableQty - reqQty);
               const nextVersion = (jobCardData.version || 1) + 1;
 
@@ -3030,6 +3385,28 @@ async function startServer() {
               success: false,
               error: `Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
             });
+          }
+        }
+
+        // Check compulsory raw material policy when moving from Production
+        if (normFrom.toLowerCase() === "production" && !isIssueRequest && jobCardData.processType !== "Purchase") {
+          const compConfig = await getAuthoritativeCompanyConfig();
+          const isRMCompulsory = compConfig?.requireRawMaterialForProduction !== false;
+          if (isRMCompulsory) {
+            const { issuedQty, totalMovedFromProd } = await getJobCardRMIssuedAndMovedFromProd(activeJobId, jobCardData);
+            if (issuedQty <= 0) {
+              return res.status(400).json({
+                success: false,
+                error: `Production cannot be started or moved because raw material has not been issued yet for Job Card ${jobCardData.jobCardNo || activeJobId}.`
+              });
+            }
+            const totalProducedIncludingCurrent = totalMovedFromProd + reqQty;
+            if (totalProducedIncludingCurrent > issuedQty) {
+              return res.status(400).json({
+                success: false,
+                error: `Combined production quantity (${totalProducedIncludingCurrent} KG) cannot exceed the issued raw material quantity (${issuedQty} KG). (Already recorded: ${totalMovedFromProd} KG, trying to move: ${reqQty} KG)`
+              });
+            }
           }
         }
 
@@ -3703,6 +4080,57 @@ async function startServer() {
           success: false,
           error: `Forbidden: User '${requester.name || requester.userId}' (${requester.department}) is not authorized to initiate movements from '${normFrom}'.`
         });
+      }
+
+      // Job Card lookup & available quantity validation
+      const jobCardNoStr = String(movement.jobCardNo).trim();
+      const activeJobId = jobCardNoStr.toUpperCase();
+      let jobCardData = inMemoryJobCards.get(activeJobId) || inMemoryJobCards.get(jobCardNoStr);
+      if (!jobCardData) {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const snap = await dbAdmin.collection("mfr_job_cards").doc(activeJobId).get().catch(() => null);
+          if (snap && snap.exists) {
+            jobCardData = snap.data();
+          }
+        }
+      }
+      if (!jobCardData) {
+        jobCardData = await firestoreRestGetDoc("mfr_job_cards", activeJobId).catch(() => null);
+      }
+
+      if (jobCardData) {
+        const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
+        if (!movement.isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
+          if (numMovQty > currentAvailableQty) {
+            return res.status(400).json({
+              success: false,
+              error: `Insufficient available quantity. Requested ${numMovQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
+            });
+          }
+        }
+
+        // Check compulsory raw material policy when moving from Production
+        if (normFrom.toLowerCase() === "production" && !movement.isIssueRequest && jobCardData.processType !== "Purchase") {
+          const compConfig = await getAuthoritativeCompanyConfig();
+          const isRMCompulsory = compConfig?.requireRawMaterialForProduction !== false;
+          if (isRMCompulsory) {
+            const { issuedQty, totalMovedFromProd } = await getJobCardRMIssuedAndMovedFromProd(activeJobId, jobCardData);
+            if (issuedQty <= 0) {
+              return res.status(400).json({
+                success: false,
+                error: `Production cannot be started or moved because raw material has not been issued yet for Job Card ${jobCardData.jobCardNo || activeJobId}.`
+              });
+            }
+            const totalProducedIncludingCurrent = totalMovedFromProd + numMovQty;
+            if (totalProducedIncludingCurrent > issuedQty) {
+              return res.status(400).json({
+                success: false,
+                error: `Combined production quantity (${totalProducedIncludingCurrent} KG) cannot exceed the issued raw material quantity (${issuedQty} KG). (Already recorded: ${totalMovedFromProd} KG, trying to move: ${numMovQty} KG)`
+              });
+            }
+          }
+        }
       }
 
       const authoritativeUserId = authUid;

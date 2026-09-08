@@ -317,7 +317,7 @@ export default function DepartmentOperations({
       }
     };
     loadItemsAndOutsource();
-  }, [jobCards]);
+  }, []);
 
   // Purchase Department Inputs
   const [purchaseSupplier, setPurchaseSupplier] = useState('');
@@ -474,7 +474,7 @@ export default function DepartmentOperations({
       alert('Please select a raw material wire code and enter a valid rejection quantity (KG).');
       return;
     }
-    const matched = INVENTORY_RAW_MATERIALS.find(m => m.code === selectedRejectMaterialCode);
+    const matched = getDynamicRawMaterialsStock(movements, savedItems).find(m => m.code === selectedRejectMaterialCode);
     const matName = matched ? matched.name : selectedRejectMaterialCode;
 
     setIsSubmittingWireRejection(true);
@@ -1653,18 +1653,8 @@ Please adjust the quantity or request additional raw material issue.`);
   // --- FILTERED LISTS ---
   // A. Department Inbox Architecture: Authoritative Incoming Transfers waiting for acceptance
   const departmentIncomingTransfers = useMemo(() => {
-    const list = DBService.getDepartmentIncomingTransfers(activeDept, movements);
-    
-    // Forensic Diagnostic Logging
-    console.log(`[INGRESS-AUTH]\nuserId=${currentUser?.userId || 'none'}\ndepartment=${activeDept}\nallowedDepartments=${JSON.stringify(userDepts)}`);
-    console.log(`[INGRESS-FETCH]\nserverMovements=${movements.length}\nserverJobCards=${jobCards.length}`);
-    const toProd = movements.filter(m => m.toDepartment === 'Production');
-    const toActive = movements.filter(m => m.toDepartment === activeDept);
-    console.log(`[INGRESS-FILTER]\ntotal=${movements.length}\ntoProduction=${toProd.length}\naccepted=${toActive.filter(m => m.accepted).length}\nunaccepted=${toActive.filter(m => !m.accepted).length}\nvisible=${list.length}`);
-    console.log(`[INGRESS-FINAL]\nvisibleJobCards=${list.map(m => m.jobCardNo).join(',') || 'none'}`);
-
-    return list;
-  }, [activeDept, movements, jobCards, currentUser, userDepts]);
+    return DBService.getDepartmentIncomingTransfers(activeDept, movements);
+  }, [activeDept, movements, userDepts]);
   const incomingTransfers = departmentIncomingTransfers;
 
   const pendingIssueRequests = movements.filter(m => {
@@ -1681,7 +1671,8 @@ Please adjust the quantity or request additional raw material issue.`);
   });
 
   // B. Job cards currently assigned to this department
-  const activeDepartmentJobs = jobCards.filter(c => {
+  // Memoized: filter is O(N×M) — only recompute when jobCards, movements, or activeDept change
+  const activeDepartmentJobs = useMemo(() => jobCards.filter(c => {
     if (c.completed) return false;
     
     // If the job card is pending custody acceptance BY THE CURRENT DEPARTMENT,
@@ -1749,7 +1740,7 @@ Please adjust the quantity or request additional raw material issue.`);
       return c.currentDepartment === 'Packing' || (totalReceivedAtPacking > 0 && pendingPackingQty > 0);
     }
     return c.currentDepartment === activeDept;
-  });
+  }), [jobCards, movements, activeDept]);
 
   // Calculate WIP quantity for each job in the active department
   const getJobWipQtyForDept = (job: JobCard): number => {
@@ -1801,7 +1792,12 @@ Please adjust the quantity or request additional raw material issue.`);
     return job.currentQty || 0;
   };
 
-  const totalDeptWipQty = activeDepartmentJobs.reduce((acc, job) => acc + getJobWipQtyForDept(job), 0);
+  // Memoized: getJobWipQtyForDept calls getJobCardProcessMetrics+movements.filter per job = O(N×M)
+  const totalDeptWipQty = useMemo(
+    () => activeDepartmentJobs.reduce((acc, job) => acc + getJobWipQtyForDept(job), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeDepartmentJobs, movements, activeDept]
+  );
 
   // --- DEPARTMENT WORKBENCH SEARCH & FILTERS ---
   const [deptSearchQuery, setDeptSearchQuery] = useState('');
@@ -5177,7 +5173,7 @@ Please adjust the quantity or request additional raw material issue.`);
                       onChange={e => setSelectedRejectMaterialCode(e.target.value)}
                       className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 font-bold text-slate-800 dark:text-slate-100"
                     >
-                      {getDynamicRawMaterialsStock(movements).map(rm => (
+                      {getDynamicRawMaterialsStock(movements, savedItems).map(rm => (
                         <option key={rm.code} value={rm.code}>
                           {rm.code} - {rm.name} (Stock: {rm.availableStock.toLocaleString()} KG)
                         </option>

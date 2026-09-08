@@ -26,3 +26,8 @@ android/local.properties
 .idea/
 node
 pawan-flow-work-main-git/
+creds_store.json
+users_store.json
+scratch/
+*.xlsx
+

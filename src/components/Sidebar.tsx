@@ -11,7 +11,8 @@ import {
   FileText, 
   Bell, 
   Activity, 
-  X
+  X,
+  LogOut
 } from 'lucide-react';
 import { Department, UserProfile, CompanyConfig } from '../types';
 import { isFirestoreOffline } from '../lib/firebase';
@@ -27,6 +28,7 @@ interface SidebarProps {
   isOpen?: boolean;
   onClose?: () => void;
   companyConfig?: CompanyConfig | null;
+  onLogout?: () => void;
 }
 
 export default function Sidebar({
@@ -38,7 +40,8 @@ export default function Sidebar({
   unreadCount,
   isOpen,
   onClose,
-  companyConfig = null
+  companyConfig = null,
+  onLogout
 }: SidebarProps) {
   const [isOffline, setIsOffline] = useState(isFirestoreOffline);
 
@@ -117,45 +120,47 @@ export default function Sidebar({
 
       {/* User Information Profile Block */}
       <div className="p-4 border-b border-[#1E293B] bg-[#0F172A]/40">
-        <div className="flex items-center gap-3">
-          <div className="h-8 w-8 rounded-full bg-[#1E293B] border border-slate-700 flex items-center justify-center text-[#3B82F6] font-bold uppercase text-xs">
-            {currentUser.name.charAt(0)}
-          </div>
-          <div className="min-w-0 flex-1">
-            <h4 className="text-xs font-semibold text-white truncate text-ellipsis">
-              {currentUser.name}
-            </h4>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold tracking-wide ${getDepartmentColor(currentUser.department)}`}>
-                {currentUser.department}
-              </span>
-              {(() => {
-                const extraDepts = Array.from(new Set([
-                  ...(currentUser.accessList || []),
-                  ...(currentUser.allowedDepartments || [])
-                ])).filter(d => d !== currentUser.department);
-                if (extraDepts.length > 0 && currentUser.role !== 'super_admin') {
-                  return (
-                    <span 
-                      className="text-[9px] bg-indigo-900/80 text-indigo-200 border border-indigo-700/60 px-1.5 py-0.5 rounded font-bold uppercase cursor-help"
-                      title={`Multi-Dept Authority: ${extraDepts.join(', ')}`}
-                    >
-                      +{extraDepts.length} Depts
-                    </span>
-                  );
-                }
-                return null;
-              })()}
-              {currentUser.role === 'super_admin' && (
-                <span className="text-[9px] bg-purple-700 text-purple-100 px-1 py-0.5 rounded font-bold uppercase">
-                  SUPER
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <div className="h-8 w-8 rounded-full bg-[#1E293B] border border-slate-700 flex items-center justify-center text-[#3B82F6] font-bold uppercase text-xs shrink-0">
+              {currentUser.name.charAt(0)}
+            </div>
+            <div className="min-w-0 flex-1">
+              <h4 className="text-xs font-semibold text-white truncate text-ellipsis">
+                {currentUser.name}
+              </h4>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold tracking-wide ${getDepartmentColor(currentUser.department)}`}>
+                  {currentUser.department}
                 </span>
-              )}
-              {currentUser.role === 'admin' && (
-                <span className="text-[9px] bg-red-800 text-red-100 px-1 py-0.5 rounded font-bold uppercase">
-                  ADM
-                </span>
-              )}
+                {(() => {
+                  const extraDepts = Array.from(new Set([
+                    ...(currentUser.accessList || []),
+                    ...(currentUser.allowedDepartments || [])
+                  ])).filter(d => d !== currentUser.department);
+                  if (extraDepts.length > 0 && currentUser.role !== 'super_admin') {
+                    return (
+                      <span 
+                        className="text-[9px] bg-indigo-900/80 text-indigo-200 border border-indigo-700/60 px-1.5 py-0.5 rounded font-bold uppercase cursor-help"
+                        title={`Multi-Dept Authority: ${extraDepts.join(', ')}`}
+                      >
+                        +{extraDepts.length} Depts
+                      </span>
+                    );
+                  }
+                  return null;
+                })()}
+                {currentUser.role === 'super_admin' && (
+                  <span className="text-[9px] bg-purple-700 text-purple-100 px-1 py-0.5 rounded font-bold uppercase">
+                    SUPER
+                  </span>
+                )}
+                {currentUser.role === 'admin' && (
+                  <span className="text-[9px] bg-red-800 text-red-100 px-1 py-0.5 rounded font-bold uppercase">
+                    ADM
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </div>

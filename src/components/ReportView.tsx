@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Download, 
   Printer, 
@@ -24,7 +24,7 @@ import { JobCard, MaterialMovement, Department, UserProfile, ProcessTransfer } f
 import { getJobCardProcessMetrics, getJobCardDepartmentPending, getWireScrapQty } from '../lib/metrics';
 import PendingBreakdownModal from './PendingBreakdownModal';
 import RawMaterialReportView from './RawMaterialReportView';
-import { INVENTORY_RAW_MATERIALS } from './RawMaterialRequestModal';
+import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 
 interface ReportViewProps {
   jobCards: JobCard[];
@@ -202,14 +202,8 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
     });
   };
 
-  // Filters calculation
+  // Filters calculation — memoized to avoid O(N×M) recompute on every UI interaction
   const getFilteredData = () => {
-    console.log("ReportView: total jobCards loaded =", jobCards.length);
-    if (jobCards.length > 0) {
-        console.log("First job card:", jobCards[0]);
-        const found = jobCards.find(jc => jc.jobCardNo.toLowerCase() === 'jc-1001');
-        console.log("jc-1001 found in jobCards?", !!found);
-    }
     let baseData: any[] = [];
 
     // 1. Filter dataset according to the reports type
@@ -510,41 +504,14 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
         break;
       }
       case 'raw_material_summary': {
-        baseData = INVENTORY_RAW_MATERIALS.map(item => {
-          const totalIssued = movements
-            .filter(m => 
-              m.fromDepartment === 'Raw Material Store' && 
-              m.isIssueRequest && 
-              m.issueStatus === 'Issued' && 
-              (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
-            )
-            .reduce((sum, m) => sum + (m.quantity || 0), 0);
-          const totalPurchased = movements
-            .filter(m => 
-              m.toDepartment === 'Raw Material Store' && 
-              m.fromDepartment === 'Purchase' && 
-              m.accepted &&
-              (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
-            )
-            .reduce((sum, m) => sum + (m.quantity || 0), 0);
-          const totalRejected = movements
-            .filter(m => 
-              m.fromDepartment === 'Raw Material Store' && 
-              (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
-              (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-'))
-            )
-            .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
-          const currentStock = Math.max(0, item.availableStock + totalPurchased - totalIssued - totalRejected);
+        baseData = getDynamicRawMaterialsStock(movements).map(item => {
           return {
             'Material Code': item.code,
             'Material Name': item.name,
             'Category': item.category,
             'Bin Location': item.location,
-            'Starting Stock (KG)': item.availableStock,
-            'Inwarded Stock (KG)': totalPurchased,
-            'Total Issued (KG)': totalIssued,
-            'Current Stock (KG)': currentStock,
-            'Reserve Status (%)': Math.round(item.availableStock > 0 ? (currentStock / item.availableStock) * 100 : 0)
+            'Current Stock (KG)': item.availableStock,
+            'Unit': item.unit || 'KG'
           };
         });
         break;
@@ -738,7 +705,11 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
     return baseData;
   };
 
-  const filteredData = getFilteredData();
+  const filteredData = useMemo(
+    () => getFilteredData(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [jobCards, movements, processTransfers, activeReport, searchTerm, startDate, endDate]
+  );
 
   // Filter job cards for the department-level statistics
   const getFilteredCardsForDept = () => {

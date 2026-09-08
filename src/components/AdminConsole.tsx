@@ -1078,24 +1078,25 @@ export default function AdminConsole({
             </button>
           )}
 
-          {activeSubTab === 'jobs' && isManager && (
+          {activeSubTab === 'jobs' && currentUser?.role === 'super_admin' && (
             <button
               type="button"
               onClick={() => {
                 showConfirm(
-                  "CRITICAL WARNING: Purge All Factory & Raw Material Store Data",
-                  "Are you sure you want to PERMANENTLY ERASE all active and completed job cards, material movements, notifications, item catalog, and Raw Material Store inventory? This will wipe all application data completely clean! This step is completely irreversible.\n\nTo confirm, type DELETE ALL below:",
+                  "PERMANENTLY DELETE ALL FACTORY DATA",
+                  "CRITICAL WARNING: Are you sure you want to PERMANENTLY ERASE all factory operational and master data?\n\nCategories that will be completely removed:\n• All Job Cards & Production Logs\n• All Material Movements & WIP Transit Cargo\n• All Raw Material Store Master Items & Inventory\n• All Process Transfers & Outsource Orders\n• All Notifications & Ingress Requests\n\n🛡️ SUPER ADMIN ACCOUNT WILL NOT BE DELETED.\nYour Super Admin account, passwords, authentication credentials, and system settings will remain 100% active and preserved.\n\nTo confirm this irreversible factory purge, please type DELETE ALL below:",
                   async () => {
                     try {
-                      await DBService.deleteAllJobCards(currentUser?.userId || '', currentUser?.name || 'Authorized Admin');
-                      showToast("All application data including Raw Material Store wiped successfully.", "success");
+                      await DBService.deleteAllJobCards(currentUser?.userId || '', currentUser?.name || 'Super Admin');
+                      showToast("Factory data deleted successfully. Super Admin account preserved.", "success");
                       if (onRefreshJobs) onRefreshJobs();
+                      if (onRefreshCompany) onRefreshCompany();
                     } catch (err: any) {
                       console.error("Purge command failed", err);
                       showToast(`Purge failed: ${err.message || String(err)}`, "error");
                     }
                   },
-                  "Confirm Purge All",
+                  "Confirm Permanent Purge",
                   "Cancel",
                   "DELETE ALL"
                 );
@@ -1103,7 +1104,7 @@ export default function AdminConsole({
               className="w-full md:w-auto flex items-center justify-center gap-1.5 bg-red-650 hover:bg-red-550 text-white font-sans font-bold text-xs py-2.5 px-4 rounded-lg shadow-sm transition-all border border-red-750 cursor-pointer"
             >
               <Trash2 className="h-4 w-4" />
-              Purge All Data (Inc. Raw Material Store)
+              Purge All Factory Data (Inc. Raw Material Store)
             </button>
           )}
         </div>
@@ -2476,13 +2477,13 @@ export default function AdminConsole({
             </h4>
 
             <p className="text-xs text-slate-500 dark:text-slate-400 leading-normal">
-              Perform a global factory reset. This action will clear all live data (including custom job cards, material movements, user accounts, and notifications) and restore the system to its initial pristine pre-seeded demonstration data state.
+              Perform a global factory reset. This action will clear all operational data (including custom job cards, material movements, non-admin accounts, and notifications). Your Super Admin account and security credentials will be preserved.
             </p>
 
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-rose-100/40 dark:border-rose-900/10">
               <div className="space-y-1">
                 <span className="text-xs font-bold text-slate-800 dark:text-slate-200">Permanent System Factory Reset</span>
-                <p className="text-[10px] text-slate-400 dark:text-slate-500">Permanently erases all operational collections, movements, job cards, credentials, and accounts.</p>
+                <p className="text-[10px] text-slate-400 dark:text-slate-500">Permanently erases all operational collections, movements, and job cards. Preserves Super Admin account.</p>
               </div>
 
               <button
@@ -3702,12 +3703,14 @@ export default function AdminConsole({
             <div className="bg-rose-50 dark:bg-rose-950/20 border border-rose-200 dark:border-rose-900/30 rounded-2xl p-4 text-xs text-rose-900 dark:text-rose-200 space-y-2 leading-relaxed">
               <p className="font-bold">This will permanently and irreversibly erase:</p>
               <ul className="list-disc list-inside space-y-1 text-[11px] font-medium text-rose-800 dark:text-rose-300">
-                <li>All user profiles & security credentials</li>
                 <li>All job cards & manufacturing progress</li>
                 <li>All material movements & store records</li>
-                <li>All outsource orders, items, and audit trails</li>
+                <li>All outsource orders, items, and notifications</li>
+                <li>Staff user accounts and audit trails</li>
               </ul>
-              <p className="text-[11px] pt-1 text-slate-600 dark:text-slate-400">The application will transition to a clean first-run state requiring a new Super Admin account.</p>
+              <div className="pt-2 border-t border-rose-200 dark:border-rose-900/40 text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+                ⭐ SUPER ADMIN PRESERVED: Your existing Super Admin account and security PIN credentials will survive this reset.
+              </div>
             </div>
 
             {resetErrorMessage && (
@@ -3762,7 +3765,7 @@ export default function AdminConsole({
                   setResetErrorMessage('');
                   try {
                     await DBService.factoryReset(resetAdminPin);
-                    showToast("Factory reset completed successfully. System ready for initial configuration.", "success");
+                    showToast("Factory reset completed successfully. Super Admin account preserved.", "success");
                     setShowFactoryResetModal(false);
                   } catch (err: any) {
                     setResetErrorMessage(err.message || 'Factory reset failed');
@@ -3777,7 +3780,7 @@ export default function AdminConsole({
                     <span>Erasing System...</span>
                   </>
                 ) : (
-                  <span>PERMANENTLY DELETE EVERYTHING</span>
+                  <span>RESET OPERATIONAL DATA</span>
                 )}
               </button>
             </div>

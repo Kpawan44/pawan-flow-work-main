@@ -14,19 +14,23 @@ const AUTO_BACKUP_ENABLED_KEY = 'mfr_auto_backup_enabled';
 const LAST_BACKUP_DATE_KEY = 'mfr_last_backup_date';
 
 export function isAutoBackupEnabled(): boolean {
+  if (typeof localStorage === 'undefined') return true;
   const stored = localStorage.getItem(AUTO_BACKUP_ENABLED_KEY);
   return stored === null ? true : stored === 'true';
 }
 
 export function setAutoBackupEnabled(enabled: boolean): void {
+  if (typeof localStorage === 'undefined') return;
   localStorage.setItem(AUTO_BACKUP_ENABLED_KEY, enabled ? 'true' : 'false');
 }
 
 export function getLastBackupDate(): string | null {
+  if (typeof localStorage === 'undefined') return null;
   return localStorage.getItem(LAST_BACKUP_DATE_KEY);
 }
 
 export function getStoredBackups(): DatabaseBackup[] {
+  if (typeof localStorage === 'undefined') return [];
   try {
     const stored = localStorage.getItem(BACKUP_STORAGE_KEY);
     return stored ? JSON.parse(stored) : [];
@@ -37,6 +41,7 @@ export function getStoredBackups(): DatabaseBackup[] {
 }
 
 export function saveBackupsList(backups: DatabaseBackup[]): void {
+  if (typeof localStorage === 'undefined') return;
   try {
     localStorage.setItem(BACKUP_STORAGE_KEY, JSON.stringify(backups));
   } catch (err) {

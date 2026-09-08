@@ -18,6 +18,10 @@ export function downloadCSVFile(filename: string, headers: string[], rows: any[]
     ...rows.map(row => row.map(escapeCSV).join(','))
   ].join('\n');
 
+  if (typeof document === 'undefined' || typeof window === 'undefined') {
+    return csvContent;
+  }
+
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -27,6 +31,7 @@ export function downloadCSVFile(filename: string, headers: string[], rows: any[]
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+  return csvContent;
 }
 
 // 1. Export Job Cards
