@@ -324,6 +324,10 @@ export interface MaterialMovement {
   wireScrapQty?: number;
   processDetails?: Record<string, any>;
 
+  // Grouped shipping & multi-job dispatch
+  dispatchGroupNo?: string;
+  manifestId?: string;
+
   // Rejection tracking
   rejectedBy?: string;
   rejectedByUserId?: string;

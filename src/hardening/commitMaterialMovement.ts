@@ -15,6 +15,8 @@ export interface MovementCommitInput {
   requestedQty?: number;
   requestedUnit?: string;
   transactionType?: string;
+  dispatchGroupNo?: string;
+  manifestId?: string;
   extra?: Record<string, any>;
   /** Optional preloaded movements to avoid collection list inside a Firestore transaction. */
   preloadedMovements?: any[];
@@ -237,6 +239,8 @@ async function commitMaterialMovementTxInner(
     requestedQty: input.requestedQty,
     requestedUnit: input.requestedUnit,
     transactionType: input.transactionType,
+    dispatchGroupNo: input.dispatchGroupNo || (input.extra?.dispatchGroupNo as string) || undefined,
+    manifestId: input.manifestId || (input.extra?.manifestId as string) || undefined,
     createdAt: now
   };
 
