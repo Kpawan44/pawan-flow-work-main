@@ -12,6 +12,7 @@ interface BulkPrintManifestModalProps {
   selectedJobCards: JobCard[];
   movements: MaterialMovement[];
   currentUser: UserProfile | null;
+  onBatchDispatch?: (manifestId: string, groupNo: string, items: { jobCardNo: string; quantity: number }[]) => Promise<void>;
 }
 
 export default function BulkPrintManifestModal({
@@ -19,7 +20,8 @@ export default function BulkPrintManifestModal({
   onClose,
   selectedJobCards,
   movements,
-  currentUser
+  currentUser,
+  onBatchDispatch
 }: BulkPrintManifestModalProps) {
   // Option toggles for the user before printing
   const [showPartyName, setShowPartyName] = useState(true);
@@ -382,7 +384,7 @@ export default function BulkPrintManifestModal({
           </div>
         </div>
 
-        {/* Footer actions - Print / Cancel (Hidden on Print) */}
+        {/* Footer actions - Print / Cancel / Dispatch (Hidden on Print) */}
         <div className="p-5 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 flex items-center gap-2.5 shrink-0 print:hidden">
           <button
             type="button"
@@ -391,6 +393,24 @@ export default function BulkPrintManifestModal({
           >
             Cancel
           </button>
+
+          {onBatchDispatch && selectedJobCards.length > 0 && (
+            <button
+              onClick={() => {
+                const groupNo = `GRP-${manifestId.slice(-6)}`;
+                const items = selectedJobCards.map(j => {
+                  const metrics = getJobCardProcessMetrics(j, movements);
+                  return { jobCardNo: j.jobCardNo, quantity: metrics.qtyRemainingInStock > 0 ? metrics.qtyRemainingInStock : j.orderQty };
+                });
+                onBatchDispatch(manifestId, groupNo, items);
+              }}
+              className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold transition flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
+            >
+              <FileText className="h-4 w-4" />
+              <span>Dispatch Batch Manifest ({selectedJobCards.length})</span>
+            </button>
+          )}
+
           <button
             onClick={handlePrint}
             className="flex-1 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold transition flex items-center justify-center gap-1.5 shadow-sm shadow-indigo-600/10 cursor-pointer"
