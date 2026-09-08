@@ -85,6 +85,58 @@ export function remainingAtProduction(
   return Math.max(0, order - produced);
 }
 
+export function getEffectiveDepartmentRejectionQty(
+  job: {
+    jobCardNo?: string;
+    heatTreatmentDetails?: { rejectionQty?: number };
+    platingDetails?: { rejectionQty?: number };
+    packingDetails?: { rejectionQty?: number };
+  },
+  movements: Array<{
+    jobCardNo?: string;
+    fromDepartment?: string;
+    toDepartment?: string;
+    accepted?: boolean;
+    quantity?: number;
+    processDetails?: any;
+  }> = [],
+  department: string
+): number {
+  if (!job) return 0;
+  const target = String(job.jobCardNo || "").toLowerCase();
+  const dept = normalizeDeptName(department);
+
+  let recordedRejections = 0;
+  if (dept === "heat treatment") recordedRejections = Number(job.heatTreatmentDetails?.rejectionQty || 0);
+  if (dept === "plating") recordedRejections = Number(job.platingDetails?.rejectionQty || 0);
+  if (dept === "packing") recordedRejections = Number(job.packingDetails?.rejectionQty || 0);
+
+  const isUpstream = (fromD: string, toD: string) => {
+    const f = normalizeDeptName(fromD);
+    const t = normalizeDeptName(toD);
+    if (f === "plating" && (t === "heat treatment" || t === "production")) return true;
+    if (f === "heat treatment" && t === "production") return true;
+    if (f === "packing" && (t === "plating" || t === "heat treatment" || t === "production")) return true;
+    return false;
+  };
+
+  // Only reverse movements marked as rejection returns offset the recorded rejectionQty to avoid double deduction.
+  // Standard reverse transfers (e.g. good rework) count as sent outbound while recordedRejections count as scrap.
+  const reverseRejectionSentQty = (movements || [])
+    .filter(
+      (m) =>
+        m &&
+        String(m.jobCardNo || "").toLowerCase() === target &&
+        normalizeDeptName(m.fromDepartment) === dept &&
+        isUpstream(m.fromDepartment || "", m.toDepartment || "") &&
+        m.accepted === true &&
+        (Boolean(m.processDetails?.isRejectionReturn) || Boolean(m.processDetails?.isWireRejection))
+    )
+    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
+
+  return Math.max(0, recordedRejections - reverseRejectionSentQty);
+}
+
 export function remainingAtDepartment(
   job: { jobCardNo?: string; heatTreatmentDetails?: { rejectionQty?: number }; platingDetails?: { rejectionQty?: number }; packingDetails?: { rejectionQty?: number } },
   movements: Array<{
@@ -96,11 +148,13 @@ export function remainingAtDepartment(
   }> = [],
   department: string
 ): number {
+  if (!job) return 0;
   const target = String(job.jobCardNo || "").toLowerCase();
   const dept = normalizeDeptName(department);
   const received = (movements || [])
     .filter(
       (m) =>
+        m &&
         String(m.jobCardNo || "").toLowerCase() === target &&
         normalizeDeptName(m.toDepartment) === dept &&
         m.accepted === true
@@ -109,15 +163,14 @@ export function remainingAtDepartment(
   const sent = (movements || [])
     .filter(
       (m) =>
+        m &&
         String(m.jobCardNo || "").toLowerCase() === target &&
         normalizeDeptName(m.fromDepartment) === dept
     )
     .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
-  let rejection = 0;
-  if (dept === "heat treatment") rejection = Number(job.heatTreatmentDetails?.rejectionQty || 0);
-  if (dept === "plating") rejection = Number(job.platingDetails?.rejectionQty || 0);
-  if (dept === "packing") rejection = Number(job.packingDetails?.rejectionQty || 0);
-  return Math.max(0, received - sent - rejection);
+
+  const effectiveRejection = getEffectiveDepartmentRejectionQty(job, movements, department);
+  return Math.max(0, received - sent - effectiveRejection);
 }
 
 /** Store on-hand: accepted inbound minus outbound. Avoids Packing loop double-count. */
@@ -279,17 +332,62 @@ export function isVisibleInDispatchQueue(
   });
 }
 
-export function canFinalizeDispatch(job: {
-  completed?: boolean;
-  status?: string;
-  dispatchDetails?: { dispatchQty?: number };
-}): { ok: boolean; error?: string } {
+export function getCumulativeDispatchedQty(
+  job: { jobCardNo?: string; dispatchDetails?: { dispatchQty?: number } },
+  movements: Array<{
+    jobCardNo?: string;
+    fromDepartment?: string;
+    toDepartment?: string;
+    accepted?: boolean;
+    quantity?: number;
+  }> = []
+): number {
+  if (!job) return 0;
+  const target = String(job.jobCardNo || "").toLowerCase();
+  const dispatchedMovQty = (movements || [])
+    .filter(
+      (m) =>
+        m &&
+        String(m.jobCardNo || "").toLowerCase() === target &&
+        normalizeDeptName(m.toDepartment) === "dispatch" &&
+        m.accepted === true
+    )
+    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
+
+  if (dispatchedMovQty > 0) return dispatchedMovQty;
+  return Number(job.dispatchDetails?.dispatchQty || 0);
+}
+
+export function canFinalizeDispatch(
+  job: {
+    completed?: boolean;
+    status?: string;
+    jobCardNo?: string;
+    orderQty?: number;
+    dispatchDetails?: { dispatchQty?: number };
+  },
+  movements: Array<any> = [],
+  requestedQty: number = 0
+): { ok: boolean; error?: string } {
+  if (!job) return { ok: false, error: "Invalid job card." };
   if (job.completed || String(job.status || "") === "Completed") {
     return { ok: false, error: "This job has already been dispatched." };
   }
-  if (Number(job.dispatchDetails?.dispatchQty || 0) > 0) {
+
+  const req = Number(requestedQty || 0);
+  const availableInStore = storeAuthoritativeOnHand(job, movements);
+
+  if (availableInStore <= 0 && Number(job.dispatchDetails?.dispatchQty || 0) > 0) {
     return { ok: false, error: "This job has already been dispatched." };
   }
+
+  if (req > 0 && availableInStore > 0 && req > availableInStore) {
+    return {
+      ok: false,
+      error: `Cannot dispatch ${req} KG; available Store stock is only ${availableInStore} KG.`
+    };
+  }
+
   return { ok: true };
 }
 

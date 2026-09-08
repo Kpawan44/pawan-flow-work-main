@@ -3188,7 +3188,7 @@ async function startServer() {
     return { issuedQty, totalMovedFromProd };
   };
 
-  app.post("/api/inventory/movement", requireFirebaseAuth, async (req, res) => {
+  const handleCreateMovement = async (req: express.Request, res: express.Response) => {
     try {
       const authUid = (req as any).authUid;
       const requester = (req as any).user;
@@ -3197,6 +3197,7 @@ async function startServer() {
         return res.status(401).json({ success: false, error: "Unauthorized: Missing authoritative user profile." });
       }
 
+      const bodyData = (req.body && req.body.movement) ? req.body.movement : (req.body || {});
       const {
         operationId,
         movementId,
@@ -3207,11 +3208,9 @@ async function startServer() {
         remarks,
         processDetails,
         isIssueRequest
-      } = req.body;
+      } = bodyData;
 
-      if (!operationId || typeof operationId !== "string" || !operationId.trim()) {
-        return res.status(400).json({ success: false, error: "operationId is required." });
-      }
+      const opKey = String(operationId || (req.body?.operationId) || `op-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`).trim();
 
       if (!jobCardNo || !fromDepartment || !toDepartment) {
         return res.status(400).json({ success: false, error: "jobCardNo, fromDepartment, and toDepartment are required." });
@@ -3273,7 +3272,6 @@ async function startServer() {
       const authoritativeUserId = authUid;
       const authoritativeUserName = requester.name || requester.userId || "Authorized User";
 
-      const opKey = operationId.trim();
       const movId = movementId || `M-${Date.now()}`;
       const now = new Date().toISOString();
       let txResult: any = null;
@@ -3573,7 +3571,10 @@ async function startServer() {
       const status = err.statusCode || (err.message && err.message.includes("Insufficient") ? 400 : (err.message && err.message.includes("not found") ? 404 : 400));
       return res.status(status).json({ success: false, error: err.message || "Material movement transaction failed." });
     }
-  });
+  };
+
+  app.post("/api/inventory/movement", requireFirebaseAuth, handleCreateMovement);
+  app.post("/api/movements", requireFirebaseAuth, handleCreateMovement);
 
   // POST /api/movements/:movementId/accept — Authoritative Atomic Material Acceptance
   app.post("/api/movements/:movementId/accept", requireFirebaseAuth, async (req, res) => {

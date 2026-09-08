@@ -1,5 +1,5 @@
 import { JobCard, MaterialMovement, ProcessTransfer } from '../types';
-import { storeAuthoritativeOnHand } from '../hardening/process2Manufacturing';
+import { storeAuthoritativeOnHand, getEffectiveDepartmentRejectionQty } from '../hardening/process2Manufacturing';
 
 export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMovement[] = [], processTransfersList: ProcessTransfer[] = []) {
   if (!j) return {
@@ -50,7 +50,7 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
       qtyReceivedAtHT = qtyReceivedFromPurchase;
     }
 
-    const htRejections = j.heatTreatmentDetails?.rejectionQty || 0;
+    const htRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Heat Treatment');
 
     let qtyRoutedToPlating = acceptedMovements
       .filter(m => m.toDepartment === 'Plating')
@@ -74,7 +74,7 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
       .filter(m => m.toDepartment === 'Packing')
       .reduce((sum, m) => sum + m.quantity, 0);
 
-    const platingRejections = j.platingDetails?.rejectionQty || 0;
+    const platingRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Plating');
     const qtyRemainingAtPlating = Math.max(0, qtyReceivedAtPlating - qtyRoutedToPacking - platingRejections);
 
     // Packing stage
@@ -146,7 +146,7 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
         .filter(m => m.toDepartment === 'Plating')
         .reduce((sum, m) => sum + m.quantity, 0);
 
-  const htRejections = j.heatTreatmentDetails?.rejectionQty || 0;
+  const htRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Heat Treatment');
 
   if (j.customRoutedToPlating === undefined || j.customRoutedToPlating === null) {
     if (qtyRoutedToPlating === 0) {
@@ -179,7 +179,7 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
     .filter(m => m.toDepartment === 'Packing')
     .reduce((sum, m) => sum + m.quantity, 0);
 
-  const platingRejections = j.platingDetails?.rejectionQty || 0;
+  const platingRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Plating');
   const qtyRemainingAtPlating = Math.max(0, qtyReceivedAtPlating - qtyRoutedToPacking - platingRejections);
 
 
