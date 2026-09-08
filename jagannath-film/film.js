@@ -1,7 +1,7 @@
 const SCENES = [
   {
     id: 0,
-    title: "Invocation",
+    title: "आवाहन",
     duration: 7000,
     music: 0.22,
     narration: "",
@@ -9,28 +9,28 @@ const SCENES = [
   },
   {
     id: 1,
-    title: "Ancient Divine Mystery",
-    duration: 9000,
+    title: "प्राचीन दिव्य रहस्य",
+    duration: 10000,
     music: 0.28,
     narration:
-      "Long ago, in the sacred land of Odisha, a divine mystery appeared—one that would change the spiritual history of India forever.",
-    shots: [{ src: "assets/scene-01-forest-mystery.png", ken: "left", duration: 9000 }],
+      "बहुत पहले, ओडिशा की पवित्र भूमि में एक दिव्य रहस्य प्रकट हुआ—जो भारत के आध्यात्मिक इतिहास को सदा के लिए बदल देगा।",
+    shots: [{ src: "assets/scene-01-forest-mystery.png", ken: "left", duration: 10000 }],
   },
   {
     id: 2,
-    title: "King Indradyumna's Vision",
-    duration: 9500,
+    title: "राजा इन्द्रद्युम्न का दर्शन",
+    duration: 10500,
     music: 0.32,
     narration:
-      "King Indradyumna received a divine calling. He was told that the Supreme Lord would reveal Himself in a mysterious form.",
-    shots: [{ src: "assets/scene-02-king-vision.png", ken: "in", duration: 9500 }],
+      "राजा इन्द्रद्युम्न को दिव्य आह्वान मिला। उन्हें बताया गया कि परम प्रभु स्वयं एक रहस्यमय रूप में प्रकट होंगे।",
+    shots: [{ src: "assets/scene-02-king-vision.png", ken: "in", duration: 10500 }],
   },
   {
     id: 3,
-    title: "The Search for the Divine",
+    title: "दिव्य खोज",
     duration: 10000,
     music: 0.34,
-    narration: "But the Lord was already being worshipped in secret by a devoted servant of the forest.",
+    narration: "परंतु वन के एक भक्त सेवक पहले से ही गुप्त रूप से प्रभु की आराधना कर रहा था।",
     shots: [
       { src: "assets/scene-03-search-and-devotee.png", ken: "right", duration: 4200 },
       { src: "assets/scene-03b-vishvavasu-worship.png", ken: "in", duration: 5800 },
@@ -38,67 +38,67 @@ const SCENES = [
   },
   {
     id: 4,
-    title: "The Divine Deity",
-    duration: 9500,
+    title: "दिव्य विग्रह",
+    duration: 11000,
     music: 0.38,
     narration:
-      "The Lord revealed that His form could not be understood by ordinary human eyes. He was beyond form, yet He chose to take a form for His devotees.",
-    shots: [{ src: "assets/scene-04-divine-revelation.png", ken: "in", duration: 9500 }],
+      "प्रभु ने प्रकट किया कि उनका रूप साधारण मानव नेत्रों से नहीं समझा जा सकता। वे रूप से परे हैं, फिर भी भक्तों के लिए रूप धारण करते हैं।",
+    shots: [{ src: "assets/scene-04-divine-revelation.png", ken: "in", duration: 11000 }],
   },
   {
     id: 5,
-    title: "The Mysterious Carpenter",
-    duration: 10500,
+    title: "रहस्यमय शिल्पी",
+    duration: 11000,
     music: 0.36,
-    narration: "No one must disturb me while I work.",
+    narration: "जब तक मैं कार्य करूँ, कोई मुझे विचलित न करे।",
     extraNarration:
-      "An elderly mysterious carpenter arrived at the palace. He could carve the divine wooden deities, on one sacred condition.",
+      "एक वृद्ध रहस्यमय शिल्पी राजमहल में आया। वह दिव्य काष्ठ विग्रह गढ़ सकता था—एक पवित्र शर्त पर।",
     shots: [
-      { src: "assets/scene-05-king-and-carpenter.png", ken: "out", duration: 5200 },
-      { src: "assets/scene-05b-workshop-log.png", ken: "in", duration: 5300 },
+      { src: "assets/scene-05-king-and-carpenter.png", ken: "out", duration: 5500 },
+      { src: "assets/scene-05b-workshop-log.png", ken: "in", duration: 5500 },
     ],
   },
   {
     id: 6,
-    title: "The Mysterious Silence",
-    duration: 11000,
+    title: "रहस्यमय मौन",
+    duration: 12500,
     music: 0.3,
     narration:
-      "When the doors opened, the mysterious craftsman had vanished. Before the king stood three extraordinary divine forms—unfinished by human standards, yet perfect according to divine will.",
+      "जब द्वार खुले, वह रहस्यमय शिल्पी अदृश्य हो चुका था। राजा के सम्मुख तीन अद्भुत दिव्य रूप थे—मानव दृष्टि में अधूरे, पर दिव्य इच्छा से पूर्ण।",
     shots: [
-      { src: "assets/scene-06a-waiting.png", ken: "left", duration: 4000 },
-      { src: "assets/scene-06-three-forms.png", ken: "in", duration: 7000 },
+      { src: "assets/scene-06a-waiting.png", ken: "left", duration: 4500 },
+      { src: "assets/scene-06-three-forms.png", ken: "in", duration: 8000 },
     ],
   },
   {
     id: 7,
-    title: "Birth of Lord Jagannath",
-    duration: 9500,
+    title: "जगन्नाथ का प्राकट्य",
+    duration: 10500,
     music: 0.48,
     narration:
-      "And thus, the divine presence of Jagannath manifested in a form that would welcome every devotee, regardless of status or origin.",
+      "और इस प्रकार जगन्नाथ की दिव्य उपस्थिति ऐसे रूप में प्रकट हुई, जो हर भक्त का स्वागत करे—जाति, पद या मूल से परे।",
     shots: [
-      { src: "assets/scene-07-temple-installation.png", ken: "in", duration: 5500 },
-      { src: "assets/scene-jagannath-eyes.png", ken: "in", duration: 4000 },
+      { src: "assets/scene-07-temple-installation.png", ken: "in", duration: 6000 },
+      { src: "assets/scene-jagannath-eyes.png", ken: "in", duration: 4500 },
     ],
   },
   {
     id: 8,
-    title: "The Temple of Puri",
-    duration: 9000,
+    title: "पुरी का मंदिर",
+    duration: 10000,
     music: 0.52,
     narration:
-      "From that sacred moment, Puri became one of India's greatest pilgrimage centers—the sacred home of Lord Jagannath.",
-    shots: [{ src: "assets/scene-08-puri-temple-aerial.png", ken: "up", duration: 9000 }],
+      "उसी पवित्र क्षण से पुरी भारत के महानतम तीर्थों में से एक बना—भगवान जगन्नाथ का पावन धाम।",
+    shots: [{ src: "assets/scene-08-puri-temple-aerial.png", ken: "up", duration: 10000 }],
   },
   {
     id: 9,
-    title: "The Rath Yatra",
+    title: "रथ यात्रा",
     duration: 16000,
     music: 0.78,
     conch: true,
     narration:
-      "Every year, the Lord leaves His temple and comes among His people. This is the sacred Rath Yatra—the journey of Jagannath.",
+      "प्रत्येक वर्ष प्रभु अपने मंदिर से निकलकर भक्तों के बीच आते हैं। यही है पवित्र रथ यात्रा—जगन्नाथ की यात्रा।",
     shots: [
       { src: "assets/scene-09-rath-yatra.png", ken: "out", duration: 4500 },
       { src: "assets/scene-09c-devotees-pulling.png", ken: "left", duration: 3800 },
@@ -108,37 +108,36 @@ const SCENES = [
   },
   {
     id: 10,
-    title: "The Lord Who Belongs to Everyone",
-    duration: 9500,
+    title: "सबके प्रभु",
+    duration: 10000,
     music: 0.62,
-    narration:
-      "Jagannath means Lord of the Universe. His message is simple—the divine belongs to everyone.",
+    narration: "जगन्नाथ का अर्थ है—जगत् के स्वामी। उनका संदेश सरल है—दिव्य सबका है।",
     shots: [
-      { src: "assets/scene-10-belongs-to-everyone.png", ken: "out", duration: 5200 },
-      { src: "assets/scene-jagannath-eyes.png", ken: "in", duration: 4300 },
+      { src: "assets/scene-10-belongs-to-everyone.png", ken: "out", duration: 5500 },
+      { src: "assets/scene-jagannath-eyes.png", ken: "in", duration: 4500 },
     ],
   },
   {
     id: 11,
-    title: "Cosmic Divine Form",
-    duration: 11000,
+    title: "विश्वरूप",
+    duration: 12500,
     music: 0.86,
     narration:
-      "Beyond the wood, beyond the temple, beyond every human boundary—Jagannath represents the eternal divine presence that lives within the entire universe.",
+      "काष्ठ से परे, मंदिर से परे, हर मानवीय सीमा से परे—जगन्नाथ उस शाश्वत दिव्य उपस्थिति के प्रतीक हैं जो समस्त ब्रह्मांड में बसती है।",
     shots: [
-      { src: "assets/scene-jagannath-eyes.png", ken: "in", duration: 2800 },
-      { src: "assets/cosmic-jagannath.png", ken: "out", duration: 8200 },
+      { src: "assets/scene-jagannath-eyes.png", ken: "in", duration: 3000 },
+      { src: "assets/cosmic-jagannath.png", ken: "out", duration: 9500 },
     ],
   },
   {
     id: 12,
-    title: "Jai Jagannath",
-    duration: 14000,
+    title: "जय जगन्नाथ",
+    duration: 15000,
     music: 0.7,
     finale: true,
     narration:
-      "Jai Jagannath. May the Lord of the Universe guide every heart toward devotion, compassion and humanity.",
-    shots: [{ src: "assets/scene-12-sunset-ending.png", ken: "in", duration: 9000 }],
+      "जय जगन्नाथ। जगत् के स्वामी प्रत्येक हृदय को भक्ति, करुणा और मानवता की ओर ले जाएँ।",
+    shots: [{ src: "assets/scene-12-sunset-ending.png", ken: "in", duration: 9500 }],
   },
 ];
 
@@ -383,23 +382,24 @@ function playShots(scene) {
 
 function pickVoice() {
   const voices = window.speechSynthesis?.getVoices?.() || [];
-  const preferred =
-    voices.find((v) => /en-IN/i.test(v.lang) && /male|ravi|prabhat/i.test(v.name)) ||
+  const hindi = voices.filter((v) => /hi(-|_)IN|hindi|हिन्दी|हिंदी/i.test(`${v.lang} ${v.name}`));
+  return (
+    hindi.find((v) => /male|hemant|ravi|prabhat/i.test(v.name)) ||
+    hindi[0] ||
     voices.find((v) => /en-IN/i.test(v.lang)) ||
-    voices.find((v) => /en-GB/i.test(v.lang) && /male|daniel|george|thomas/i.test(v.name)) ||
-    voices.find((v) => /en-GB/i.test(v.lang)) ||
-    voices.find((v) => /en-US/i.test(v.lang) && /male|david|guy|matthew/i.test(v.name));
-  return preferred || null;
+    null
+  );
 }
 
 function speak(text) {
   window.speechSynthesis?.cancel();
   if (!text || muted) return;
   speechUtterance = new SpeechSynthesisUtterance(text);
+  speechUtterance.lang = "hi-IN";
   const voice = pickVoice();
   if (voice) speechUtterance.voice = voice;
-  speechUtterance.rate = 0.88;
-  speechUtterance.pitch = 0.82;
+  speechUtterance.rate = 0.9;
+  speechUtterance.pitch = 0.84;
   speechUtterance.volume = 1;
   window.speechSynthesis.speak(speechUtterance);
 }
@@ -431,10 +431,10 @@ function playScene(index) {
 
   if (scene.extraNarration) {
     speak(scene.extraNarration);
-    later(() => speak(scene.narration), 5200);
+    later(() => speak(scene.narration), 5500);
     later(() => {
       subtitlesEl.textContent = scene.narration;
-    }, 5200);
+    }, 5500);
     subtitlesEl.textContent = scene.extraNarration;
   } else {
     speak(scene.narration);
@@ -481,7 +481,7 @@ playBtn.addEventListener("click", startFilm);
 pauseBtn.addEventListener("click", async () => {
   if (!started) return;
   paused = !paused;
-  pauseBtn.textContent = paused ? "Resume" : "Pause";
+  pauseBtn.textContent = paused ? "जारी रखें" : "विराम";
   if (paused) {
     elapsedBeforePause = Date.now() - sceneStartedAt;
     clearTimers();
@@ -499,7 +499,7 @@ pauseBtn.addEventListener("click", async () => {
 
 muteBtn.addEventListener("click", () => {
   muted = !muted;
-  muteBtn.textContent = muted ? "Muted" : "Sound on";
+  muteBtn.textContent = muted ? "मौन" : "ध्वनि चालू";
   audio?.setMuted(muted);
   if (muted) window.speechSynthesis?.cancel();
 });
