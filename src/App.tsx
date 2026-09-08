@@ -70,7 +70,7 @@ import DashboardStats from './components/DashboardStats';
 import TimelineVisual from './components/TimelineVisual';
 import JobStatusBadge from './components/JobStatusBadge';
 import ConnectivityHealthWidget from './components/ConnectivityHealthWidget';
-import { getJobCardProcessMetrics, getRawMaterialIssuedQty, getJobCardDepartmentPending } from './lib/metrics';
+import { getJobCardProcessMetrics, getAcceptedRawMaterialIssuedQty, getJobCardDepartmentPending } from './lib/metrics';
 
 // Dynamic code-split lazy imports for heavy screens & modals
 const DepartmentOperations = lazy(() => import('./components/DepartmentOperations'));
@@ -1522,7 +1522,7 @@ export default function App() {
       }
       const job = jobCards.find(jc => jc.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
       if (job && job.processType !== 'Purchase') {
-        const issuedQty = getRawMaterialIssuedQty(job, movements);
+        const issuedQty = getAcceptedRawMaterialIssuedQty(job, movements);
         if (issuedQty <= 0) {
           throw new Error(`Production cannot be started or moved because raw material has not been issued yet for Job Card ${job.jobCardNo}.`);
         }

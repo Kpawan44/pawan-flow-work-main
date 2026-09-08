@@ -29,6 +29,7 @@ import {
   logActionToSheets 
 } from './googleSheets';
 import { nextStatusOnPurchaseAccept, displayUnitLabel } from '../hardening/process1Purchase';
+import { attachProcess2MovementContract, isRawMaterialStoreIssuingToProduction, shouldUpdateJobOnAccept } from '../hardening/process2Manufacturing';
 
 // Directly use configuration from firebase-applet-config.json
 export { firebaseConfig };
@@ -1724,6 +1725,14 @@ export class DBService {
       throw new Error(`Invalid movement quantity: ${movement.quantity}. Must be greater than 0.`);
     }
 
+    if (
+      String(movement.fromDepartment) === String(movement.toDepartment) &&
+      !movement.isIssueRequest &&
+      !movement.processDetails?.isWireRejection
+    ) {
+      throw new Error(`Source and target departments cannot be identical.`);
+    }
+
     const movements = await this.getMovements();
 
     // Check for duplicate pending transfer request for same job card between same departments
@@ -1740,17 +1749,23 @@ export class DBService {
       }
     }
 
+    const cards = await this.getJobCards();
+    const linkedJob = cards.find(c => c.jobCardNo.toLowerCase() === String(movement.jobCardNo).toLowerCase());
+    const contracted = attachProcess2MovementContract(movement as any, linkedJob || null);
+
     const newId = `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const nowIso = new Date().toISOString();
+    const opKey = String((movement as any).operationId || `op-${newId}`).trim();
     
     const newMov: MaterialMovement = {
-      ...movement,
+      ...(contracted as any),
       transferBy: movement.transferBy || userName || 'Staff',
       movementId: newId,
       transferDate: nowIso,
       accepted: false,
       initiatedByUserId: userId,
-      initiatedByUserName: userName
+      initiatedByUserName: userName,
+      operationId: opKey
     };
 
     // 1. Authoritative Backend API Execution FIRST
@@ -1943,23 +1958,30 @@ export class DBService {
             }
           }
 
+          const isRmIssuing = isRawMaterialStoreIssuingToProduction({
+            ...currentMovData,
+            issueStatus: extraFields?.issueStatus || currentMovData.issueStatus
+          });
           const updatedMov: MaterialMovement = {
             ...currentMovData,
-            accepted: true,
-            acceptedBy: acceptedByName || acceptedByUserId,
-            acceptedDate: nowIso,
+            accepted: isRmIssuing ? false : true,
+            acceptedBy: isRmIssuing ? currentMovData.acceptedBy : (acceptedByName || acceptedByUserId),
+            acceptedDate: isRmIssuing ? currentMovData.acceptedDate : nowIso,
             modifiedByUserId: acceptedByUserId,
             modifiedByUserName: acceptedByName,
             modifiedDate: nowIso,
-            modifiedAction: 'ACCEPT'
+            modifiedAction: 'ACCEPT',
+            issueStatus: extraFields?.issueStatus || currentMovData.issueStatus
           };
           if (remarks) updatedMov.remarks = remarks;
           if (extraFields?.quantity !== undefined) updatedMov.quantity = extraFields.quantity;
+          if (extraFields?.allottedLocation !== undefined) updatedMov.allottedLocation = extraFields.allottedLocation;
+          if (extraFields?.rackNo !== undefined) updatedMov.rackNo = extraFields.rackNo;
 
           finalMovement = updatedMov;
           transaction.set(movRef, sanitizeForFirestore(updatedMov), { merge: true });
 
-          if (targetJcRef && jcSnap && jcSnap.exists()) {
+          if (targetJcRef && jcSnap && jcSnap.exists() && shouldUpdateJobOnAccept(updatedMov)) {
             const jcData = jcSnap.data() as JobCard;
             const nextVersion = (jcData.version || 1) + 1;
             const nextStatus: JobCardStatus = nextStatusOnPurchaseAccept(updatedMov.toDepartment) as JobCardStatus;
@@ -2006,7 +2028,7 @@ export class DBService {
     setLocalStorageItem('mfr_movements', currentMovements);
     this.setMemCache('mfr_movements', currentMovements);
 
-    if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
+    if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-') && shouldUpdateJobOnAccept(updatedMov)) {
       const cards = await this.getJobCards();
       const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === targetJobCardNo.toLowerCase());
       if (cardIdx >= 0) {

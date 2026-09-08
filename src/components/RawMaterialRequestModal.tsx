@@ -124,6 +124,7 @@ interface RawMaterialRequestModalProps {
     quantity: number;
     urgency: 'Low' | 'Medium' | 'High' | 'Critical';
     remarks: string;
+    availableStock?: number;
   }) => Promise<void>;
   movements?: MaterialMovement[];
   savedItems?: any[];
@@ -214,6 +215,10 @@ export default function RawMaterialRequestModal({
       setError('Quantity requested must be greater than 0.');
       return;
     }
+    if (quantity > selectedMaterial.availableStock) {
+      setError(`Cannot request ${quantity} KG; available RM stock is ${selectedMaterial.availableStock} KG.`);
+      return;
+    }
 
     setIsSubmitting(true);
     setError('');
@@ -225,7 +230,8 @@ export default function RawMaterialRequestModal({
         rawMaterialName: selectedMaterial.name,
         quantity,
         urgency,
-        remarks: remarks || `Production requested ${quantity} KG of ${selectedMaterial.name}. Urgency: ${urgency}`
+        remarks: remarks || `Production requested ${quantity} KG of ${selectedMaterial.name}. Urgency: ${urgency}`,
+        availableStock: selectedMaterial.availableStock
       });
 
       setSuccess(true);

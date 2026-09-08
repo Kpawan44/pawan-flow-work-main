@@ -19,6 +19,15 @@ import {
   purchaseNotificationDepartment,
   nextStatusOnPurchaseAccept
 } from "./src/hardening/process1Purchase";
+import {
+  attachProcess2MovementContract,
+  canIssueRawMaterialQty,
+  findPendingDuplicateMovement,
+  isRawMaterialStoreIssuingToProduction,
+  process2SendAvailableQty,
+  shouldUpdateJobOnAccept
+} from "./src/hardening/process2Manufacturing";
+import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
@@ -3168,13 +3177,9 @@ async function startServer() {
       .filter((m: any) => 
         String(m.fromDepartment || "").toLowerCase() === "raw material store" &&
         m.isIssueRequest &&
-        (m.issueStatus === "Issued" || m.accepted)
+        m.accepted === true
       )
       .reduce((sum: number, m: any) => sum + Number(m.quantity || 0), 0);
-
-    if (issuedQty <= 0 && jobCardData?.rawMaterialStoreDetails?.issueStatus === "Issued") {
-      issuedQty = Number(jobCardData.rawMaterialStoreDetails.issuedQty || 0);
-    }
 
     const totalMovedFromProd = allMovements
       .filter((m: any) => String(m.fromDepartment || "").toLowerCase() === "production")
@@ -3695,7 +3700,7 @@ async function startServer() {
               transaction.set(movRef, updatedMov);
 
               let updatedJobCard: any = null;
-              if (jcRef && (jcSnap?.exists || inMemoryJobCards.has(targetJobCardNo))) {
+              if (jcRef && (jcSnap?.exists || inMemoryJobCards.has(targetJobCardNo)) && shouldUpdateJobOnAccept(updatedMov)) {
                 const jcData = inMemoryJobCards.get(targetJobCardNo) || (jcSnap?.exists ? jcSnap.data() : null);
                 if (jcData) {
                   const nextVersion = (jcData.version || 1) + 1;
@@ -3805,12 +3810,17 @@ async function startServer() {
           });
         }
 
+        const isRawMaterialStoreIssuing = isRawMaterialStoreIssuingToProduction({
+          ...movData,
+          issueStatus: issueStatus || movData.issueStatus
+        });
+
         const updatedMov: any = {
           ...movData,
-          accepted: true,
-          acceptedBy: authoritativeUserName,
-          acceptedByUserId: authoritativeUserId,
-          acceptedDate: now,
+          accepted: isRawMaterialStoreIssuing ? false : true,
+          acceptedBy: isRawMaterialStoreIssuing ? movData.acceptedBy : authoritativeUserName,
+          acceptedByUserId: isRawMaterialStoreIssuing ? movData.acceptedByUserId : authoritativeUserId,
+          acceptedDate: isRawMaterialStoreIssuing ? movData.acceptedDate : now,
           modifiedByUserId: authoritativeUserId,
           modifiedByUserName: authoritativeUserName,
           modifiedDate: now,
@@ -3818,8 +3828,10 @@ async function startServer() {
         };
         if (remarks) updatedMov.remarks = remarks;
         if (quantity !== undefined) updatedMov.quantity = Number(quantity);
+        if (issueStatus !== undefined) updatedMov.issueStatus = issueStatus;
+        else if (movData.isIssueRequest && !isRawMaterialStoreIssuing) updatedMov.issueStatus = 'Issued';
 
-        await firestoreRestSetDoc("mfr_movements", movementId, updatedMov);
+            await firestoreRestSetDoc("mfr_movements", movementId, updatedMov);
         finalMovement = updatedMov;
 
         const targetJobCardNo = movData.jobCardNo || '';
@@ -3833,7 +3845,7 @@ async function startServer() {
               activeJobId = targetJobCardNo;
             }
           }
-          if (jcData) {
+          if (jcData && shouldUpdateJobOnAccept(updatedMov)) {
             const nextStatus = nextStatusOnPurchaseAccept(updatedMov.toDepartment);
             const updatedJc = {
               ...jcData,
@@ -4162,13 +4174,55 @@ async function startServer() {
       }
 
       if (jobCardData) {
-        const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
-        if (!movement.isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
-          if (numMovQty > currentAvailableQty) {
+        const allKnownMovements = Array.from(inMemoryMovements.values());
+        if (findPendingDuplicateMovement(allKnownMovements, {
+          jobCardNo: jobCardNoStr,
+          fromDepartment: normFrom,
+          toDepartment: normTo,
+          isIssueRequest: movement.isIssueRequest
+        })) {
+          return res.status(400).json({
+            success: false,
+            error: `A transfer request for Job Card ${jobCardNoStr} from ${normFrom} to ${normTo} is already pending acceptance.`
+          });
+        }
+
+        if (normFrom.toLowerCase() === "raw material store" && movement.isIssueRequest) {
+          const code = movement.processDetails?.rawMaterialCode || movement.itemCode;
+          const declaredAvail = Number(movement.processDetails?.availableStock);
+          if (Number.isFinite(declaredAvail) && declaredAvail >= 0) {
+            const gate = canIssueRawMaterialQty(declaredAvail, numMovQty);
+            if (!gate.ok) {
+              return res.status(400).json({ success: false, error: gate.error });
+            }
+          } else if (code) {
+            const runtime = computeRmRuntimeStock(0, allKnownMovements, String(code));
+            if (runtime > 0) {
+              const gate = canIssueRawMaterialQty(runtime, numMovQty);
+              if (!gate.ok) {
+                return res.status(400).json({ success: false, error: gate.error });
+              }
+            }
+          }
+        }
+
+        const sendAvail = process2SendAvailableQty(normFrom, jobCardData, allKnownMovements);
+        if (sendAvail !== null && !movement.isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
+          if (numMovQty > sendAvail) {
             return res.status(400).json({
               success: false,
-              error: `Insufficient available quantity. Requested ${numMovQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
+              error: `Insufficient available quantity. Requested ${numMovQty}, but only ${sendAvail} remaining in ${normFrom}.`
             });
+          }
+        } else {
+          const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
+          if (!movement.isIssueRequest && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
+            if (numMovQty > currentAvailableQty) {
+              return res.status(400).json({
+                success: false,
+                error: `Insufficient available quantity. Requested ${numMovQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
+              });
+            }
           }
         }
 
@@ -4199,10 +4253,30 @@ async function startServer() {
       const authoritativeUserName = requester.name || requester.userId || "Authorized User";
       const now = new Date().toISOString();
       const movId = movement.movementId || `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const opKey = String(movement.operationId || "").trim();
+
+      if (opKey) {
+        const existingIdemp = await firestoreRestGetDoc("mfr_idempotency_keys", opKey).catch(() => null);
+        if (existingIdemp?.result?.movement) {
+          return res.json({ success: true, cached: true, movement: existingIdemp.result.movement });
+        }
+      }
+
+      if (normFrom.toLowerCase() === normTo.toLowerCase() && !movement.isIssueRequest && !movement.processDetails?.isWireRejection) {
+        return res.status(400).json({ success: false, error: "Source and target departments cannot be identical." });
+      }
+
+      const contracted = attachProcess2MovementContract({
+        ...movement,
+        fromDepartment: normFrom,
+        toDepartment: normTo,
+        quantity: numMovQty
+      }, jobCardData || null);
 
       const newMov = {
-        ...movement,
+        ...contracted,
         movementId: movId,
+        jobCardNo: contracted.jobCardNo || jobCardNoStr,
         fromDepartment: normFrom,
         toDepartment: normTo,
         quantity: numMovQty,
@@ -4210,7 +4284,8 @@ async function startServer() {
         accepted: false,
         transferBy: authoritativeUserName,
         initiatedByUserId: authoritativeUserId,
-        initiatedByUserName: authoritativeUserName
+        initiatedByUserName: authoritativeUserName,
+        operationId: opKey || undefined
       };
 
       if (true) {
@@ -4225,6 +4300,15 @@ async function startServer() {
       }
 
       await firestoreRestSetDoc("mfr_movements", movId, newMov);
+      inMemoryMovements.set(movId, newMov);
+
+      if (opKey) {
+        await firestoreRestSetDoc("mfr_idempotency_keys", opKey, {
+          operationId: opKey,
+          createdAt: now,
+          result: { success: true, movement: newMov }
+        }).catch(() => {});
+      }
 
       const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
       const auditData = {

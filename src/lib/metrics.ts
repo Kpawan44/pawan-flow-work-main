@@ -1,4 +1,5 @@
 import { JobCard, MaterialMovement, ProcessTransfer } from '../types';
+import { storeAuthoritativeOnHand } from '../hardening/process2Manufacturing';
 
 export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMovement[] = [], processTransfersList: ProcessTransfer[] = []) {
   if (!j) return {
@@ -99,7 +100,7 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
           : (j.currentDepartment === 'Store' ? qtyReceivedFromPurchase : 0));
 
     const qtyDispatched = j.dispatchDetails?.dispatchQty || (j.completed ? j.currentQty : 0);
-    const qtyRemainingInStock = Math.max(0, qtyReceivedAtStore - qtyDispatched - qtyInProcessTransfers);
+    const qtyRemainingInStock = Math.max(0, storeAuthoritativeOnHand(j, cardMovements) - qtyInProcessTransfers);
 
     const qtyReceivedAtRawStore = acceptedMovements
       .filter(m => m.toDepartment === 'Raw Material Store')
@@ -211,8 +212,8 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
   // How much dispatch (shipped out)
   const qtyDispatched = j.dispatchDetails?.dispatchQty || (j.completed ? j.currentQty : 0);
 
-  // How much remain in stock (available minus active process transfers)
-  const qtyRemainingInStock = Math.max(0, qtyReceivedAtStore - qtyDispatched - qtyInProcessTransfers);
+  // On-hand = accepted Store inbound minus Store outbound (avoids Packing loop double-count)
+  const qtyRemainingInStock = Math.max(0, storeAuthoritativeOnHand(j, cardMovements) - qtyInProcessTransfers);
 
   return {
     // Prod/HT
@@ -254,6 +255,19 @@ export function getWireScrapQty(job: JobCard, movements: MaterialMovement[] = []
 
   if (movScrap > 0) return movScrap;
   return job.wireScrapQty || job.productionDetails?.wireScrapQty || 0;
+}
+
+export function getAcceptedRawMaterialIssuedQty(job: JobCard, movements: MaterialMovement[] = []): number {
+  if (!job) return 0;
+  if (job.processType === 'Purchase') return job.orderQty || 0;
+
+  const targetJc = String(job.jobCardNo || '').toLowerCase();
+  return (Array.isArray(movements) ? movements : [])
+    .filter(m => m && String(m.jobCardNo || '').toLowerCase() === targetJc &&
+                 m.fromDepartment === 'Raw Material Store' &&
+                 m.isIssueRequest &&
+                 m.accepted === true)
+    .reduce((sum, m) => sum + (m.quantity || 0), 0);
 }
 
 export function getRawMaterialIssuedQty(job: JobCard, movements: MaterialMovement[] = []): number {

@@ -1,5 +1,6 @@
 import { VALID_MANUFACTURING_DEPARTMENTS } from "./constants";
 import { canPurchaseUserOperateIncomingStore, isIncomingStoreDept } from "./process1Purchase";
+import { attachProcess2MovementContract } from "./process2Manufacturing";
 
 export interface MovementCommitInput {
   operationId: string;
@@ -205,8 +206,19 @@ async function commitMaterialMovementTxInner(
       error: `Movement ID '${movId}' already exists.`
     };
   }
+  const contracted = attachProcess2MovementContract(
+    {
+      ...(input.extra || {}),
+      jobCardNo: jobCardData?.jobCardNo || jobCardNo,
+      fromDepartment: normFrom,
+      toDepartment: normTo,
+      quantity: reqQty,
+      processDetails: input.processDetails || {}
+    },
+    jobCardData
+  );
   const movement = {
-    ...(input.extra || {}),
+    ...contracted,
     movementId: movId,
     jobCardNo: jobCardData?.jobCardNo || jobCardNo,
     fromDepartment: normFrom,
@@ -221,7 +233,7 @@ async function commitMaterialMovementTxInner(
     isIssueRequest: isIssue,
     issueStatus: isIssue ? "Requested" : undefined,
     remarks: input.remarks || "",
-    processDetails: input.processDetails || null,
+    processDetails: contracted.processDetails || input.processDetails || null,
     requestedQty: input.requestedQty,
     requestedUnit: input.requestedUnit,
     transactionType: input.transactionType,

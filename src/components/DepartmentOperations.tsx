@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { getJobCardProcessMetrics, getRawMaterialIssuedQty, getWireScrapQty } from '../lib/metrics';
+import { getJobCardProcessMetrics, getRawMaterialIssuedQty, getAcceptedRawMaterialIssuedQty, getWireScrapQty } from '../lib/metrics';
 import { 
   ArrowRight, 
   Plus, 
@@ -48,6 +48,16 @@ import {
   RAW_MATERIAL_STORE,
   normalizeItemCode
 } from '../hardening/process1Purchase';
+import {
+  canStartProductionWithRm,
+  remainingAtProduction,
+  remainingAtDepartment,
+  storeAuthoritativeOnHand,
+  canFinalizeDispatch,
+  isVisibleInDispatchQueue,
+  attachProcess2MovementContract,
+  sameDepartmentTransferBlocked
+} from '../hardening/process2Manufacturing';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
 import StoreProcessTransferModal from './StoreProcessTransferModal';
@@ -606,6 +616,7 @@ export default function DepartmentOperations({
     quantity: number;
     urgency: 'Low' | 'Medium' | 'High' | 'Critical';
     remarks: string;
+    availableStock?: number;
   }) => {
     await onCreateMovement({
       jobCardNo: request.jobCardNo,
@@ -620,7 +631,8 @@ export default function DepartmentOperations({
         rawMaterialCode: request.rawMaterialCode,
         rawMaterialName: request.rawMaterialName,
         requestedBy: currentUser.name || 'Production Operator',
-        urgency: request.urgency
+        urgency: request.urgency,
+        availableStock: request.availableStock
       } as any
     } as any);
   };
@@ -1182,8 +1194,8 @@ export default function DepartmentOperations({
 
   // Switch status for production start
   const handleStartProduction = (jCard: JobCard) => {
-    const issuedQty = getRawMaterialIssuedQty(jCard, movements);
-    if (isRawMaterialCompulsory && jCard.processType !== 'Purchase' && issuedQty <= 0) {
+    const startGate = canStartProductionWithRm(jCard, movements, { compulsory: isRawMaterialCompulsory });
+    if (!startGate.ok) {
       const hasUnacceptedIssuedMaterial = movements.some(m => 
         m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() &&
         m.fromDepartment === 'Raw Material Store' &&
@@ -1207,7 +1219,8 @@ Raw material has not been issued yet for Job Card ${jCard.jobCardNo}.
 
 To resolve:
 1. Production team should request raw material for this Job Card.
-2. Raw Material Store must approve and issue the requested weight.`);
+2. Raw Material Store must approve and issue the requested weight.
+3. Production must accept custody of the issued material.`);
       }
       return;
     }
@@ -1217,7 +1230,8 @@ To resolve:
   const handleCompleteProduction = (jCard: JobCard) => {
     if (!prodOpName || prodQty <= 0) return;
 
-    const issuedQty = getRawMaterialIssuedQty(jCard, movements);
+    const issuedQty = getAcceptedRawMaterialIssuedQty(jCard, movements);
+    const unitLabel = displayUnitLabel(jCard.unit);
     const totalMovedFromProdBefore = movements
       .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
       .reduce((sum, m) => sum + m.quantity, 0);
@@ -1243,12 +1257,12 @@ To resolve:
 3. Return here to log production.`);
       } else {
         alert(`⚠️ Exceeded Raw Material Limit:
-Total logged production (${totalProducedIncludingCurrent} KG) cannot exceed the issued raw material quantity (${issuedQty} KG).
+Total logged production (${totalProducedIncludingCurrent} ${unitLabel}) cannot exceed the accepted raw material quantity (${issuedQty} ${unitLabel}).
 
-• Issued Raw Material: ${issuedQty} KG
-• Production logged so far: ${totalMovedFromProdBefore} KG
-• Trying to log now: ${prodQty} KG
-• Maximum allowed production now: ${Math.max(0, issuedQty - totalMovedFromProdBefore)} KG
+• Accepted Raw Material: ${issuedQty} ${unitLabel}
+• Production logged so far: ${totalMovedFromProdBefore} ${unitLabel}
+• Trying to log now: ${prodQty} ${unitLabel}
+• Maximum allowed production now: ${Math.max(0, issuedQty - totalMovedFromProdBefore)} ${unitLabel}
 
 Please adjust the quantity or request additional raw material issue.`);
       }
@@ -1268,7 +1282,7 @@ Please adjust the quantity or request additional raw material issue.`);
         producedQty: (jCard.productionDetails?.producedQty || 0) + prodQty,
         wireScrapQty: totalWireScrap,
         wireScrapReason: prodWireScrapReason,
-        remarks: prodWireScrap > 0 ? `Produced: ${prodQty} KG, Wire Scrap: ${prodWireScrap} KG (${prodWireScrapReason})` : undefined
+        remarks: prodWireScrap > 0 ? `Produced: ${prodQty} ${unitLabel}, Wire Scrap: ${prodWireScrap} ${unitLabel} (${prodWireScrapReason})` : undefined
       },
       // Formula: Balance = Order Qty - Overall Processed Qty
       balanceQty: Math.max(0, jCard.orderQty - totalProducedIncludingCurrent)
@@ -1278,7 +1292,7 @@ Please adjust the quantity or request additional raw material issue.`);
     const targetDept: Department = jCard.heatTreatmentRequired ? 'Heat Treatment' : 'Plating';
 
     // Spawn material movement
-    onCreateMovement({
+    onCreateMovement(attachProcess2MovementContract({
       jobCardNo: jCard.jobCardNo,
       fromDepartment: 'Production',
       toDepartment: targetDept,
@@ -1289,8 +1303,8 @@ Please adjust the quantity or request additional raw material issue.`);
         wireScrapQty: prodWireScrap,
         wireScrapReason: prodWireScrapReason
       },
-      remarks: `Produced by ${prodOpName}: ${prodQty} KG.${prodWireScrap > 0 ? ` Wire scrap logged: ${prodWireScrap} KG (${prodWireScrapReason}).` : ''} Sent to ${targetDept}.`
-    });
+      remarks: `Produced by ${prodOpName}: ${prodQty} ${unitLabel}.${prodWireScrap > 0 ? ` Wire scrap logged: ${prodWireScrap} ${unitLabel} (${prodWireScrapReason}).` : ''} Sent to ${targetDept}.`
+    }, jCard));
 
     // Clear state
     setProdOpName('');
@@ -1317,20 +1331,29 @@ Please adjust the quantity or request additional raw material issue.`);
   const handleCompleteHeatTreatment = (jCard: JobCard) => {
     const receivedFromProd = htQtyReceived;
     const sentToPlating = htQtySentToPlating;
+    const unitLabel = displayUnitLabel(jCard.unit);
+    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Heat Treatment') || receivedFromProd;
 
     if (sentToPlating > receivedFromProd) {
-      alert(`Error: Sent quantity (${sentToPlating} KG) cannot exceed the received quantity (${receivedFromProd} KG).`);
+      alert(`Error: Sent quantity (${sentToPlating} ${unitLabel}) cannot exceed the received quantity (${receivedFromProd} ${unitLabel}).`);
       return;
     }
     if (sentToPlating + htRejectionQty > receivedFromProd) {
-      alert(`Error: Combined sent quantity (${sentToPlating} KG) and rejection quantity (${htRejectionQty} KG) cannot exceed the received quantity (${receivedFromProd} KG).`);
+      alert(`Error: Combined sent quantity (${sentToPlating} ${unitLabel}) and rejection quantity (${htRejectionQty} ${unitLabel}) cannot exceed the received quantity (${receivedFromProd} ${unitLabel}).`);
+      return;
+    }
+    if (sentToPlating > remainingAvailable) {
+      alert(`Error: Sent quantity (${sentToPlating} ${unitLabel}) cannot exceed remaining HT WIP (${remainingAvailable} ${unitLabel}).`);
       return;
     }
 
-    const remainingQty = Math.max(0, receivedFromProd - sentToPlating - htRejectionQty);
+    const remainingQty = Math.max(0, remainingAvailable - sentToPlating - htRejectionQty);
 
     const prevHT = jCard.heatTreatmentDetails;
     const totalRejectionInHT = (prevHT?.rejectionQty || 0) + htRejectionQty;
+    const acceptedInbound = movements
+      .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.toDepartment === 'Heat Treatment' && m.accepted)
+      .reduce((sum, m) => sum + m.quantity, 0);
     onUpdateJobCard(jCard.jobCardNo, {
       customRoutedToPlating: (jCard.customRoutedToPlating || 0) + sentToPlating,
       balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - htRejectionQty),
@@ -1339,19 +1362,19 @@ Please adjust the quantity or request additional raw material issue.`);
         temperature: htTemp,
         cycleTime: htDuration,
         rejectionQty: totalRejectionInHT,
-        qtyReceivedFromProd: (prevHT?.qtyReceivedFromProd || 0) + receivedFromProd,
+        qtyReceivedFromProd: acceptedInbound || prevHT?.qtyReceivedFromProd || receivedFromProd,
         qtySentToPlating: (prevHT?.qtySentToPlating || 0) + sentToPlating,
         qtyRemaining: remainingQty
       }
     });
 
-    onCreateMovement({
+    onCreateMovement(attachProcess2MovementContract({
       jobCardNo: jCard.jobCardNo,
       fromDepartment: 'Heat Treatment',
       toDepartment: 'Plating',
       quantity: sentToPlating,
-      remarks: `Completed furnace cycle. Hardness: ${htHardness}. Recv: ${receivedFromProd} KG, Sent to Plating: ${sentToPlating} KG, Rejections: ${htRejectionQty} KG, Remaining: ${remainingQty} KG.`
-    });
+      remarks: `Completed furnace cycle. Hardness: ${htHardness}. Recv: ${receivedFromProd} ${unitLabel}, Sent to Plating: ${sentToPlating} ${unitLabel}, Rejections: ${htRejectionQty} ${unitLabel}, Remaining: ${remainingQty} ${unitLabel}.`
+    }, jCard));
 
     setHtRejectionQty(0);
     setHtQtyReceived(0);
@@ -1362,20 +1385,29 @@ Please adjust the quantity or request additional raw material issue.`);
   const handleCompletePlating = (jCard: JobCard) => {
     const receivedFromHt = platingQtyReceived;
     const sentToPacking = platingQtySentToPacking;
+    const unitLabel = displayUnitLabel(jCard.unit);
+    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Plating') || receivedFromHt;
 
     if (sentToPacking > receivedFromHt) {
-      alert(`Error: Sent quantity (${sentToPacking} KG) cannot exceed the received quantity (${receivedFromHt} KG).`);
+      alert(`Error: Sent quantity (${sentToPacking} ${unitLabel}) cannot exceed the received quantity (${receivedFromHt} ${unitLabel}).`);
       return;
     }
     if (sentToPacking + platingRejectionQty > receivedFromHt) {
-      alert(`Error: Combined sent quantity (${sentToPacking} KG) and rejection quantity (${platingRejectionQty} KG) cannot exceed the received quantity (${receivedFromHt} KG).`);
+      alert(`Error: Combined sent quantity (${sentToPacking} ${unitLabel}) and rejection quantity (${platingRejectionQty} ${unitLabel}) cannot exceed the received quantity (${receivedFromHt} ${unitLabel}).`);
+      return;
+    }
+    if (sentToPacking > remainingAvailable) {
+      alert(`Error: Sent quantity (${sentToPacking} ${unitLabel}) cannot exceed remaining Plating WIP (${remainingAvailable} ${unitLabel}).`);
       return;
     }
 
-    const remainingQty = Math.max(0, receivedFromHt - sentToPacking - platingRejectionQty);
+    const remainingQty = Math.max(0, remainingAvailable - sentToPacking - platingRejectionQty);
 
     const prevPlating = jCard.platingDetails;
     const totalRejectionInPlating = (prevPlating?.rejectionQty || 0) + platingRejectionQty;
+    const acceptedInbound = movements
+      .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.toDepartment === 'Plating' && m.accepted)
+      .reduce((sum, m) => sum + m.quantity, 0);
     onUpdateJobCard(jCard.jobCardNo, {
       customRoutedToPacking: (jCard.customRoutedToPacking || 0) + sentToPacking,
       balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - platingRejectionQty),
@@ -1384,19 +1416,19 @@ Please adjust the quantity or request additional raw material issue.`);
         micronThickness: platingThick,
         durationMinutes: platingDur,
         rejectionQty: totalRejectionInPlating,
-        qtyReceivedFromHt: (prevPlating?.qtyReceivedFromHt || 0) + receivedFromHt,
+        qtyReceivedFromHt: acceptedInbound || prevPlating?.qtyReceivedFromHt || receivedFromHt,
         qtySentToPacking: (prevPlating?.qtySentToPacking || 0) + sentToPacking,
         qtyRemaining: remainingQty
       }
     });
 
-    onCreateMovement({
+    onCreateMovement(attachProcess2MovementContract({
       jobCardNo: jCard.jobCardNo,
       fromDepartment: 'Plating',
       toDepartment: 'Packing',
       quantity: sentToPacking,
-      remarks: `Coating thickness ${platingThick} verified. Zinc plating cycle complete. Recv from HT: ${receivedFromHt} KG, Sent for Packing: ${sentToPacking} KG, Rejections: ${platingRejectionQty} KG, Remaining Balance: ${remainingQty} KG.`
-    });
+      remarks: `Coating thickness ${platingThick} verified. Zinc plating cycle complete. Recv from HT: ${receivedFromHt} ${unitLabel}, Sent for Packing: ${sentToPacking} ${unitLabel}, Rejections: ${platingRejectionQty} ${unitLabel}, Remaining Balance: ${remainingQty} ${unitLabel}.`
+    }, jCard));
 
     setPlatingRejectionQty(0);
     setPlatingQtyReceived(0);
@@ -1407,17 +1439,23 @@ Please adjust the quantity or request additional raw material issue.`);
   const handleCompletePacking = (jCard: JobCard) => {
     const receivedFromPlating = packQtyReceived;
     const sentToStore = packQtySentToStore;
+    const unitLabel = displayUnitLabel(jCard.unit);
+    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Packing') || receivedFromPlating;
 
     if (sentToStore > receivedFromPlating) {
-      alert(`Error: Sent quantity (${sentToStore} KG) cannot exceed the received quantity (${receivedFromPlating} KG).`);
+      alert(`Error: Sent quantity (${sentToStore} ${unitLabel}) cannot exceed the received quantity (${receivedFromPlating} ${unitLabel}).`);
       return;
     }
     if (sentToStore + packRejectionQty > receivedFromPlating) {
-      alert(`Error: Combined sent quantity (${sentToStore} KG) and rejection quantity (${packRejectionQty} KG) cannot exceed the received quantity (${receivedFromPlating} KG).`);
+      alert(`Error: Combined sent quantity (${sentToStore} ${unitLabel}) and rejection quantity (${packRejectionQty} ${unitLabel}) cannot exceed the received quantity (${receivedFromPlating} ${unitLabel}).`);
+      return;
+    }
+    if (sentToStore > remainingAvailable) {
+      alert(`Error: Sent quantity (${sentToStore} ${unitLabel}) cannot exceed remaining Packing WIP (${remainingAvailable} ${unitLabel}).`);
       return;
     }
 
-    const remainingQty = Math.max(0, receivedFromPlating - sentToStore - packRejectionQty);
+    const remainingQty = Math.max(0, remainingAvailable - sentToStore - packRejectionQty);
 
     const prevPacking = jCard.packingDetails;
     const totalPackedIncludingCurrent = (prevPacking?.qtySentToStore || 0) + sentToStore;
@@ -1427,6 +1465,10 @@ Please adjust the quantity or request additional raw material issue.`);
     const packingRejectionTotal = (prevPacking?.rejectionQty || 0) + packRejectionQty;
     const totalRejections = htRejectionTotal + platingRejectionTotal + packingRejectionTotal;
 
+    const acceptedInbound = movements
+      .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.toDepartment === 'Packing' && m.accepted)
+      .reduce((sum, m) => sum + m.quantity, 0);
+
     onUpdateJobCard(jCard.jobCardNo, {
       customRoutedToStore: (jCard.customRoutedToStore || 0) + sentToStore,
       packingDetails: {
@@ -1434,7 +1476,7 @@ Please adjust the quantity or request additional raw material issue.`);
         boxCount: (prevPacking?.boxCount || 0) + packBoxCount,
         packingType: packStyle,
         rejectionQty: packingRejectionTotal,
-        qtyReceivedFromPlating: (prevPacking?.qtyReceivedFromPlating || 0) + receivedFromPlating,
+        qtyReceivedFromPlating: acceptedInbound || prevPacking?.qtyReceivedFromPlating || receivedFromPlating,
         qtySentToStore: totalPackedIncludingCurrent,
         qtyRemaining: remainingQty,
         pcsPerBagOrBox: packPcsPerBagOrBox,
@@ -1444,13 +1486,13 @@ Please adjust the quantity or request additional raw material issue.`);
       balanceQty: Math.max(0, jCard.orderQty - totalPackedIncludingCurrent - totalRejections)
     });
 
-    onCreateMovement({
+    onCreateMovement(attachProcess2MovementContract({
       jobCardNo: jCard.jobCardNo,
       fromDepartment: 'Packing',
       toDepartment: 'Store',
       quantity: sentToStore,
-      remarks: `Packed in ${packBoxCount} boxes (${packPcsPerBagOrBox} pcs/box, Total: ${packTotalPcs} pcs). Quality verified. Recv from Plating: ${receivedFromPlating} KG, Sent to Store: ${sentToStore} KG, Rejections: ${packRejectionQty} KG, Remaining: ${remainingQty} KG.`
-    });
+      remarks: `Packed in ${packBoxCount} boxes (${packPcsPerBagOrBox} pcs/box, Total: ${packTotalPcs} pcs). Quality verified. Recv from Plating: ${receivedFromPlating} ${unitLabel}, Sent to Store: ${sentToStore} ${unitLabel}, Rejections: ${packRejectionQty} ${unitLabel}, Remaining: ${remainingQty} ${unitLabel}.`
+    }, jCard));
 
     setPackRejectionQty(0);
     setPackQtyReceived(0);
@@ -1591,13 +1633,15 @@ Please adjust the quantity or request additional raw material issue.`);
           }
         });
 
-        onCreateMovement([{
-          jobCardNo: comp.jobCardNo,
-          fromDepartment: 'Packing',
-          toDepartment: 'Packing',
-          quantity: Number(comp.consumedQty),
-          remarks: `Assembly Consumption: ${comp.consumedQty} ${comp.unit} consumed into Assembled Product '${targetName}' (${targetCode}) [Target Job: ${targetJobNo}]`
-        }]);
+        if (!sameDepartmentTransferBlocked('Packing', 'Packing')) {
+          onCreateMovement([{
+            jobCardNo: comp.jobCardNo,
+            fromDepartment: 'Packing',
+            toDepartment: 'Packing',
+            quantity: Number(comp.consumedQty),
+            remarks: `Assembly Consumption: ${comp.consumedQty} ${comp.unit} consumed into Assembled Product '${targetName}' (${targetCode}) [Target Job: ${targetJobNo}]`
+          }]);
+        }
       }
     });
 
@@ -1614,13 +1658,14 @@ Please adjust the quantity or request additional raw material issue.`);
   const handleCompleteStore = (jCard: JobCard) => {
     const receivedFromPacking = storeQtyReceived;
     const sentToNext = storeQtySentToDispatch;
+    const unitLabel = displayUnitLabel(jCard.unit);
 
     if (sentToNext > receivedFromPacking) {
-      alert(`Error: Sent quantity (${sentToNext} KG) cannot exceed the received quantity (${receivedFromPacking} KG).`);
+      alert(`Error: Sent quantity (${sentToNext} ${unitLabel}) cannot exceed the received quantity (${receivedFromPacking} ${unitLabel}).`);
       return;
     }
     if (sentToNext + storeRejectionQty > receivedFromPacking) {
-      alert(`Error: Combined sent quantity (${sentToNext} KG) and rejection quantity (${storeRejectionQty} KG) cannot exceed the received quantity (${receivedFromPacking} KG).`);
+      alert(`Error: Combined sent quantity (${sentToNext} ${unitLabel}) and rejection quantity (${storeRejectionQty} ${unitLabel}) cannot exceed the received quantity (${receivedFromPacking} ${unitLabel}).`);
       return;
     }
 
@@ -1642,13 +1687,13 @@ Please adjust the quantity or request additional raw material issue.`);
       balanceQty: Math.max(0, jCard.orderQty - sentToNext)
     });
 
-    onCreateMovement({
+    onCreateMovement(attachProcess2MovementContract({
       jobCardNo: jCard.jobCardNo,
       fromDepartment: 'Store',
       toDepartment: targetDept, // Dynamic transit target: Packing or Dispatch
       quantity: sentToNext,
       remarks: `Stored in bin location: ${storeBinLoc}. Recv: ${receivedFromPacking} ${displayUnitLabel(jCard.unit)}, Sent to ${targetDept}: ${sentToNext} ${displayUnitLabel(jCard.unit)}, Rejections: ${storeRejectionQty} ${displayUnitLabel(jCard.unit)}, Remaining Qty: ${remainingQty} ${displayUnitLabel(jCard.unit)}.`
-    });
+    }, jCard));
 
     setStoreRejectionQty(0);
     setStoreQtyReceived(0);
@@ -1701,6 +1746,11 @@ Please adjust the quantity or request additional raw material issue.`);
 
   const handleFinalizeDispatch = (jCard: JobCard) => {
     if (dispQty <= 0 || !dispInvoice || !dispVehicle) return;
+    const dup = canFinalizeDispatch(jCard);
+    if (!dup.ok) {
+      alert(dup.error);
+      return;
+    }
 
     // Update job card dispatch log and close order
     onUpdateJobCard(jCard.jobCardNo, {
@@ -1814,18 +1864,13 @@ Please adjust the quantity or request additional raw material issue.`);
     }
     // Dispatch owns tracking when completed or creating, otherwise matches exactly
     if (activeDept === 'Dispatch') {
-      return true;
+      return isVisibleInDispatchQueue(c, movements);
     }
     if (activeDept === 'Purchase') {
       return c.processType === 'Purchase' && c.currentDepartment === 'Purchase';
     }
     if (activeDept === 'Production') {
-      if (isVisibleInProductionQueue(c)) return true;
-      const totalMovedFromProd = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingProdQty = c.orderQty - totalMovedFromProd;
-      return c.processType !== 'Purchase' && (c.currentDepartment === 'Production' || pendingProdQty > 0);
+      return isVisibleInProductionQueue(c);
     }
     if (activeDept === 'Heat Treatment') {
       const totalReceivedAtHT = movements
@@ -1873,10 +1918,7 @@ Please adjust the quantity or request additional raw material issue.`);
       return Math.max(0, job.orderQty - totalMovedFromPurchase);
     }
     if (activeDept === 'Production') {
-      const totalMovedFromProd = movements
-        .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      return Math.max(0, job.orderQty - totalMovedFromProd);
+      return remainingAtProduction(job, movements);
     }
     if (activeDept === 'Heat Treatment') {
       const m = getJobCardProcessMetrics(job, movements);
@@ -1911,7 +1953,7 @@ Please adjust the quantity or request additional raw material issue.`);
         .reduce((sum, mov) => sum + mov.quantity, 0);
       return Math.max(0, packingInputDisplay - totalRoutedFromPacking - (job.packingDetails?.rejectionQty || 0));
     }
-    return job.currentQty || 0;
+    return storeAuthoritativeOnHand(job, movements) || job.currentQty || 0;
   };
 
   // Memoized: getJobWipQtyForDept calls getJobCardProcessMetrics+movements.filter per job = O(N×M)
@@ -2998,12 +3040,11 @@ Please adjust the quantity or request additional raw material issue.`);
                                 </label>
                                 <input
                                   type="text"
-                                  inputMode="numeric"
-                                  pattern="[0-9]*"
+                                  inputMode="decimal"
                                   value={requestQty || ''}
                                   onChange={e => {
-                                    const clean = e.target.value.replace(/\D/g, '');
-                                    setRequestQty(clean === '' ? 0 : parseInt(clean, 10));
+                                    const clean = sanitizeDecimalInput(e.target.value);
+                                    setRequestQty(clean === '' ? 0 : (parseDecimalQuantity(clean) || 0));
                                   }}
                                   placeholder="0"
                                   className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-750 rounded p-1.5 font-mono text-[11px] font-bold text-slate-800 dark:text-white"
@@ -3080,15 +3121,14 @@ Please adjust the quantity or request additional raw material issue.`);
                                 />
                               </div>
                               <div>
-                                <label className="block text-slate-400 mb-1">Final Dispatch quantity (KG)</label>
+                                <label className="block text-slate-400 mb-1">Final Dispatch quantity ({displayUnitLabel(job.unit)})</label>
                                 <input
                                   type="text"
-                                  inputMode="numeric"
-                                  pattern="[0-9]*"
+                                  inputMode="decimal"
                                   value={dispQty || ''}
                                   onChange={e => {
-                                    const clean = e.target.value.replace(/\D/g, '');
-                                    setDispQty(clean === '' ? 0 : parseInt(clean, 10));
+                                    const clean = sanitizeDecimalInput(e.target.value);
+                                    setDispQty(clean === '' ? 0 : (parseDecimalQuantity(clean) || 0));
                                   }}
                                   placeholder="0"
                                   className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-750 rounded p-1.5 font-mono text-slate-800 dark:text-white"
@@ -6091,7 +6131,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   Item Code: {job.itemCode || '-'}
                                 </span>
                                 <span className="text-[11px] text-slate-400 font-normal">
-                                  • Order Qty: {job.orderQty} KG | <strong>Custody Weight: {job.currentQty} KG</strong>
+                                  • Order Qty: {job.orderQty} {displayUnitLabel(job.unit)} | <strong>Custody Weight: {job.currentQty} {displayUnitLabel(job.unit)}</strong>
                                 </span>
                               </div>
                             )}
@@ -6152,8 +6192,9 @@ Please adjust the quantity or request additional raw material issue.`);
                                     setActiveStoreJob(isProcessing ? null : job.jobCardNo);
                                     if (!isProcessing) {
                                       const met = getJobCardProcessMetrics(job, movements);
-                                      setStoreQtyReceived(met.qtyReceivedAtStore);
-                                      const defaultSent = met.qtyDispatched > 0 ? met.qtyDispatched : met.qtyReceivedAtStore;
+                                      const onHand = storeAuthoritativeOnHand(job, movements) || met.qtyRemainingInStock || job.currentQty;
+                                      setStoreQtyReceived(onHand);
+                                      const defaultSent = met.qtyDispatched > 0 ? Math.min(met.qtyDispatched, onHand) : onHand;
                                       setStoreQtySentToDispatch(defaultSent);
                                       setStoreVerifiedQty(defaultSent);
                                     }
@@ -6216,15 +6257,14 @@ Please adjust the quantity or request additional raw material issue.`);
                                     />
                                   </div>
                                   <div>
-                                    <label className="block text-slate-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Produced Quantity In KG</label>
+                                    <label className="block text-slate-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Produced Quantity ({displayUnitLabel(job.unit)})</label>
                                     <input
                                       type="text"
-                                      inputMode="numeric"
-                                      pattern="[0-9]*"
+                                      inputMode="decimal"
                                       value={prodQty || ''}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        setProdQty(clean === '' ? 0 : parseInt(clean, 10));
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        setProdQty(clean === '' ? 0 : (parseDecimalQuantity(clean) || 0));
                                       }}
                                       placeholder="0"
                                       className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded p-1.5 font-mono font-bold text-slate-800 dark:text-slate-100 focus:outline-none focus:border-indigo-500"
@@ -6240,8 +6280,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                       pattern="[0-9]*"
                                       value={prodWireScrap || ''}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        setProdWireScrap(clean === '' ? 0 : parseInt(clean, 10));
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        setProdWireScrap(clean === '' ? 0 : (parseDecimalQuantity(clean) || 0));
                                       }}
                                       placeholder="0"
                                       className="w-full bg-amber-50/50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 rounded p-1.5 font-mono font-bold text-amber-900 dark:text-amber-200 focus:outline-none focus:border-amber-500"
@@ -6325,15 +6365,14 @@ Please adjust the quantity or request additional raw material issue.`);
                                     />
                                   </div>
                                   <div>
-                                    <label className="block text-rose-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Furnace Rejection (KG)</label>
+                                    <label className="block text-rose-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Furnace Rejection ({displayUnitLabel(job.unit)})</label>
                                     <input
                                       type="text"
-                                      inputMode="numeric"
-                                      pattern="[0-9]*"
+                                      inputMode="decimal"
                                       value={htRejectionQty || ''}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const rej = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const rej = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         if (rej > htQtyReceived) {
                                           setHtRejectionQty(htQtyReceived);
                                           setHtQtySentToPlating(0);
@@ -6350,18 +6389,17 @@ Please adjust the quantity or request additional raw material issue.`);
                                 <div className="bg-slate-100 dark:bg-slate-900 p-3 rounded-lg grid grid-cols-3 gap-3 text-[11px] font-mono border border-slate-200 dark:border-slate-800">
                                   <div>
                                     <span className="text-slate-450 block uppercase text-[8.5px]">Qty Received:</span>
-                                    <strong className="text-blue-600">{htQtyReceived} KG</strong>
+                                    <strong className="text-blue-600">{htQtyReceived} {displayUnitLabel(job.unit)}</strong>
                                   </div>
                                   <div>
                                     <span className="text-indigo-600 block uppercase text-[8.5px]">Sent to Plating:</span>
                                     <input
                                       type="text"
-                                      inputMode="numeric"
-                                      pattern="[0-9]*"
+                                      inputMode="decimal"
                                       value={htQtySentToPlating}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const val = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const val = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         setHtQtySentToPlating(val > htQtyReceived ? htQtyReceived : val);
                                       }}
                                       className="w-16 bg-white dark:bg-slate-950 border border-slate-300 rounded px-1 py-0.2 text-center text-[10.5px] font-bold text-indigo-700"
@@ -6430,8 +6468,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                       pattern="[0-9]*"
                                       value={platingRejectionQty || ''}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const rej = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const rej = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         if (rej > platingQtyReceived) {
                                           setPlatingRejectionQty(platingQtyReceived);
                                           setPlatingQtySentToPacking(0);
@@ -6448,7 +6486,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                 <div className="bg-slate-100 dark:bg-slate-900 p-3 rounded-lg grid grid-cols-3 gap-3 text-[11px] font-mono border border-slate-200 dark:border-slate-800">
                                   <div>
                                     <span className="text-slate-455 block uppercase text-[8.5px]">Qty Received:</span>
-                                    <strong className="text-blue-600">{platingQtyReceived} KG</strong>
+                                    <strong className="text-blue-600">{platingQtyReceived} {displayUnitLabel(job.unit)}</strong>
                                   </div>
                                   <div>
                                     <span className="text-indigo-600 block uppercase text-[8.5px]">Sent to Packing:</span>
@@ -6458,8 +6496,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                       pattern="[0-9]*"
                                       value={platingQtySentToPacking}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const val = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const val = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         setPlatingQtySentToPacking(val > platingQtyReceived ? platingQtyReceived : val);
                                       }}
                                       className="w-16 bg-white dark:bg-slate-950 border border-slate-300 rounded px-1 py-0.2 text-center text-[10.5px] font-bold text-indigo-700"
@@ -6467,7 +6505,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   </div>
                                   <div>
                                     <span className="text-amber-600 block uppercase text-[8.5px]">Remaining Balance:</span>
-                                    <strong>{Math.max(0, platingQtyReceived - platingQtySentToPacking - platingRejectionQty)} KG</strong>
+                                    <strong>{Math.max(0, platingQtyReceived - platingQtySentToPacking - platingRejectionQty)} {displayUnitLabel(job.unit)}</strong>
                                   </div>
                                 </div>
 
@@ -6547,8 +6585,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                       pattern="[0-9]*"
                                       value={packRejectionQty || ''}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const rej = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const rej = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         if (rej > packQtyReceived) {
                                           setPackRejectionQty(packQtyReceived);
                                           setPackQtySentToStore(0);
@@ -6578,7 +6616,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   <div className="bg-slate-100 dark:bg-slate-900 p-3 rounded-lg grid grid-cols-3 gap-3 text-[11px] font-mono border border-slate-200 dark:border-slate-800">
                                     <div>
                                       <span className="text-slate-455 block uppercase text-[8.5px]">Qty Received:</span>
-                                      <strong className="text-blue-600">{packQtyReceived} KG</strong>
+                                      <strong className="text-blue-600">{packQtyReceived} {displayUnitLabel(job.unit)}</strong>
                                     </div>
                                     <div>
                                       <span className="text-indigo-600 block uppercase text-[8.5px]">Sent to Store:</span>
@@ -6588,8 +6626,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                         pattern="[0-9]*"
                                         value={packQtySentToStore}
                                         onChange={e => {
-                                          const clean = e.target.value.replace(/\D/g, '');
-                                          const val = Math.max(0, parseInt(clean, 10) || 0);
+                                          const clean = sanitizeDecimalInput(e.target.value);
+                                          const val = Math.max(0, parseDecimalQuantity(clean) || 0);
                                           setPackQtySentToStore(val > packQtyReceived ? packQtyReceived : val);
                                           setPackQty(val > packQtyReceived ? packQtyReceived : val);
                                         }}
@@ -6598,7 +6636,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                     </div>
                                     <div>
                                       <span className="text-amber-600 block uppercase text-[8.5px]">Remaining Balance:</span>
-                                      <strong>{Math.max(0, packQtyReceived - packQtySentToStore - packRejectionQty)} KG</strong>
+                                      <strong>{Math.max(0, packQtyReceived - packQtySentToStore - packRejectionQty)} {displayUnitLabel(job.unit)}</strong>
                                     </div>
                                   </div>
                                 </div>
@@ -6650,8 +6688,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                       pattern="[0-9]*"
                                       value={storeRejectionQty || ''}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const rej = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const rej = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         if (rej > storeQtyReceived) {
                                           setStoreRejectionQty(storeQtyReceived);
                                           setStoreQtySentToDispatch(0);
@@ -6711,8 +6749,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                       pattern="[0-9]*"
                                       value={storeQtySentToDispatch}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const val = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const val = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         setStoreQtySentToDispatch(val > storeQtyReceived ? storeQtyReceived : val);
                                         setStoreVerifiedQty(val > storeQtyReceived ? storeQtyReceived : val);
                                       }}
@@ -6764,8 +6802,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                       pattern="[0-9]*"
                                       value={storeRejectionQty || ''}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const rej = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const rej = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         if (rej > storeQtyReceived) {
                                           setStoreRejectionQty(storeQtyReceived);
                                           setStoreQtySentToDispatch(0);
@@ -6795,8 +6833,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                       pattern="[0-9]*"
                                       value={storeQtySentToDispatch}
                                       onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const val = Math.max(0, parseInt(clean, 10) || 0);
+                                        const clean = sanitizeDecimalInput(e.target.value);
+                                        const val = Math.max(0, parseDecimalQuantity(clean) || 0);
                                         setStoreQtySentToDispatch(val > storeQtyReceived ? storeQtyReceived : val);
                                         setStoreVerifiedQty(val > storeQtyReceived ? storeQtyReceived : val);
                                       }}

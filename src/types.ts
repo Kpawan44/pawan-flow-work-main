@@ -318,6 +318,7 @@ export interface MaterialMovement {
   requestedUnit?: 'PCS' | 'KGS';
   requestedQty?: number;
   issueStatus?: 'Pending' | 'Issued' | 'Rejected';
+  operationId?: string;
   
   // Specific data carried during transit
   wireScrapQty?: number;
