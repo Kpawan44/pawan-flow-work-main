@@ -17,7 +17,8 @@ import {
   ExternalLink,
   QrCode,
   Share2,
-  MessageSquare
+  MessageSquare,
+  GitBranch
 } from 'lucide-react';
 import { JobCard, MaterialMovement, UserProfile, CompanyConfig } from '../types';
 import { getJobCardProcessMetrics, getWireScrapQty } from '../lib/metrics';
@@ -25,6 +26,7 @@ import { DBService } from '../lib/firebase';
 import { formatMovementWhatsAppMessage, getWhatsAppShareUrl } from '../lib/whatsapp';
 import TimelineVisual from './TimelineVisual';
 import { JobStatusBadge } from './JobStatusBadge';
+import { SplitJobModal } from './SplitJobModal';
 
 interface JobCardDetailsModalProps {
   isOpen: boolean;
@@ -53,6 +55,7 @@ export default function JobCardDetailsModal({
 
   const [showWorkshopQR, setShowWorkshopQR] = useState(false);
   const [showPrintView, setShowPrintView] = useState(false);
+  const [showSplitModal, setShowSplitModal] = useState(false);
   const qrCanvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -588,6 +591,17 @@ export default function JobCardDetailsModal({
               <Printer className="h-4 w-4" />
               <span className="hidden sm:inline">Print Job Card</span>
             </button>
+            {jobCard.currentQty > 0 && jobCard.status !== 'Completed' && (
+              <button
+                onClick={() => setShowSplitModal(true)}
+                className="flex items-center gap-1.5 p-2 sm:px-3.5 sm:py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-all shadow-sm cursor-pointer"
+                title="Split Job Card"
+              >
+                <GitBranch className="h-4 w-4" />
+                <span className="hidden sm:inline">Split Job</span>
+                <span className="sm:hidden">Split</span>
+              </button>
+            )}
             <button 
               onClick={onClose}
               className="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-white"
@@ -1194,6 +1208,19 @@ export default function JobCardDetailsModal({
               </motion.div>
             )}
           </AnimatePresence>
+
+          {showSplitModal && (
+            <SplitJobModal
+              isOpen={showSplitModal}
+              onClose={() => setShowSplitModal(false)}
+              jobCard={jobCard}
+              currentUser={currentUser}
+              onSuccess={() => {
+                setShowSplitModal(false);
+                onClose();
+              }}
+            />
+          )}
         </motion.div>
       )}
     </AnimatePresence>

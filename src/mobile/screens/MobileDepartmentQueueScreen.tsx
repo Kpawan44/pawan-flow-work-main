@@ -10,11 +10,13 @@ import {
   AlertCircle, 
   RefreshCw,
   SlidersHorizontal,
-  ChevronRight
+  ChevronRight,
+  GitBranch
 } from 'lucide-react';
 import { JobCard, MaterialMovement, UserProfile, Department } from '../../types';
 import SwipeableQueueItem from '../shared/SwipeableQueueItem';
 import ConfirmationBottomSheet from '../shared/ConfirmationBottomSheet';
+import { SplitJobModal } from '../../components/SplitJobModal';
 
 interface MobileDepartmentQueueScreenProps {
   department: Department;
@@ -46,6 +48,7 @@ export const MobileDepartmentQueueScreen: React.FC<MobileDepartmentQueueScreenPr
   const [confirmMovement, setConfirmMovement] = useState<MaterialMovement | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [selectedJobNos, setSelectedJobNos] = useState<string[]>([]);
+  const [splitTargetJob, setSplitTargetJob] = useState<JobCard | null>(null);
 
   const deptLower = String(department || '').toLowerCase();
 
@@ -342,6 +345,15 @@ export const MobileDepartmentQueueScreen: React.FC<MobileDepartmentQueueScreenPr
                           </button>
                         )}
 
+                        <button
+                          onClick={() => setSplitTargetJob(jc)}
+                          className="min-h-[44px] px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer active:scale-98"
+                          title="Split Job Card"
+                        >
+                          <GitBranch className="h-4 w-4" />
+                          <span>Split</span>
+                        </button>
+
                         {onSelectJobCard && (
                           <button
                             onClick={() => onSelectJobCard(jc.jobCardNo)}
@@ -375,6 +387,16 @@ export const MobileDepartmentQueueScreen: React.FC<MobileDepartmentQueueScreenPr
         confirmLabel="Accept Ingress"
         variant="success"
       />
+
+      {splitTargetJob && (
+        <SplitJobModal
+          isOpen={!!splitTargetJob}
+          onClose={() => setSplitTargetJob(null)}
+          jobCard={splitTargetJob}
+          currentUser={currentUser}
+          onSuccess={() => setSplitTargetJob(null)}
+        />
+      )}
     </div>
   );
 };

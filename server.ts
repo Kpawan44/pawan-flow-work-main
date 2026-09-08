@@ -28,6 +28,7 @@ import {
   shouldUpdateJobOnAccept
 } from "./src/hardening/process2Manufacturing";
 import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
+import { splitJobCardTx } from "./src/hardening/splitJobCard";
 
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
@@ -2618,6 +2619,114 @@ async function startServer() {
     } catch (err: any) {
       console.error("[JOB_CARDS] Error creating job card:", err);
       return res.status(500).json({ success: false, error: err.message || "Failed to create job card" });
+    }
+  });
+
+  // POST /api/job-card/split — Transactional Split Job Card API
+  app.post("/api/job-card/split", requireFirebaseAuth, async (req, res) => {
+    try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      if (!authUid || !requester) {
+        return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
+      }
+
+      const { parentJobCardNo, childSplits, operationId, splitDate } = req.body || {};
+      if (!parentJobCardNo || !Array.isArray(childSplits) || childSplits.length === 0) {
+        return res.status(400).json({ success: false, error: "parentJobCardNo and non-empty childSplits array are required." });
+      }
+
+      for (const cs of childSplits) {
+        if (!cs.childJobCardNo || typeof cs.quantity !== "number" || cs.quantity <= 0) {
+          return res.status(400).json({ success: false, error: "Each child split must have a valid childJobCardNo and positive quantity." });
+        }
+      }
+
+      const opId = operationId || `op-split-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      const serverStore = {
+        async get(collection: string, id: string): Promise<any | null> {
+          try {
+            const dbAdmin = getFirestoreAdmin();
+            if (dbAdmin) {
+              const snap = await dbAdmin.collection(collection).doc(id).get();
+              if (snap.exists) return snap.data();
+            }
+          } catch (_) {}
+          const restDoc = await firestoreRestGetDoc(collection, id);
+          if (restDoc) return restDoc;
+          if (collection === "mfr_job_cards") {
+            return inMemoryJobCards.get(id.toUpperCase()) || inMemoryJobCards.get(id) || null;
+          }
+          return null;
+        },
+        async set(collection: string, id: string, data: any): Promise<void> {
+          let saved = false;
+          try {
+            const dbAdmin = getFirestoreAdmin();
+            if (dbAdmin) {
+              await dbAdmin.collection(collection).doc(id).set(data);
+              saved = true;
+            }
+          } catch (_) {}
+          if (!saved) {
+            await firestoreRestSetDoc(collection, id, data).catch(() => {});
+          }
+          if (collection === "mfr_job_cards") {
+            inMemoryJobCards.set(id.toUpperCase(), data);
+          }
+        },
+        async list(collection: string): Promise<any[]> {
+          try {
+            const dbAdmin = getFirestoreAdmin();
+            if (dbAdmin) {
+              const snap = await dbAdmin.collection(collection).get();
+              return snap.docs.map((d: any) => d.data());
+            }
+          } catch (_) {}
+          const restList = await firestoreRestQueryAll(collection);
+          if (Array.isArray(restList)) return restList;
+          if (collection === "mfr_job_cards") {
+            return Array.from(inMemoryJobCards.values());
+          }
+          return [];
+        }
+      };
+
+      const result = await splitJobCardTx(serverStore, {
+        operationId: opId,
+        parentJobCardNo: String(parentJobCardNo).toUpperCase().trim(),
+        childSplits: childSplits.map(c => ({
+          childJobCardNo: String(c.childJobCardNo).toUpperCase().trim(),
+          quantity: Number(c.quantity)
+        })),
+        actor: {
+          userId: authUid,
+          userName: requester.name || requester.userId || "Authorized User",
+          role: requester.role || "staff",
+          department: requester.department || "Production"
+        },
+        nowIso: splitDate || new Date().toISOString()
+      });
+
+      if (!result.success) {
+        return res.status(result.statusCode || 400).json({ success: false, error: result.error || "Split job card transaction failed." });
+      }
+
+      broadcastRealtimeEvent("JOB_CARD_SPLIT", {
+        parentJobCardNo: String(parentJobCardNo).toUpperCase().trim(),
+        childJobCardNos: result.childJobCards?.map((c: any) => c.jobCardNo) || [],
+        operationId: opId
+      });
+
+      return res.json({
+        success: true,
+        cached: Boolean(result.cached),
+        parentJobCard: result.parentJobCard,
+        childJobCards: result.childJobCards
+      });
+    } catch (err: any) {
+      console.error("[JOB_CARD_SPLIT] Error splitting job card:", err);
+      return res.status(500).json({ success: false, error: err.message || "Failed to split job card" });
     }
   });
 
