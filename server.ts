@@ -29,6 +29,8 @@ import {
 } from "./src/hardening/process2Manufacturing";
 import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
+import { verifyBatchManifestTx } from "./src/hardening/batchManifestScanner";
+import { createSubcontractChallanTx } from "./src/hardening/subcontractChallan";
 
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
@@ -2727,6 +2729,111 @@ async function startServer() {
     } catch (err: any) {
       console.error("[JOB_CARD_SPLIT] Error splitting job card:", err);
       return res.status(500).json({ success: false, error: err.message || "Failed to split job card" });
+    }
+  });
+
+  // POST /api/dispatch/verify-manifest — Process 9 Batch Scan Verification
+  app.post("/api/dispatch/verify-manifest", requireFirebaseAuth, async (req, res) => {
+    try {
+      const authUid = (req as any).authUid;
+      if (!authUid) {
+        return res.status(401).json({ success: false, error: "Unauthorized." });
+      }
+
+      const { scannedInputs, manifestId, dispatchGroupNo } = req.body || {};
+      if (!Array.isArray(scannedInputs) || scannedInputs.length === 0) {
+        return res.status(400).json({ success: false, error: "scannedInputs array is required." });
+      }
+
+      const activeMap = new Map<string, any>(inMemoryJobCards);
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const snap = await dbAdmin.collection("mfr_job_cards").get();
+          snap.docs.forEach((d: any) => {
+            const data = d.data();
+            if (data && data.jobCardNo) {
+              activeMap.set(String(data.jobCardNo).toUpperCase().trim(), data);
+            }
+          });
+        }
+      } catch (_) {}
+
+      const result = verifyBatchManifestTx(scannedInputs, activeMap, manifestId, dispatchGroupNo);
+      return res.json({ success: true, result });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || "Failed to verify batch manifest" });
+    }
+  });
+
+  // POST /api/subcontract/challan/create — Process 9 Subcontractor Delivery Challan
+  app.post("/api/subcontract/challan/create", requireFirebaseAuth, async (req, res) => {
+    try {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      if (!authUid || !requester) {
+        return res.status(401).json({ success: false, error: "Unauthorized." });
+      }
+
+      const { vendorName, vendorGstin, vendorAddress, expectedReturnDate, items } = req.body || {};
+
+      const activeMap = new Map<string, any>(inMemoryJobCards);
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const snap = await dbAdmin.collection("mfr_job_cards").get();
+          snap.docs.forEach((d: any) => {
+            const data = d.data();
+            if (data && data.jobCardNo) {
+              activeMap.set(String(data.jobCardNo).toUpperCase().trim(), data);
+            }
+          });
+        }
+      } catch (_) {}
+
+      const existingNos = new Set<string>();
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          const snap = await dbAdmin.collection("mfr_subcontract_challans").get();
+          snap.docs.forEach((d: any) => {
+            const data = d.data();
+            if (data && data.challanNo) existingNos.add(data.challanNo);
+          });
+        }
+      } catch (_) {}
+
+      const result = createSubcontractChallanTx(
+        {
+          vendorName,
+          vendorGstin,
+          vendorAddress,
+          expectedReturnDate,
+          items: items || [],
+          userId: authUid,
+          userName: requester.name || requester.userId || "Authorized Staff"
+        },
+        activeMap,
+        existingNos
+      );
+
+      if (!result.success || !result.challan) {
+        return res.status(400).json({ success: false, error: result.error || "Failed to create subcontract delivery challan." });
+      }
+
+      // Persist challan
+      try {
+        const dbAdmin = getFirestoreAdmin();
+        if (dbAdmin) {
+          await dbAdmin.collection("mfr_subcontract_challans").doc(result.challan.challanId).set(result.challan);
+        }
+      } catch (_) {}
+
+      broadcastRealtimeEvent("SUBCONTRACT_CHALLAN_CREATED", { challanNo: result.challan.challanNo });
+
+      return res.json({ success: true, challan: result.challan });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || "Failed to create subcontract delivery challan" });
     }
   });
 

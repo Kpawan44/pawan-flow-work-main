@@ -499,3 +499,51 @@ export interface SyncQueueItem {
   operations: SyncQueueOperation[];
 }
 
+// Process 9 Types — Batch Scan Verification & Subcontract Challans
+export interface BatchScanVerificationItem {
+  jobCardNo: string;
+  scannedQrCode: string;
+  expectedQuantity: number;
+  unit: 'PCS' | 'KGS' | 'KG';
+  status: 'VALID' | 'INVALID_JOB' | 'QUANTITY_MISMATCH' | 'ALREADY_DISPATCHED';
+  errorMessage?: string;
+}
+
+export interface BatchScanVerificationResult {
+  manifestId?: string;
+  dispatchGroupNo?: string;
+  totalScanned: number;
+  validCount: number;
+  invalidCount: number;
+  isDispatchable: boolean;
+  items: BatchScanVerificationItem[];
+  verifiedAt: string;
+}
+
+export interface SubcontractChallanItem {
+  jobCardNo: string;
+  itemName: string;
+  processRequired: string;
+  sentQty: number;
+  returnedQty?: number;
+  scrapQty?: number;
+  unit: 'PCS' | 'KGS' | 'KG';
+}
+
+export interface SubcontractChallan {
+  challanId: string;
+  challanNo: string; // e.g. SCH-000001
+  vendorName: string;
+  vendorGstin?: string;
+  vendorAddress?: string;
+  dispatchDate: string;
+  expectedReturnDate?: string;
+  items: SubcontractChallanItem[];
+  totalSentQty: number;
+  totalReturnedQty: number;
+  status: 'OUTBOUND' | 'PARTIALLY_RETURNED' | 'COMPLETED' | 'CANCELLED';
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
