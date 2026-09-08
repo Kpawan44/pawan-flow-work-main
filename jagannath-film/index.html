@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jagannath — Lord of the Universe</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Noto+Sans+Devanagari:wght@500;700&family=Cormorant+Garamond:ital,wght@0,500;1,500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="stage-wrap">
+      <div id="stage" class="stage" aria-label="Cinematic film stage">
+        <div id="shots" class="shots"></div>
+        <div class="vignette"></div>
+        <div class="grain"></div>
+        <div class="letterbox top"></div>
+        <div class="letterbox bottom"></div>
+        <div id="golden-fade" class="golden-fade"></div>
+        <div id="end-card" class="end-card" hidden>
+          <p class="sanskrit">जय जगन्नाथ</p>
+        </div>
+        <div id="title-card" class="title-card">
+          <p class="kicker">A sacred animated film</p>
+          <h1>Jagannath</h1>
+          <p class="subtitle">Lord of the Universe</p>
+          <p class="place">The ancient divine story of Puri</p>
+          <button id="play-btn" type="button">Begin the offering</button>
+          <p class="hint">16:9 · ~2 minutes · headphones recommended</p>
+        </div>
+        <div id="subtitles" class="subtitles" hidden></div>
+        <div class="hud" id="hud" hidden>
+          <button id="pause-btn" type="button">Pause</button>
+          <button id="mute-btn" type="button">Sound on</button>
+          <div class="progress"><div id="progress-bar"></div></div>
+          <span id="scene-label"></span>
+        </div>
+      </div>
+    </div>
+    <script src="./film.js"></script>
+  </body>
+</html>

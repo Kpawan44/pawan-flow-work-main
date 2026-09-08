@@ -1,0 +1,302 @@
+:root {
+  --gold: #e8c36a;
+  --deep: #07040a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #000;
+  color: #f6ead2;
+  font-family: "Cormorant Garamond", serif;
+}
+
+.stage-wrap {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(ellipse at center, #1a0f08 0%, #000 70%);
+  padding: 2vh 2vw;
+}
+
+.stage {
+  position: relative;
+  width: min(96vw, calc(96vh * 16 / 9));
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #000;
+  box-shadow: 0 0 80px rgba(232, 195, 106, 0.12);
+  border-radius: 4px;
+}
+
+.shots {
+  position: absolute;
+  inset: 0;
+}
+
+.shot {
+  position: absolute;
+  inset: -8%;
+  background-size: cover;
+  background-position: center;
+  opacity: 0;
+  filter: saturate(1.05) contrast(1.05);
+}
+
+.shot.active {
+  opacity: 1;
+}
+
+.ken-in {
+  animation: kenIn var(--dur, 9s) ease-in-out forwards;
+}
+.ken-out {
+  animation: kenOut var(--dur, 9s) ease-in-out forwards;
+}
+.ken-left {
+  animation: kenLeft var(--dur, 9s) ease-in-out forwards;
+}
+.ken-right {
+  animation: kenRight var(--dur, 9s) ease-in-out forwards;
+}
+.ken-up {
+  animation: kenUp var(--dur, 9s) linear forwards;
+}
+
+@keyframes kenIn {
+  from {
+    transform: scale(1.08) translate3d(0, 2%, 0);
+  }
+  to {
+    transform: scale(1.22) translate3d(0, -3%, 0);
+  }
+}
+@keyframes kenOut {
+  from {
+    transform: scale(1.24);
+  }
+  to {
+    transform: scale(1.08);
+  }
+}
+@keyframes kenLeft {
+  from {
+    transform: scale(1.16) translate3d(4%, 0, 0);
+  }
+  to {
+    transform: scale(1.16) translate3d(-4%, 0, 0);
+  }
+}
+@keyframes kenRight {
+  from {
+    transform: scale(1.18) translate3d(-5%, 1%, 0);
+  }
+  to {
+    transform: scale(1.18) translate3d(4%, -1%, 0);
+  }
+}
+@keyframes kenUp {
+  from {
+    transform: scale(1.12) translate3d(0, 6%, 0);
+  }
+  to {
+    transform: scale(1.2) translate3d(0, -4%, 0);
+  }
+}
+
+.vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, transparent 42%, rgba(0, 0, 0, 0.55) 100%);
+  z-index: 2;
+}
+
+.grain {
+  position: absolute;
+  inset: -20%;
+  pointer-events: none;
+  opacity: 0.08;
+  z-index: 3;
+  background-image: repeating-radial-gradient(circle at 20% 20%, #fff 0 0.4px, transparent 0.6px 3px);
+  animation: grain 0.35s steps(2) infinite;
+  mix-blend-mode: overlay;
+}
+
+@keyframes grain {
+  to {
+    transform: translate3d(2%, -1%, 0);
+  }
+}
+
+.letterbox {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 7%;
+  background: #000;
+  z-index: 4;
+}
+.letterbox.top {
+  top: 0;
+}
+.letterbox.bottom {
+  bottom: 0;
+}
+
+.golden-fade {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 45%, #ffe7a3 0%, #c9892a 38%, #000 78%);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 6;
+  transition: opacity 2.4s ease;
+}
+.golden-fade.show {
+  opacity: 1;
+}
+
+.title-card,
+.end-card {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  text-align: center;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.42), rgba(0, 0, 0, 0.62));
+}
+
+.title-card h1 {
+  font-family: "Cinzel", serif;
+  font-size: clamp(2.4rem, 8vw, 6rem);
+  letter-spacing: 0.18em;
+  margin: 0.1em 0;
+  color: var(--gold);
+  text-shadow: 0 0 40px rgba(232, 195, 106, 0.35);
+}
+
+.kicker,
+.subtitle,
+.place,
+.hint {
+  margin: 0.25rem 0;
+}
+
+.kicker {
+  letter-spacing: 0.42em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  color: #d7c39a;
+}
+
+.subtitle {
+  font-size: clamp(1.1rem, 2.4vw, 1.8rem);
+  font-style: italic;
+}
+
+.place {
+  color: #cbb892;
+  margin-bottom: 1.4rem;
+}
+
+#play-btn,
+.hud button {
+  font-family: "Cinzel", serif;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  background: transparent;
+  color: var(--gold);
+  border: 1px solid var(--gold);
+  padding: 0.75rem 1.4rem;
+  cursor: pointer;
+}
+
+#play-btn:hover,
+.hud button:hover {
+  background: rgba(232, 195, 106, 0.12);
+}
+
+.hint {
+  margin-top: 0.9rem;
+  font-size: 0.9rem;
+  opacity: 0.75;
+}
+
+.end-card {
+  background: #000;
+}
+
+.end-card .sanskrit {
+  font-family: "Noto Sans Devanagari", sans-serif;
+  font-size: clamp(2.6rem, 8vw, 5.4rem);
+  color: #f3d17a;
+  text-shadow: 0 0 28px rgba(255, 214, 110, 0.7), 0 0 80px rgba(201, 137, 42, 0.45);
+  margin: 0;
+}
+
+.subtitles {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  bottom: 11%;
+  z-index: 7;
+  text-align: center;
+  font-size: clamp(0.95rem, 2.1vw, 1.35rem);
+  line-height: 1.45;
+  text-shadow: 0 2px 16px #000;
+  color: #fff6e4;
+}
+
+.hud {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9;
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.45rem 0.7rem 0.55rem;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.72), transparent);
+  font-size: 0.72rem;
+}
+
+.hud button {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.62rem;
+}
+
+.progress {
+  flex: 1;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+#progress-bar {
+  height: 100%;
+  width: 0;
+  background: var(--gold);
+}
+
+#scene-label {
+  min-width: 11rem;
+  text-align: right;
+  color: #e7d7b3;
+  font-family: "Cinzel", serif;
+  letter-spacing: 0.06em;
+}
+
+.title-card[hidden],
+.end-card[hidden],
+.subtitles[hidden],
+.hud[hidden] {
+  display: none !important;
+}
