@@ -20,8 +20,9 @@ export function getDynamicRawMaterialsStock(movements: MaterialMovement[] = [], 
 
   // 1. Include base inventory catalog items if any
   INVENTORY_RAW_MATERIALS.forEach(item => {
-    materialMap.set(item.code.toUpperCase(), {
-      code: item.code.toUpperCase(),
+    const upper = item.code.trim().toUpperCase();
+    materialMap.set(upper, {
+      code: upper,
       name: item.name,
       category: item.category || 'Raw Material',
       location: item.location || 'Bin RM Store',
@@ -34,12 +35,12 @@ export function getDynamicRawMaterialsStock(movements: MaterialMovement[] = [], 
   (movements || []).forEach(m => {
     const rawCode = m.processDetails?.rawMaterialCode || (m.toDepartment === 'Raw Material Store' || m.fromDepartment === 'Raw Material Store' ? m.itemCode : null);
     const rawName = m.processDetails?.rawMaterialName || m.itemName || rawCode;
-    if (rawCode && rawCode !== '-' && rawCode.trim()) {
-      const upperCode = rawCode.trim().toUpperCase();
+    if (rawCode && rawCode !== '-' && String(rawCode).trim()) {
+      const upperCode = String(rawCode).trim().toUpperCase();
       if (!materialMap.has(upperCode)) {
         materialMap.set(upperCode, {
           code: upperCode,
-          name: rawName?.trim() || upperCode,
+          name: String(rawName || upperCode).trim(),
           category: 'Raw Material',
           location: 'Bin RM Store',
           unit: 'KG',
@@ -71,12 +72,27 @@ export function getDynamicRawMaterialsStock(movements: MaterialMovement[] = [], 
   }
 
   return Array.from(materialMap.values()).map(item => {
+    const itemCodeUpper = item.code.trim().toUpperCase();
+
+    const isMovementMatch = (m: MaterialMovement) => {
+      const movRawCode = m.processDetails?.rawMaterialCode ? String(m.processDetails.rawMaterialCode).trim().toUpperCase() : '';
+      const movItemCode = m.itemCode ? String(m.itemCode).trim().toUpperCase() : '';
+      const movJobCardNo = m.jobCardNo ? String(m.jobCardNo).trim().toUpperCase() : '';
+
+      return (
+        movRawCode === itemCodeUpper ||
+        movItemCode === itemCodeUpper ||
+        movJobCardNo === itemCodeUpper ||
+        movJobCardNo === 'STOCK-IN-' + itemCodeUpper
+      );
+    };
+
     const totalIssued = (movements || [])
       .filter(m => 
         m.fromDepartment === 'Raw Material Store' && 
         m.isIssueRequest && 
         m.issueStatus === 'Issued' && 
-        (m.processDetails?.rawMaterialCode?.toUpperCase() === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.itemCode?.toUpperCase() === item.code)
+        isMovementMatch(m)
       )
       .reduce((sum, m) => sum + (m.quantity || 0), 0);
 
@@ -85,7 +101,7 @@ export function getDynamicRawMaterialsStock(movements: MaterialMovement[] = [], 
         m.toDepartment === 'Raw Material Store' && 
         m.fromDepartment === 'Purchase' && 
         m.accepted &&
-        (m.processDetails?.rawMaterialCode?.toUpperCase() === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.itemCode?.toUpperCase() === item.code)
+        isMovementMatch(m)
       )
       .reduce((sum, m) => sum + (m.quantity || 0), 0);
 
@@ -93,7 +109,7 @@ export function getDynamicRawMaterialsStock(movements: MaterialMovement[] = [], 
       .filter(m => 
         m.fromDepartment === 'Raw Material Store' && 
         (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
-        (m.processDetails?.rawMaterialCode?.toUpperCase() === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-') || m.itemCode?.toUpperCase() === item.code)
+        (isMovementMatch(m) || m.jobCardNo?.toUpperCase()?.startsWith('RM-REJECT-'))
       )
       .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
 
@@ -123,8 +139,10 @@ interface RawMaterialRequestModalProps {
     remarks: string;
   }) => Promise<void>;
   movements?: MaterialMovement[];
+  savedItems?: any[];
   initialJobCardNo?: string;
 }
+
 
 export default function RawMaterialRequestModal({
   isOpen,

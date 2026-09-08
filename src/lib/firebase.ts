@@ -1329,7 +1329,13 @@ export class DBService {
     }
 
     this.triggerSheetsSync(jobCardNo, updates, userName);
+
+    return {
+      success: true,
+      conflict: false
+    };
   }
+
 
   static async bulkUpdateJobCardStatus(
     jobCardNos: string[], 

@@ -1409,7 +1409,8 @@ export default function App() {
         expVer
       );
 
-      if (result.conflict) {
+      if (result && result.conflict) {
+
         setConflictModalData({
           isOpen: true,
           jobCardNo,

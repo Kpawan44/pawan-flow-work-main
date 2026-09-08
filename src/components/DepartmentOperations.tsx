@@ -52,6 +52,8 @@ interface DepartmentOperationsProps {
   onUpdateJobCard: (jobCardNo: string, updates: Partial<JobCard>) => void;
   onCreateMovement: (mov: {
     jobCardNo: string;
+    itemCode?: string;
+    itemName?: string;
     fromDepartment: Department;
     toDepartment: Department | 'Completed';
     quantity: number;
@@ -63,6 +65,8 @@ interface DepartmentOperationsProps {
     processDetails?: any;
   } | {
     jobCardNo: string;
+    itemCode?: string;
+    itemName?: string;
     fromDepartment: Department;
     toDepartment: Department | 'Completed';
     quantity: number;
@@ -883,6 +887,8 @@ export default function DepartmentOperations({
       } else if (purchaseMaterialType === 'Raw Material' || purchaseTargetDept === 'Raw Material Store') {
         onCreateMovement({
           jobCardNo: 'STOCK-IN-' + (effectiveCode !== '-' ? effectiveCode : Date.now().toString().slice(-6)),
+          itemCode: effectiveCode,
+          itemName: purchaseItemName.trim(),
           fromDepartment: 'Purchase',
           toDepartment: 'Raw Material Store',
           quantity: purchaseSentQty,
@@ -942,6 +948,8 @@ export default function DepartmentOperations({
         if (item.materialType === 'Raw Material' || item.targetDept === 'Raw Material Store') {
           movements.push({
             jobCardNo: 'STOCK-IN-' + item.itemCode,
+            itemCode: item.itemCode,
+            itemName: item.itemName,
             fromDepartment: 'Purchase',
             toDepartment: 'Raw Material Store',
             quantity: item.sentQty,

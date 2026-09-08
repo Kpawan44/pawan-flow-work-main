@@ -42,10 +42,14 @@ export default function RawMaterialReportView({
     return end;
   }, [endDate]);
 
-  // 2. Filter movements for raw material store requests
+  // 2. Filter movements for raw material store transactions (inwards, issues, and rejections)
   const rawMaterialMovements = useMemo(() => {
     return movements.filter(m => {
-      if (m.fromDepartment !== 'Raw Material Store' || !m.isIssueRequest) return false;
+      const isStoreInward = m.toDepartment === 'Raw Material Store' && m.fromDepartment === 'Purchase' && m.accepted;
+      const isStoreIssue = m.fromDepartment === 'Raw Material Store' && m.isIssueRequest;
+      const isStoreRejection = m.fromDepartment === 'Raw Material Store' && (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection);
+
+      if (!isStoreInward && !isStoreIssue && !isStoreRejection) return false;
       
       const itemDate = m.transferDate ? new Date(m.transferDate) : null;
       if (!itemDate) return true;
@@ -72,8 +76,8 @@ export default function RawMaterialReportView({
 
     // Populate from movements (only issued)
     rawMaterialMovements.forEach(m => {
-      const code = m.processDetails?.rawMaterialCode || 'GENERAL';
-      const name = m.processDetails?.rawMaterialName || 'General Store Request';
+      const code = (m.processDetails?.rawMaterialCode || m.itemCode || 'GENERAL').toUpperCase();
+      const name = m.processDetails?.rawMaterialName || m.itemName || 'General Store Request';
       const isIssued = m.issueStatus === 'Issued';
       
       if (!consumption[code]) {
@@ -89,41 +93,35 @@ export default function RawMaterialReportView({
     return Object.values(consumption).sort((a, b) => b.issuedWeight - a.issuedWeight);
   }, [rawMaterialMovements]);
 
-  // 4. Calculate dynamic current stock levels
+  // 4. Calculate dynamic current stock levels using authoritative getDynamicRawMaterialsStock
   const dynamicInventory = useMemo(() => {
     return getDynamicRawMaterialsStock(movements).map(item => {
-      const totalIssued = movements
-        .filter(m => 
-          m.fromDepartment === 'Raw Material Store' && 
-          m.isIssueRequest && 
-          m.issueStatus === 'Issued' && 
-          (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
-        )
-        .reduce((sum, m) => sum + (m.quantity || 0), 0);
+      const itemCodeUpper = item.code.trim().toUpperCase();
+      const isMatch = (m: MaterialMovement) => {
+        const rawCode = m.processDetails?.rawMaterialCode ? String(m.processDetails.rawMaterialCode).trim().toUpperCase() : '';
+        const itemCode = m.itemCode ? String(m.itemCode).trim().toUpperCase() : '';
+        const jcNo = m.jobCardNo ? String(m.jobCardNo).trim().toUpperCase() : '';
+        return rawCode === itemCodeUpper || itemCode === itemCodeUpper || jcNo === itemCodeUpper || jcNo === 'STOCK-IN-' + itemCodeUpper;
+      };
 
       const totalPurchased = movements
-        .filter(m => 
-          m.toDepartment === 'Raw Material Store' && 
-          m.fromDepartment === 'Purchase' && 
-          m.accepted &&
-          (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code)
-        )
+        .filter(m => m.toDepartment === 'Raw Material Store' && m.fromDepartment === 'Purchase' && m.accepted && isMatch(m))
+        .reduce((sum, m) => sum + (m.quantity || 0), 0);
+
+      const totalIssued = movements
+        .filter(m => m.fromDepartment === 'Raw Material Store' && m.isIssueRequest && m.issueStatus === 'Issued' && isMatch(m))
         .reduce((sum, m) => sum + (m.quantity || 0), 0);
 
       const totalRejected = movements
-        .filter(m => 
-          m.fromDepartment === 'Raw Material Store' && 
-          (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && 
-          (m.processDetails?.rawMaterialCode === item.code || m.jobCardNo === 'STOCK-IN-' + item.code || m.jobCardNo === item.code || m.jobCardNo?.startsWith('RM-REJECT-'))
-        )
+        .filter(m => m.fromDepartment === 'Raw Material Store' && (m.issueStatus === 'Rejected' || m.processDetails?.isWireRejection) && (isMatch(m) || m.jobCardNo?.toUpperCase()?.startsWith('RM-REJECT-')))
         .reduce((sum, m) => sum + (m.processDetails?.rejectedQty || m.quantity || m.requestedQty || 0), 0);
 
       const currentStock = item.availableStock;
-      const stockPercentage = item.availableStock > 0 ? 100 : 0;
+      const stockPercentage = currentStock > 0 ? 100 : 0;
 
       return {
         ...item,
-        startingStock: item.availableStock,
+        startingStock: totalPurchased,
         totalPurchased,
         totalIssued,
         totalRejected,
@@ -132,6 +130,7 @@ export default function RawMaterialReportView({
       };
     });
   }, [movements]);
+
 
   // 5. Get pending material requests
   const pendingRequests = useMemo(() => {
