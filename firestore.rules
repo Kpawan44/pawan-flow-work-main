@@ -101,53 +101,19 @@ service cloud.firestore {
     }
 
     // Collection: Manufacturing Job Cards
-    // Protected against arbitrary modification of immutable fields (jobCardNo, createdAt, createdBy, orderQty)
+    // Client SDK cannot create/update/delete. Express/Admin SDK (movement engine, PUT /api/job-cards)
+    // is not evaluated by these rules. Protected ledger/custody fields are therefore not client-writable.
     match /mfr_job_cards/{jobCardNo} {
       allow read: if isActiveUser();
-      
-      allow create: if isActiveUser() && 
-                    request.resource.data.keys().hasAll(['jobCardNo', 'itemName', 'orderQty', 'status']) &&
-                    request.resource.data.orderQty > 0;
-
-      allow update: if isActiveUser() && (
-        isAdmin() || (
-          request.resource.data.jobCardNo == resource.data.jobCardNo &&
-          request.resource.data.createdAt == resource.data.createdAt &&
-          request.resource.data.createdBy == resource.data.createdBy &&
-          request.resource.data.orderQty == resource.data.orderQty
-        )
-      );
-
-      allow delete: if isSuperAdmin();
+      allow create, update, delete: if false;
     }
 
     // Collection: Material Movements (Physical Ledger)
-    // Strictly requires positive quantities and movement metadata; immutable fields cannot be changed on update
+    // Ordinary Firebase clients cannot create, update, or delete movements.
+    // POST /api/movements, accept, reject, and undo write via Admin SDK / server.
     match /mfr_movements/{movementId} {
       allow read: if isActiveUser();
-      
-      allow create: if isActiveUser() && 
-                    request.resource.data.quantity > 0 && 
-                    request.resource.data.keys().hasAll(['movementId', 'jobCardNo', 'fromDepartment', 'toDepartment', 'quantity', 'transferDate']);
-
-      allow update: if isActiveUser() && (
-        isAdmin() || (
-          request.resource.data.movementId == resource.data.movementId &&
-          request.resource.data.jobCardNo == resource.data.jobCardNo &&
-          request.resource.data.fromDepartment == resource.data.fromDepartment &&
-          request.resource.data.toDepartment == resource.data.toDepartment &&
-          request.resource.data.quantity == resource.data.quantity &&
-          request.resource.data.transferDate == resource.data.transferDate &&
-          request.resource.data.initiatedByUserId == resource.data.initiatedByUserId &&
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'accepted', 'acceptedBy', 'acceptedDate', 'acceptedByUserId', 'remarks', 
-            'allottedLocation', 'rackNo', 'issueStatus', 'modifiedByUserId', 'modifiedByUserName', 
-            'modifiedDate', 'modifiedAction', 'deletedDate', 'deletedByUserId', 'deletedByUserName'
-          ])
-        )
-      );
-
-      allow delete: if isSuperAdmin();
+      allow create, update, delete: if false;
     }
 
     // Collection: Idempotency Keys (Deduplication store)

@@ -29,7 +29,21 @@ import {
   logActionToSheets 
 } from './googleSheets';
 import { nextStatusOnPurchaseAccept, displayUnitLabel } from '../hardening/process1Purchase';
-import { attachProcess2MovementContract, isRawMaterialStoreIssuingToProduction, shouldUpdateJobOnAccept } from '../hardening/process2Manufacturing';
+import { attachProcess2MovementContract, isPendingAcceptanceMovement, isRawMaterialStoreIssuingToProduction, shouldUpdateJobOnAccept } from '../hardening/process2Manufacturing';
+import {
+  denyDirectMovementDelete,
+  denyDirectMovementUpdate,
+  isLedgerCollectionBlockedFromClientSync,
+  JOB_CARD_CREATE_NO_CLIENT_FALLBACK_MESSAGE,
+  FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE
+} from '../hardening/clientLedgerGuards';
+import { omitLedgerFieldsFromJobCardPut } from '../hardening/jobCardUpdatePolicy';
+import {
+  authorizeDatabaseRestore,
+  isLedgerRestoreCollection,
+  RESTORE_LEDGER_CLIENT_BLOCKED_MESSAGE
+} from '../hardening/restoreDatabaseDumpPolicy';
+import { JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE } from '../hardening/jobCardTombstone';
 
 // Directly use configuration from firebase-applet-config.json
 export { firebaseConfig };
@@ -1122,29 +1136,18 @@ export class DBService {
         headers,
         body: JSON.stringify({ jobCard: newJob, initialMovement })
       });
-      if (res.ok) {
-        const resData = await res.json();
-        if (resData.success && resData.jobCard) {
-          authoritativeJob = resData.jobCard;
-          authoritativeMovement = resData.movement || initialMovement;
-        }
+      const resData = await res.json().catch(() => ({}));
+      if (!res.ok || !resData.success || !resData.jobCard) {
+        throw new Error(resData.error || `Failed to create job card (status ${res.status}).`);
       }
-    } catch (apiErr) {
-      console.warn("[JOB_CARD API] Backend API call failed, falling back to direct auth write:", apiErr);
+      authoritativeJob = resData.jobCard;
+      authoritativeMovement = resData.movement || initialMovement;
+    } catch (apiErr: any) {
+      throw new Error(apiErr?.message || JOB_CARD_CREATE_NO_CLIENT_FALLBACK_MESSAGE);
     }
 
     if (!authoritativeJob) {
-      // Direct Firestore write ONLY when client is actively authenticated
-      if (useRealFirebase && db && auth?.currentUser) {
-        try {
-          await setDoc(doc(db, 'mfr_job_cards', jobCardNo), sanitizeForFirestore(newJob));
-          await setDoc(doc(db, 'mfr_movements', newMovementId), sanitizeForFirestore(initialMovement));
-          authoritativeJob = newJob;
-          authoritativeMovement = initialMovement;
-        } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `mfr_job_cards/${jobCardNo}`);
-        }
-      }
+      throw new Error(JOB_CARD_CREATE_NO_CLIENT_FALLBACK_MESSAGE);
     }
 
     const finalJob = authoritativeJob || newJob;
@@ -1198,59 +1201,7 @@ export class DBService {
     userName: string,
     expectedVersion?: number
   ): Promise<{ success: boolean; conflict?: boolean; currentData?: JobCard; message?: string }> {
-    // 1. If physical Firestore is active and expectedVersion is supplied, run atomic OCC transaction check
-    if (useRealFirebase && db && expectedVersion !== undefined) {
-      try {
-        const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
-        let conflictDetected = false;
-        let latestDbCard: JobCard | null = null;
-
-        await runTransaction(db, async (transaction) => {
-          let snap = await transaction.get(refUpper);
-          let targetRef = refUpper;
-          if (!snap.exists()) {
-            const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
-            snap = await transaction.get(refAsIs);
-            targetRef = refAsIs;
-          }
-
-          if (!snap.exists()) {
-            return;
-          }
-
-          const current = snap.data() as JobCard;
-          latestDbCard = current;
-          const currentVer = current.version || 1;
-
-          // CONFLICT DETECTED: Database record has been modified since user loaded it
-          if (currentVer !== expectedVersion) {
-            conflictDetected = true;
-            return;
-          }
-
-          const nextVersion = currentVer + 1;
-          const nowIso = new Date().toISOString();
-          transaction.update(targetRef, {
-            ...updates,
-            version: nextVersion,
-            updatedAt: nowIso,
-            updatedBy: userName || userId
-          });
-        });
-
-        if (conflictDetected) {
-          console.warn(`[OCC Conflict] Job Card ${jobCardNo} version mismatch. Expected: ${expectedVersion}, Current: ${latestDbCard?.version || 1}`);
-          return {
-            success: false,
-            conflict: true,
-            currentData: latestDbCard || undefined,
-            message: `Record was updated by another user (${latestDbCard?.updatedBy || 'Another crew member'}).`
-          };
-        }
-      } catch (err: any) {
-        console.warn("OCC transaction verification error:", err);
-      }
-    }
+    // 1. If physical Firestore is active and expectedVersion is supplied, OCC is enforced on the server PUT.
 
     // 2. Authoritative Backend API Execution FIRST
     const apiBase = getApiBaseUrl();
@@ -1260,8 +1211,9 @@ export class DBService {
     const idx = cards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
     const nextVer = idx >= 0 ? (cards[idx].version || 1) + 1 : 1;
     const nowIso = new Date().toISOString();
+    const safeUpdates = omitLedgerFieldsFromJobCardPut(updates as Record<string, any>);
     const finalPayload: Partial<JobCard> = {
-      ...updates,
+      ...safeUpdates,
       version: nextVer,
       updatedAt: nowIso,
       updatedBy: userName || userId
@@ -1271,38 +1223,19 @@ export class DBService {
       const res = await fetch(`${apiBase}/api/job-cards/${encodeURIComponent(jobCardNo)}`, {
         method: 'PUT',
         headers,
-        body: JSON.stringify(updates)
+        body: JSON.stringify(safeUpdates)
       });
-      if (res.ok) {
-        const resData = await res.json();
-        if (resData.success && resData.jobCard) {
-          authoritativeJob = resData.jobCard;
-        }
+      const resData = await res.json().catch(() => ({}));
+      if (!res.ok || !resData.success || !resData.jobCard) {
+        throw new Error(resData.error || `Failed to update job card (status ${res.status}).`);
       }
-    } catch (apiErr) {
-      console.warn("[JOB_CARD API] Update backend call failed, falling back to direct auth write:", apiErr);
+      authoritativeJob = resData.jobCard;
+    } catch (apiErr: any) {
+      throw new Error(apiErr?.message || "Server connection unavailable. Job card was not updated.");
     }
 
     if (!authoritativeJob) {
-      if (useRealFirebase && db && auth?.currentUser) {
-        try {
-          const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
-          const snapUpper = await getDoc(refUpper);
-          if (snapUpper.exists()) {
-            await updateDoc(refUpper, sanitizeForFirestore(finalPayload) as any);
-            authoritativeJob = { ...(snapUpper.data() as JobCard), ...finalPayload } as JobCard;
-          } else {
-            const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
-            const snapAsIs = await getDoc(refAsIs);
-            if (snapAsIs.exists()) {
-              await updateDoc(refAsIs, sanitizeForFirestore(finalPayload) as any);
-              authoritativeJob = { ...(snapAsIs.data() as JobCard), ...finalPayload } as JobCard;
-            }
-          }
-        } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, `mfr_job_cards/${jobCardNo}`);
-        }
-      }
+      throw new Error("Server connection unavailable. Job card was not updated. Direct Firestore fallback is disabled.");
     }
 
     // 3. Reconcile Local Cache & Memory with Authoritative Result
@@ -1362,49 +1295,17 @@ export class DBService {
     userId: string, 
     userName: string
   ): Promise<void> {
-    const cards = await this.getJobCards();
     const isCompleted = newStatus === 'Completed';
+    const updates = isCompleted
+      ? { status: newStatus, completed: true }
+      : { status: newStatus };
 
-    // 1. Local storage batch update first
     for (const jobCardNo of jobCardNos) {
-      const idx = cards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
-      if (idx !== -1) {
-        cards[idx] = {
-          ...cards[idx],
-          status: newStatus,
-          completed: isCompleted
-        };
+      const result = await this.updateJobCard(jobCardNo, updates as Partial<JobCard>, userId, userName);
+      if (!result.success) {
+        throw new Error(result.message || `Failed to update job card ${jobCardNo} status.`);
       }
     }
-    setLocalStorageItem('mfr_job_cards', cards);
-
-    // 2. Physical Firestore write in parallel background batch
-    const writePromises = jobCardNos.map(jobCardNo => {
-      const updates = { status: newStatus, completed: isCompleted };
-      return this.tryPhysicalWrite(
-        'Bulk Update Job Card Status',
-        `Bulk status update for ${jobCardNo} to ${newStatus}`,
-        [
-          { collection: 'mfr_job_cards', docId: jobCardNo.toUpperCase(), data: updates, operation: 'update' }
-        ],
-        async () => {
-          const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
-          const snapUpper = await getDoc(refUpper);
-          if (snapUpper.exists()) {
-            await updateDoc(refUpper, updates as any);
-          } else {
-            const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
-            const snapAsIs = await getDoc(refAsIs);
-            if (snapAsIs.exists()) {
-              await updateDoc(refAsIs, updates as any);
-            } else {
-              await updateDoc(refUpper, updates as any);
-            }
-          }
-        }
-      );
-    });
-    Promise.all(writePromises).catch(err => console.warn('Bulk status sync warning:', err));
 
     await this.logAction(
       userId, 
@@ -1434,10 +1335,7 @@ export class DBService {
     setLocalStorageItem('mfr_job_cards', updatedCards);
     this.setMemCache('mfr_job_cards', updatedCards);
 
-    const cachedMovements = getLocalStorageItem<MaterialMovement[]>('mfr_movements', []);
-    const updatedMovements = cachedMovements.filter(m => m.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
-    setLocalStorageItem('mfr_movements', updatedMovements);
-    this.setMemCache('mfr_movements', updatedMovements);
+    // Keep movement history in local cache; do not physically delete ledger rows.
 
     const cachedNotifications = getLocalStorageItem<any[]>('mfr_notifications', []);
     const updatedNotifications = cachedNotifications.filter(n => !n.message?.toLowerCase().includes(jobCardNo.toLowerCase()));
@@ -1459,64 +1357,23 @@ export class DBService {
         }
       }
     } catch (apiErr) {
-      // Fall through to direct Firestore
+      throw new Error(JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE);
     }
 
-    // 3. Direct Physical Firestore fallback with tombstone creation
-    if (!apiDeleted && useRealFirebase && db) {
-      try {
-        const refUpper = doc(db, 'mfr_job_cards', upperNo);
-        const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
-        
-        // Write tombstone
-        const tombRef = doc(db, 'mfr_deleted_job_cards', upperNo);
-        await setDoc(tombRef, {
-          jobCardNo: upperNo,
-          deletedAt: new Date().toISOString(),
-          deletedBy: userId,
-          deletedByName: userName,
-          tombstone: true
-        });
-
-        const snapUpper = await getDoc(refUpper);
-        if (snapUpper.exists()) {
-          await deleteDoc(refUpper);
-        }
-        const snapAsIs = await getDoc(refAsIs);
-        if (snapAsIs.exists()) {
-          await deleteDoc(refAsIs);
-        }
-
-        // Cascade delete movements from Firestore
-        const movementsSnap = await getDocs(query(collection(db, 'mfr_movements'), where('jobCardNo', '==', jobCardNo)));
-        for (const docSnap of movementsSnap.docs) {
-          await deleteDoc(doc(db, 'mfr_movements', docSnap.id));
-        }
-
-        // Cascade delete notifications mentioning this job card
-        const notificationsSnap = await getDocs(collection(db, 'mfr_notifications'));
-        for (const docSnap of notificationsSnap.docs) {
-          const notif = docSnap.data();
-          if (notif.message && notif.message.toLowerCase().includes(jobCardNo.toLowerCase())) {
-            await deleteDoc(doc(db, 'mfr_notifications', docSnap.id));
-          }
-        }
-      } catch (err: any) {
-        handleFirestoreError(err, OperationType.DELETE, `mfr_job_cards/${upperNo}`);
-      }
+    if (!apiDeleted) {
+      throw new Error(JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE);
     }
 
     // 4. Broadcast instant cross-device SSE synchronization
     await this.broadcastEvent('JOB_UPDATED').catch(() => {});
     await this.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
 
-    await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Deleted Job Card: ${jobCardNo} and all related material transitions/notifications`);
+    await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Tombstoned Job Card: ${jobCardNo}. Movement history preserved.`);
   }
 
   static async deleteAllJobCards(userId: string, userName: string): Promise<{ success: boolean; deletedCollections?: Record<string, number>; remainingDocuments: number; superAdminPreserved: boolean; message: string }> {
     await this.verifyAdmin(userId);
 
-    // 1. Invalidate caches and clear Local Storage offline caches & sync queues
     const targetCollections = [
       'mfr_job_cards',
       'mfr_movements',
@@ -1529,15 +1386,7 @@ export class DBService {
       'mfr_idempotency_keys'
     ];
 
-    for (const col of targetCollections) {
-      this.invalidateCache(col);
-      setLocalStorageItem(col, []);
-      this.setMemCache(col, []);
-    }
-    setLocalStorageItem('mfr_sync_queue', []);
-    this.setMemCache('mfr_sync_queue', []);
-
-    // 2. Authoritative Server API Deletion
+    // Authoritative Server API only. Never deleteDoc ledger collections from the client.
     let apiResult: any = null;
     try {
       const headers = await this.getAuthHeaders();
@@ -1545,7 +1394,6 @@ export class DBService {
         method: 'POST',
         headers
       });
-      // Fallback: If backend exposes legacy /api/job-cards/delete-all endpoint
       if (res.status === 404) {
         res = await fetch(`${getApiBaseUrl()}/api/job-cards/delete-all`, {
           method: 'POST',
@@ -1559,7 +1407,6 @@ export class DBService {
         }
       } else {
         const errJson = await res.json().catch(() => ({}));
-        // Provide specific, actionable error messages per HTTP status
         if (res.status === 404) {
           throw new Error(
             'Factory purge service is not available on the connected server. ' +
@@ -1578,7 +1425,6 @@ export class DBService {
         }
       }
     } catch (apiErr: any) {
-      // Re-throw specific HTTP errors (404, 401, 403, 500 etc.) — these are actionable
       const isSpecificHttpError = apiErr.message && (
         apiErr.message.includes('not available on the connected server') ||
         apiErr.message.includes('Authentication required') ||
@@ -1589,25 +1435,21 @@ export class DBService {
       if (isSpecificHttpError) {
         throw apiErr;
       }
-      // Network / fetch errors: fall through to Firestore fallback
-      console.warn("[FACTORY_PURGE] Backend API unreachable, falling back to direct Firestore:", apiErr);
+      throw new Error(FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE);
     }
 
-    // 3. Physical Firestore fallback (Only if backend endpoint was unreachable)
-    if (!apiResult && useRealFirebase && db) {
-      try {
-        for (const colName of targetCollections) {
-          const querySnapshot = await getDocs(collection(db, colName));
-          for (const docSnap of querySnapshot.docs) {
-            await deleteDoc(doc(db, colName, docSnap.id));
-          }
-        }
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, 'mfr_job_cards');
-      }
+    if (!apiResult) {
+      throw new Error(FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE);
     }
 
-    // 4. Broadcast instant cross-device SSE synchronization
+    for (const col of targetCollections) {
+      this.invalidateCache(col);
+      setLocalStorageItem(col, []);
+      this.setMemCache(col, []);
+    }
+    setLocalStorageItem('mfr_sync_queue', []);
+    this.setMemCache('mfr_sync_queue', []);
+
     await this.broadcastEvent('ALL_UPDATED').catch(() => {});
     await this.broadcastEvent('JOB_UPDATED').catch(() => {});
     await this.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
@@ -1615,13 +1457,7 @@ export class DBService {
 
     await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Complete factory data purge executed by ${userName}. Erased all job cards, movements, raw material items, process transfers, outsource orders, and notifications. Super Admin preserved.`);
 
-    return apiResult || {
-      success: true,
-      deletedCollections: {},
-      remainingDocuments: 0,
-      superAdminPreserved: true,
-      message: "All factory operational and Raw Material data completely purged. Super Admin account preserved."
-    };
+    return apiResult;
   }
 
   static async factoryReset(pin: string): Promise<{ success: boolean; resetOperationId?: string; factoryResetGeneration?: string; superAdminPreserved?: any; message?: string }> {
@@ -1737,9 +1573,8 @@ export class DBService {
 
     // Check for duplicate pending transfer request for same job card between same departments
     if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
-      const pendingDup = movements.find(m => 
-        !m.accepted && 
-        !m.deletedDate &&
+      const pendingDup = movements.find(m =>
+        isPendingAcceptanceMovement(m) &&
         m.jobCardNo.toLowerCase() === movement.jobCardNo.toLowerCase() &&
         m.fromDepartment === movement.fromDepartment &&
         m.toDepartment === movement.toDepartment
@@ -1755,7 +1590,11 @@ export class DBService {
 
     const newId = `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const nowIso = new Date().toISOString();
-    const opKey = String((movement as any).operationId || `op-${newId}`).trim();
+    const providedOp = String((movement as any).operationId || "").trim();
+    if (!providedOp) {
+      throw new Error("operationId is required. Retry the same create with the identical operationId to avoid duplicate movements.");
+    }
+    const opKey = providedOp;
     
     const newMov: MaterialMovement = {
       ...(contracted as any),
@@ -1779,28 +1618,20 @@ export class DBService {
         headers,
         body: JSON.stringify({ movement: newMov })
       });
-      if (res.ok) {
-        const resData = await res.json();
-        if (resData.success && resData.movement) {
-          authoritativeMov = resData.movement;
-        }
+      const resData = await res.json().catch(() => ({}));
+      if (!res.ok || !resData.success || !resData.movement) {
+        throw new Error(resData.error || `Failed to create movement (status ${res.status}).`);
       }
-    } catch (apiErr) {
-      console.warn("[MOVEMENTS API] Create movement call failed, falling back to direct write:", apiErr);
+      authoritativeMov = resData.movement;
+    } catch (apiErr: any) {
+      throw new Error(apiErr?.message || 'Server connection unavailable. Movement was not saved.');
     }
 
     if (!authoritativeMov) {
-      if (useRealFirebase && db && auth?.currentUser) {
-        try {
-          await setDoc(doc(db, 'mfr_movements', newId), sanitizeForFirestore(newMov));
-          authoritativeMov = newMov;
-        } catch (err) {
-          handleFirestoreError(err, OperationType.WRITE, `mfr_movements/${newId}`);
-        }
-      }
+      throw new Error('Server connection unavailable. Movement was not saved.');
     }
 
-    const finalMov = authoritativeMov || newMov;
+    const finalMov = authoritativeMov;
 
     // 2. Reconcile Local Cache & Memory with Authoritative Server Result
     const freshMovements = await this.getMovements();
@@ -1813,13 +1644,7 @@ export class DBService {
     setLocalStorageItem('mfr_movements', freshMovements);
     this.setMemCache('mfr_movements', freshMovements);
     
-    // Update Job Card department & status to show pending placement (only if NOT a Dispatch Issue Request)
-    if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
-      await this.updateJobCard(movement.jobCardNo, {
-        status: 'Pending Acceptance',
-        currentDepartment: movement.toDepartment as Department
-      }, userId, userName).catch(() => {});
-    }
+    // Custody department is derived by the movement engine on accept; do not PUT currentDepartment.
 
     // Create Notification for the receiving department
     const isRawStoreReq = movement.isIssueRequest && movement.fromDepartment === 'Raw Material Store';
@@ -1883,7 +1708,11 @@ export class DBService {
           allottedLocation: extraFields?.allottedLocation,
           rackNo: extraFields?.rackNo,
           quantity: extraFields?.quantity,
-          issueStatus: extraFields?.issueStatus
+          acceptQty: extraFields?.quantity,
+          issueStatus: extraFields?.issueStatus,
+          operationId: extraFields?.quantity !== undefined
+            ? `op-accept-${movementId}-${extraFields.quantity}`
+            : `op-accept-${movementId}`
         })
       });
 
@@ -1911,98 +1740,10 @@ export class DBService {
         throw new Error(errJson.error || `Failed to accept cargo (status ${res.status}).`);
       }
     } catch (apiErr: any) {
-      if (apiErr.message && (apiErr.message.includes("authorized") || apiErr.message.includes("session") || apiErr.message.includes("already been accepted") || apiErr.message.includes("not found"))) {
-        throw apiErr;
-      }
-      console.warn("[ACCEPT API] Backend API call failed:", apiErr);
+      throw apiErr instanceof Error ? apiErr : new Error(String(apiErr));
     }
 
-    // Direct Firestore write ONLY when client is actively authenticated in Firebase Auth
-    if (!apiSucceeded && useRealFirebase && db && auth?.currentUser && !this.isOfflineMode()) {
-      try {
-        await runTransaction(db, async (transaction) => {
-          const movRef = doc(db, 'mfr_movements', movementId);
-          const movSnap = await transaction.get(movRef);
-
-          let currentMovData: MaterialMovement;
-          if (movSnap.exists()) {
-            currentMovData = movSnap.data() as MaterialMovement;
-          } else if (localMov) {
-            currentMovData = localMov;
-          } else {
-            throw new Error(`Movement ${movementId} not found in database.`);
-          }
-
-          if (currentMovData.accepted && currentMovData.issueStatus !== 'Rejected') {
-            finalMovement = currentMovData;
-            return;
-          }
-
-          targetJobCardNo = currentMovData.jobCardNo;
-          let jcSnap: any = null;
-          let targetJcRef: any = null;
-
-          if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
-            const jcUpperRef = doc(db, 'mfr_job_cards', targetJobCardNo.toUpperCase());
-            const snapUpper = await transaction.get(jcUpperRef);
-            if (snapUpper.exists()) {
-              jcSnap = snapUpper;
-              targetJcRef = jcUpperRef;
-            } else {
-              const jcAsIsRef = doc(db, 'mfr_job_cards', targetJobCardNo);
-              const snapAsIs = await transaction.get(jcAsIsRef);
-              if (snapAsIs.exists()) {
-                jcSnap = snapAsIs;
-                targetJcRef = jcAsIsRef;
-              }
-            }
-          }
-
-          const isRmIssuing = isRawMaterialStoreIssuingToProduction({
-            ...currentMovData,
-            issueStatus: extraFields?.issueStatus || currentMovData.issueStatus
-          });
-          const updatedMov: MaterialMovement = {
-            ...currentMovData,
-            accepted: isRmIssuing ? false : true,
-            acceptedBy: isRmIssuing ? currentMovData.acceptedBy : (acceptedByName || acceptedByUserId),
-            acceptedDate: isRmIssuing ? currentMovData.acceptedDate : nowIso,
-            modifiedByUserId: acceptedByUserId,
-            modifiedByUserName: acceptedByName,
-            modifiedDate: nowIso,
-            modifiedAction: 'ACCEPT',
-            issueStatus: extraFields?.issueStatus || currentMovData.issueStatus
-          };
-          if (remarks) updatedMov.remarks = remarks;
-          if (extraFields?.quantity !== undefined) updatedMov.quantity = extraFields.quantity;
-          if (extraFields?.allottedLocation !== undefined) updatedMov.allottedLocation = extraFields.allottedLocation;
-          if (extraFields?.rackNo !== undefined) updatedMov.rackNo = extraFields.rackNo;
-
-          finalMovement = updatedMov;
-          transaction.set(movRef, sanitizeForFirestore(updatedMov), { merge: true });
-
-          if (targetJcRef && jcSnap && jcSnap.exists() && shouldUpdateJobOnAccept(updatedMov)) {
-            const jcData = jcSnap.data() as JobCard;
-            const nextVersion = (jcData.version || 1) + 1;
-            const nextStatus: JobCardStatus = nextStatusOnPurchaseAccept(updatedMov.toDepartment) as JobCardStatus;
-            const jcUpdates: Partial<JobCard> = {
-              currentDepartment: updatedMov.toDepartment,
-              status: nextStatus,
-              currentQty: updatedMov.quantity || jcData.currentQty,
-              version: nextVersion,
-              updatedAt: nowIso,
-              updatedBy: acceptedByName || acceptedByUserId
-            };
-            finalJobCardUpdates = jcUpdates;
-            transaction.update(targetJcRef, sanitizeForFirestore(jcUpdates));
-          }
-        });
-      } catch (txnErr) {
-        console.warn("Direct Firestore fallback error:", txnErr);
-      }
-    }
-
-    if (!apiSucceeded && !finalMovement && !this.isOfflineMode()) {
+    if (!apiSucceeded || !finalMovement) {
       throw new Error("Server connection unavailable. Data was not saved.");
     }
 
@@ -2028,21 +1769,14 @@ export class DBService {
     setLocalStorageItem('mfr_movements', currentMovements);
     this.setMemCache('mfr_movements', currentMovements);
 
-    if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-') && shouldUpdateJobOnAccept(updatedMov)) {
+    if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-') && shouldUpdateJobOnAccept(updatedMov) && finalJobCardUpdates) {
       const cards = await this.getJobCards();
       const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === targetJobCardNo.toLowerCase());
       if (cardIdx >= 0) {
         const existingCard = cards[cardIdx];
         const updatedCard = {
           ...existingCard,
-          ...(finalJobCardUpdates || {
-            currentDepartment: updatedMov.toDepartment,
-            status: nextStatusOnPurchaseAccept(updatedMov.toDepartment) as JobCardStatus,
-            currentQty: updatedMov.quantity,
-            version: (existingCard.version || 1) + 1,
-            updatedAt: nowIso,
-            updatedBy: acceptedByName || acceptedByUserId
-          })
+          ...finalJobCardUpdates
         } as JobCard;
         cards[cardIdx] = updatedCard;
         setLocalStorageItem('mfr_job_cards', cards);
@@ -2078,7 +1812,13 @@ export class DBService {
     logMaterialMovementToSheets(updatedMov).catch(err => console.warn('Google Sheets movement log failed:', err));
   }
 
-  static async rejectMovement(movementId: string, rejectedByUserId: string, rejectedByName: string, remarks: string): Promise<void> {
+  static async rejectMovement(
+    movementId: string,
+    rejectedByUserId: string,
+    rejectedByName: string,
+    remarks: string,
+    extra?: { rejectedQty?: number; acceptedQty?: number; operationId?: string }
+  ): Promise<void> {
     const list = await this.getMovements();
     const idx = list.findIndex(m => m.movementId === movementId);
     const localMov = idx >= 0 ? list[idx] : null;
@@ -2096,7 +1836,12 @@ export class DBService {
       const res = await fetch(`${apiBase}/api/movements/${encodeURIComponent(movementId)}/reject`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ remarks })
+        body: JSON.stringify({
+          remarks,
+          rejectedQty: extra?.rejectedQty,
+          acceptedQty: extra?.acceptedQty,
+          operationId: extra?.operationId || `op-reject-${movementId}-${extra?.rejectedQty ?? "full"}-${extra?.acceptedQty || 0}`
+        })
       });
 
       if (res.ok) {
@@ -2104,6 +1849,25 @@ export class DBService {
         if (apiData && apiData.success) {
           apiSucceeded = true;
           finalMovement = apiData.movement;
+          if (apiData.returnMovement) {
+            const currentMovements = await this.getMovements();
+            const ret = apiData.returnMovement as MaterialMovement;
+            const ridx = currentMovements.findIndex(m => m.movementId === ret.movementId);
+            if (ridx >= 0) currentMovements[ridx] = ret;
+            else currentMovements.unshift(ret);
+            setLocalStorageItem('mfr_movements', currentMovements);
+            this.setMemCache('mfr_movements', currentMovements);
+          }
+          if (apiData.jobCard?.jobCardNo) {
+            targetJobCardNo = apiData.jobCard.jobCardNo;
+            const cards = await this.getJobCards();
+            const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === String(apiData.jobCard.jobCardNo).toLowerCase());
+            if (cardIdx >= 0) {
+              cards[cardIdx] = { ...cards[cardIdx], ...apiData.jobCard };
+              setLocalStorageItem('mfr_job_cards', cards);
+              this.setMemCache('mfr_job_cards', cards);
+            }
+          }
         }
       } else {
         const errJson = await res.json().catch(() => ({}));
@@ -2112,79 +1876,10 @@ export class DBService {
         throw new Error(errJson.error || `Failed to reject cargo (status ${res.status}).`);
       }
     } catch (apiErr: any) {
-      if (apiErr.message && (apiErr.message.includes("authorized") || apiErr.message.includes("session"))) {
-        throw apiErr;
-      }
-      console.warn("[REJECT API] Backend API call failed, falling back to direct write:", apiErr);
+      throw apiErr instanceof Error ? apiErr : new Error(String(apiErr));
     }
 
-    // Direct Firestore write ONLY when client is actively authenticated
-    if (!apiSucceeded && useRealFirebase && db && auth?.currentUser && !this.isOfflineMode()) {
-      try {
-        await runTransaction(db, async (transaction) => {
-          const movRef = doc(db, 'mfr_movements', movementId);
-          const movSnap = await transaction.get(movRef);
-
-          let currentMovData: MaterialMovement;
-          if (movSnap.exists()) {
-            currentMovData = movSnap.data() as MaterialMovement;
-          } else if (localMov) {
-            currentMovData = localMov;
-          } else {
-            return;
-          }
-
-          targetJobCardNo = currentMovData.jobCardNo;
-          let jcSnap: any = null;
-          let targetJcRef: any = null;
-
-          if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
-            const jcUpperRef = doc(db, 'mfr_job_cards', targetJobCardNo.toUpperCase());
-            const snapUpper = await transaction.get(jcUpperRef);
-            if (snapUpper.exists()) {
-              jcSnap = snapUpper;
-              targetJcRef = jcUpperRef;
-            } else {
-              const jcAsIsRef = doc(db, 'mfr_job_cards', targetJobCardNo);
-              const snapAsIs = await transaction.get(jcAsIsRef);
-              if (snapAsIs.exists()) {
-                jcSnap = snapAsIs;
-                targetJcRef = jcAsIsRef;
-              }
-            }
-          }
-
-          const updatedMov: MaterialMovement = {
-            ...currentMovData,
-            accepted: false,
-            issueStatus: 'Rejected',
-            remarks: remarks ? `REJECTED: ${remarks}` : (currentMovData.remarks || 'Rejected'),
-            rejectedBy: rejectedByName || rejectedByUserId,
-            rejectedByUserId,
-            rejectedDate: nowIso,
-            modifiedByUserId: rejectedByUserId,
-            modifiedByUserName: rejectedByName,
-            modifiedDate: nowIso,
-            modifiedAction: 'REJECT'
-          };
-          finalMovement = updatedMov;
-          transaction.set(movRef, sanitizeForFirestore(updatedMov), { merge: true });
-
-          if (targetJcRef && jcSnap && jcSnap.exists()) {
-            const jcData = jcSnap.data() as JobCard;
-            transaction.update(targetJcRef, sanitizeForFirestore({
-              status: 'Pending Acceptance' as JobCardStatus,
-              updatedAt: nowIso,
-              updatedBy: rejectedByName || rejectedByUserId
-            }));
-          }
-        });
-      } catch (txnErr) {
-        console.warn("Direct Firestore reject fallback error:", txnErr);
-      }
-    }
-
-    if (!apiSucceeded && !finalMovement && !this.isOfflineMode()) {
+    if (!apiSucceeded || !finalMovement) {
       throw new Error("Server connection unavailable. Data was not saved.");
     }
 
@@ -2213,21 +1908,6 @@ export class DBService {
     setLocalStorageItem('mfr_movements', currentMovements);
     this.setMemCache('mfr_movements', currentMovements);
 
-    if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-')) {
-      const cards = await this.getJobCards();
-      const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === targetJobCardNo.toLowerCase());
-      if (cardIdx >= 0) {
-        cards[cardIdx] = {
-          ...cards[cardIdx],
-          status: 'Pending Acceptance',
-          updatedAt: nowIso,
-          updatedBy: rejectedByName || rejectedByUserId
-        };
-        setLocalStorageItem('mfr_job_cards', cards);
-        this.setMemCache('mfr_job_cards', cards);
-      }
-    }
-
     await this.logAction(
       rejectedByUserId, 
       rejectedByName, 
@@ -2251,121 +1931,56 @@ export class DBService {
     }
   }
 
-  static async updateMovement(movementId: string, quantity: number, remarks: string, userId: string, userName: string): Promise<void> {
-    const list = await this.getMovements();
-    const idx = list.findIndex(m => m.movementId === movementId);
-    if (idx === -1) throw new Error(`Movement ${movementId} not found`);
-    const mov = list[idx];
-    const oldQty = mov.quantity;
-    
-    mov.quantity = quantity;
-    if (remarks) mov.remarks = remarks;
-    
-    mov.modifiedByUserId = userId;
-    mov.modifiedByUserName = userName;
-    mov.modifiedDate = new Date().toISOString();
-    mov.modifiedAction = 'EDIT';
-
-    // 1. Update Local Storage offline cache first
-    setLocalStorageItem('mfr_movements', list);
-    this.setMemCache('mfr_movements', list);
-
-    // 2. Write to physical Firestore
-    if (useRealFirebase && db && auth?.currentUser) {
-      try {
-        await setDoc(doc(db, 'mfr_movements', movementId), sanitizeForFirestore(mov));
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `mfr_movements/${movementId}`);
-      }
-    }
-
-    // Also update current quantity on the job card if it is currently in the active department
-    const cards = await this.getJobCards();
-    const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
-    if (cardIdx >= 0) {
-      const card = cards[cardIdx];
-      if (card.currentDepartment === mov.toDepartment) {
-        await this.updateJobCard(mov.jobCardNo, {
-          currentQty: quantity
-        }, userId, userName);
-      }
-    }
-
-    await this.logAction(
-      userId, 
-      userName, 
-      'MODIFY_MOVEMENT', 
-      `User ${userName} (ID: ${userId}) modified material movement ${movementId} (Job Card ${mov.jobCardNo}): changed quantity from ${oldQty} KG to ${quantity} KG. Remarks: "${remarks}"`
-    );
-
-    // Log to Google Sheets
-    logMaterialMovementToSheets(mov).catch(err => console.warn('Google Sheets movement log failed:', err));
+  static async updateMovement(_movementId: string, _quantity: number, _remarks: string, _userId: string, _userName: string): Promise<void> {
+    denyDirectMovementUpdate();
   }
 
-  static async deleteMovement(movementId: string, userId: string, userName: string): Promise<void> {
-    const list = await this.getMovements();
-    const idx = list.findIndex(m => m.movementId === movementId);
-    if (idx === -1) throw new Error(`Movement ${movementId} not found`);
-    const mov = list[idx];
-
-    // Track deletion info before we delete it
-    mov.deletedByUserId = userId;
-    mov.deletedByUserName = userName;
-    mov.deletedDate = new Date().toISOString();
-
-    // 1. Remove from Local Storage list
-    list.splice(idx, 1);
-    setLocalStorageItem('mfr_movements', list);
-    this.setMemCache('mfr_movements', list);
-
-    // 2. Write to physical Firestore
-    if (useRealFirebase && db && auth?.currentUser) {
-      try {
-        await deleteDoc(doc(db, 'mfr_movements', movementId));
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, `mfr_movements/${movementId}`);
-      }
-    }
-
-    await this.logAction(
-      userId, 
-      userName, 
-      'DELETE_MOVEMENT', 
-      `User ${userName} (ID: ${userId}) deleted material movement ${movementId} for Job Card ${mov.jobCardNo}: Removed transit record of ${mov.quantity} KG from ${mov.fromDepartment} to ${mov.toDepartment}.`
-    );
+  static async deleteMovement(_movementId: string, _userId: string, _userName: string): Promise<void> {
+    denyDirectMovementDelete();
   }
 
   static async revertMovement(movementId: string, userId: string, userName: string): Promise<void> {
-    const list = await this.getMovements();
-    const mov = list.find(m => m.movementId === movementId);
-    if (!mov) throw new Error(`Movement ${movementId} not found or already reverted.`);
-
-    // 1. Delete movement record first
-    await this.deleteMovement(movementId, userId, userName);
-
-    // 2. Restore job card state to previous state if applicable
-    if (!mov.isIssueRequest && !mov.jobCardNo.startsWith('STOCK-IN-')) {
-      const remainingList = await this.getMovements();
-      const otherMovs = remainingList.filter(m => m.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
-      
-      const restoredDept: Department | 'Completed' = otherMovs.length > 0 
-        ? (otherMovs[0].toDepartment as Department | 'Completed') 
-        : (mov.fromDepartment as Department | 'Completed');
-      const isCompleted = (restoredDept as string) === 'Completed';
-      const restoredStatus: JobCardStatus = isCompleted ? 'Completed' : 'In Process';
-
-      await this.updateJobCard(mov.jobCardNo, {
-        currentDepartment: restoredDept,
-        status: restoredStatus,
-        completed: isCompleted
-      }, userId, userName);
+    const apiBase = getApiBaseUrl();
+    const headers = await this.getAuthHeaders();
+    const res = await fetch(`${apiBase}/api/movements/${encodeURIComponent(movementId)}/undo`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        operationId: `op-undo-${movementId}`,
+        remarks: `Undo requested by ${userName}`
+      })
+    });
+    const apiData = await res.json().catch(() => ({}));
+    if (!res.ok || !apiData.success) {
+      throw new Error(apiData.error || `Failed to undo movement (status ${res.status}).`);
     }
-
+    const list = await this.getMovements();
+    if (apiData.movement) {
+      const idx = list.findIndex(m => m.movementId === movementId);
+      if (idx >= 0) list[idx] = apiData.movement;
+      else list.unshift(apiData.movement);
+    }
+    if (apiData.returnMovement) {
+      const ridx = list.findIndex(m => m.movementId === apiData.returnMovement.movementId);
+      if (ridx >= 0) list[ridx] = apiData.returnMovement;
+      else list.unshift(apiData.returnMovement);
+    }
+    setLocalStorageItem('mfr_movements', list);
+    this.setMemCache('mfr_movements', list);
+    if (apiData.jobCard?.jobCardNo) {
+      const cards = await this.getJobCards();
+      const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === String(apiData.jobCard.jobCardNo).toLowerCase());
+      if (cardIdx >= 0) {
+        cards[cardIdx] = { ...cards[cardIdx], ...apiData.jobCard };
+        setLocalStorageItem('mfr_job_cards', cards);
+        this.setMemCache('mfr_job_cards', cards);
+      }
+    }
     await this.logAction(
       userId,
       userName,
       'UNDO_TRANSFER',
-      `Reverted material transfer ${movementId} for Job Card ${mov.jobCardNo} (${mov.quantity} KG from ${mov.fromDepartment} to ${mov.toDepartment})`
+      `Undid pending material transfer ${movementId} via reversal lineage (history preserved).`
     );
   }
 
@@ -2784,6 +2399,10 @@ export class DBService {
   }
 
   static async addToSyncQueue(action: string, description: string, operations: SyncQueueOperation[]): Promise<void> {
+    const ledgerOps = (operations || []).filter((op) => isLedgerCollectionBlockedFromClientSync(op.collection));
+    if (ledgerOps.length > 0) {
+      return;
+    }
     const queue = this.getSyncQueue();
     // Avoid duplicates of pending identical items
     const isDup = queue.some(item => 
@@ -2834,6 +2453,9 @@ export class DBService {
     if (useRealFirebase && db) {
       try {
         for (const op of item.operations) {
+          if (isLedgerCollectionBlockedFromClientSync(op.collection)) {
+            continue;
+          }
           if (op.collection === 'mfr_users') {
             // Guard: Never allow queued operations to recreate a deleted/tombstoned user
             const tombDocSnap = await getDoc(doc(db, 'mfr_deleted_users', op.docId)).catch(() => null);
@@ -3217,52 +2839,46 @@ export class DBService {
   }
 
   static async restoreDatabaseDump(dump: Record<string, any>, userId: string, userName: string): Promise<void> {
+    await this.verifyAdmin(userId);
+
+    const users = await this.getUsers();
+    const actor = users.find(u => u.userId === userId);
+    const gate = authorizeDatabaseRestore(actor);
+    if (!gate.ok) {
+      throw new Error(gate.error);
+    }
+
     if (!dump || typeof dump !== 'object') {
       throw new Error("Invalid backup payload");
     }
 
-    // Restore to local storage caches first
     if (Array.isArray(dump.users)) setLocalStorageItem('mfr_users', dump.users);
-    if (Array.isArray(dump.jobCards)) setLocalStorageItem('mfr_job_cards', dump.jobCards);
-    if (Array.isArray(dump.movements)) setLocalStorageItem('mfr_movements', dump.movements);
     if (Array.isArray(dump.notifications)) setLocalStorageItem('mfr_notifications', dump.notifications);
     if (Array.isArray(dump.auditLogs)) setLocalStorageItem('mfr_audit_logs', dump.auditLogs);
     if (Array.isArray(dump.items)) setLocalStorageItem('mfr_items', dump.items);
     if (dump.companyConfig) setLocalStorageItem('mfr_company_config', dump.companyConfig);
 
-    // If live firebase is active, we can write them physically to Firestore as well!
+    const skippedLedger = Array.isArray(dump.jobCards) || Array.isArray(dump.movements);
+
     if (useRealFirebase && db) {
       try {
-        // Write company config
         if (dump.companyConfig) {
           await setDoc(doc(db, 'mfr_company_config', 'global'), dump.companyConfig);
         }
-        // Write users
         if (Array.isArray(dump.users)) {
           for (const u of dump.users) {
-            await setDoc(doc(db, 'mfr_users', u.userId), u);
+            if (u?.userId) await setDoc(doc(db, 'mfr_users', u.userId), u);
           }
         }
-        // Write job cards
-        if (Array.isArray(dump.jobCards)) {
-          for (const j of dump.jobCards) {
-            await setDoc(doc(db, 'mfr_job_cards', j.jobCardNo), j);
-          }
-        }
-        // Write movements
-        if (Array.isArray(dump.movements)) {
-          for (const m of dump.movements) {
-            await setDoc(doc(db, 'mfr_movements', m.movementId), m);
-          }
-        }
-        // Write items
         if (Array.isArray(dump.items)) {
           for (const i of dump.items) {
-            await setDoc(doc(db, 'mfr_items', i.id), i);
+            if (i?.id && !isLedgerRestoreCollection('mfr_items')) {
+              await setDoc(doc(db, 'mfr_items', i.id), i);
+            }
           }
         }
       } catch (err) {
-        console.warn("Could not sync all backup collections to physical Firestore:", err);
+        console.warn("Could not sync non-ledger backup collections to Firestore:", err);
       }
     }
 
@@ -3270,7 +2886,7 @@ export class DBService {
       userId,
       userName,
       'RESTORE_DATABASE',
-      `Database restored from backup timestamped ${dump.exportedAt || 'unknown'}`
+      `Non-ledger collections restored from backup timestamped ${dump.exportedAt || 'unknown'}.${skippedLedger ? " " + RESTORE_LEDGER_CLIENT_BLOCKED_MESSAGE : ""}`
     );
   }
 
@@ -3626,7 +3242,7 @@ export class DBService {
 
       // 4. Standard Department Incoming Transfer (Authoritative Department Inbox)
       // Belongs strictly to RECEIVING DEPARTMENT, regardless of creator user ID
-      return m.toDepartment === department && !m.accepted;
+      return isPendingAcceptanceMovement(m) && m.toDepartment === department;
     });
   }
 

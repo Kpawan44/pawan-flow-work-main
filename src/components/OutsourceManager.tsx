@@ -7,6 +7,7 @@ import {
   Department
 } from '../types';
 import { DBService } from '../lib/firebase';
+import { ensureClientMovementOperationId } from '../hardening/movementOperationId';
 import { 
   Truck, 
   PackageCheck, 
@@ -400,15 +401,17 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
               currentUser?.name || 'Dispatch Person'
             );
 
-            await DBService.createMovement(
-              {
+            const outsourceSend: Record<string, any> = {
                 jobCardNo: item.jobCardNo,
                 fromDepartment: fromDept,
                 toDepartment: 'Purchase',
                 quantity: item.orderQty || card?.currentQty || 0,
                 transferBy: currentUser?.name || 'Outsource Initiator',
                 remarks: `Transferred internal job card to Purchase for External Process (${item.processType || mainItem.processType}). Outsource Order ID: ${newOrder.orderId}`
-              },
+              };
+            ensureClientMovementOperationId(outsourceSend);
+            await DBService.createMovement(
+              outsourceSend as any,
               currentUser?.userId || 'u-dispatch',
               currentUser?.name || 'Dispatch Person'
             );
@@ -665,15 +668,17 @@ export const OutsourceManager: React.FC<OutsourceManagerProps> = ({
       }
 
       // Create material movement / log transfer from Purchase to target department
-      await DBService.createMovement(
-        {
+      const outsourceReceive: Record<string, any> = {
           jobCardNo: receiptModalOrder.jobCardNo || receiptModalOrder.orderId,
           fromDepartment: 'Purchase',
           toDepartment: targetDepartmentAfterReceipt,
           quantity: receivedQty,
           transferBy: currentUser?.name || 'Purchase Staff',
           remarks: `Outsource Material Received from ${receiptModalOrder.supplierName || 'Vendor'} (${receivedMaterialType}). Sent to ${targetDepartmentAfterReceipt}. Challan: ${receivedChallanNo}`
-        },
+        };
+      ensureClientMovementOperationId(outsourceReceive);
+      await DBService.createMovement(
+        outsourceReceive as any,
         currentUser?.userId || 'u-purchase',
         currentUser?.name || 'Purchase Received'
       );

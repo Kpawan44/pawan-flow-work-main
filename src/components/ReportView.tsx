@@ -23,6 +23,7 @@ import {
 import { JobCard, MaterialMovement, Department, UserProfile, ProcessTransfer } from '../types';
 import { getJobCardProcessMetrics, getJobCardDepartmentPending, getWireScrapQty } from '../lib/metrics';
 import { isHeldInIncomingStore } from '../hardening/process1Purchase';
+import { remainingAtDepartment } from '../hardening/process2Manufacturing';
 import PendingBreakdownModal from './PendingBreakdownModal';
 import RawMaterialReportView from './RawMaterialReportView';
 import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
@@ -293,7 +294,7 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
             itemName: c.itemName,
             itemCode: c.itemCode || 'N/A',
             materialType: c.materialType || c.processType || 'Purchase Inward',
-            receivedQty: c.currentQty || c.orderQty || 0,
+            receivedQty: remainingAtDepartment(c, movements, 'Incoming Store'),
             unit: c.unit || 'KG',
             billNo: c.purchaseDetails?.billNo || 'N/A',
             locationBin: latestMov?.allottedLocation || c.storeDetails?.locationBin || 'Purchase Buffer',

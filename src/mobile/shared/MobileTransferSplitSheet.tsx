@@ -14,13 +14,14 @@ import {
   Sliders
 } from 'lucide-react';
 import { JobCard, MaterialMovement, Department, UserProfile } from '../../types';
-import { getJobCardProcessMetrics } from '../../lib/metrics';
+import { assertHeatTreatmentRouting, process2SendAvailableQty, remainingAtDepartment } from '../../hardening/process2Manufacturing';
 
 interface SplitBatchEntry {
   id: string;
   quantity: number;
   toDepartment: Department | 'Completed';
   remarks?: string;
+  operationId: string;
 }
 
 interface MobileTransferSplitSheetProps {
@@ -35,6 +36,7 @@ interface MobileTransferSplitSheetProps {
     toDepartment: Department | 'Completed';
     quantity: number;
     remarks?: string;
+    operationId?: string;
   }[]) => Promise<void> | void;
 }
 
@@ -74,26 +76,18 @@ export const MobileTransferSplitSheet: React.FC<MobileTransferSplitSheetProps> =
     return 'Completed';
   };
 
-  // Compute available mass at source station using authoritative metrics
+  const mintSplitOperationId = () =>
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? `op-msplit-${crypto.randomUUID()}`
+      : `op-msplit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
   const availableMass = useMemo(() => {
     if (!jobCard) return 0;
-    const m = getJobCardProcessMetrics(jobCard, movements);
-    if (fromDept === 'Production') return m.qtyRemainingAtProd > 0 ? m.qtyRemainingAtProd : jobCard.orderQty;
-    if (fromDept === 'Heat Treatment') {
-      const remainingAtHt = Math.max(0, m.qtyReceivedFromProd - m.qtyRoutedToPlating - m.htRejections);
-      return remainingAtHt > 0 ? remainingAtHt : jobCard.orderQty;
-    }
-    if (fromDept === 'Plating') return m.qtyRemainingAtPlating > 0 ? m.qtyRemainingAtPlating : jobCard.orderQty;
-    if (fromDept === 'Packing') return m.qtyRemainingAtPacking > 0 ? m.qtyRemainingAtPacking : jobCard.orderQty;
-    if (fromDept === 'Store') return m.qtyRemainingInStock > 0 ? m.qtyRemainingInStock : jobCard.orderQty;
-
-    const totalTransferred = movements
-      .filter(mov => mov.jobCardNo.toLowerCase() === jobCard.jobCardNo.toLowerCase())
-      .reduce((acc, curr) => acc + curr.quantity, 0);
-    return Math.max(0, jobCard.orderQty - totalTransferred);
+    const cap = process2SendAvailableQty(fromDept, jobCard, movements, { compulsory: true });
+    if (cap !== null) return cap;
+    return remainingAtDepartment(jobCard, movements, fromDept);
   }, [jobCard, movements, fromDept]);
 
-  // Initialize single entry when modal opens or jobCard changes
   useEffect(() => {
     if (!isOpen || !jobCard) return;
     setErrorMessage(null);
@@ -105,14 +99,16 @@ export const MobileTransferSplitSheet: React.FC<MobileTransferSplitSheetProps> =
     setFromDept(initialFrom);
 
     const nextTarget = getNextLogicalDepartment(initialFrom, !!jobCard.heatTreatmentRequired);
-    const initialQty = availableMass > 0 ? availableMass : jobCard.orderQty;
+    const ledgerQty = process2SendAvailableQty(initialFrom, jobCard, movements, { compulsory: true });
+    const initialQty = ledgerQty === null ? remainingAtDepartment(jobCard, movements, initialFrom) : ledgerQty;
 
     setSplitEntries([
       {
         id: `split-${Date.now()}-0`,
         quantity: initialQty,
         toDepartment: nextTarget,
-        remarks: ''
+        remarks: '',
+        operationId: mintSplitOperationId()
       }
     ]);
   }, [isOpen, jobCard]);
@@ -129,7 +125,7 @@ export const MobileTransferSplitSheet: React.FC<MobileTransferSplitSheetProps> =
     const targetQty = Math.round((availableMass * pct) / 100);
     if (splitEntries.length === 0) {
       const nextTarget = getNextLogicalDepartment(fromDept, !!jobCard.heatTreatmentRequired);
-      setSplitEntries([{ id: `split-${Date.now()}`, quantity: targetQty, toDepartment: nextTarget }]);
+      setSplitEntries([{ id: `split-${Date.now()}`, quantity: targetQty, toDepartment: nextTarget, operationId: mintSplitOperationId() }]);
     } else {
       setSplitEntries(prev => {
         const copy = [...prev];
@@ -153,7 +149,8 @@ export const MobileTransferSplitSheet: React.FC<MobileTransferSplitSheetProps> =
         id: `split-${Date.now()}-${prev.length}`,
         quantity: Math.max(0, remainingMass),
         toDepartment: nextTarget,
-        remarks: ''
+        remarks: '',
+        operationId: mintSplitOperationId()
       }
     ]);
   };
@@ -177,6 +174,13 @@ export const MobileTransferSplitSheet: React.FC<MobileTransferSplitSheetProps> =
       setErrorMessage(`Invalid split mass. Total split (${totalSplitQuantity} KG) cannot exceed available (${availableMass} KG).`);
       return;
     }
+    for (const e of splitEntries) {
+      const htGate = assertHeatTreatmentRouting(jobCard, fromDept, String(e.toDepartment));
+      if (!htGate.ok) {
+        setErrorMessage(htGate.error || "Invalid department routing.");
+        return;
+      }
+    }
 
     setIsProcessing(true);
     setErrorMessage(null);
@@ -186,7 +190,8 @@ export const MobileTransferSplitSheet: React.FC<MobileTransferSplitSheetProps> =
         fromDepartment: fromDept,
         toDepartment: e.toDepartment,
         quantity: Number(e.quantity),
-        remarks: e.remarks?.trim() || `Inter-department transfer of ${e.quantity} KG from ${fromDept} to ${e.toDepartment}.`
+        remarks: e.remarks?.trim() || `Inter-department transfer of ${e.quantity} KG from ${fromDept} to ${e.toDepartment}.`,
+        operationId: e.operationId
       }));
 
       await onSubmitTransfer(payload);

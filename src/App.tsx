@@ -70,7 +70,9 @@ import DashboardStats from './components/DashboardStats';
 import TimelineVisual from './components/TimelineVisual';
 import JobStatusBadge from './components/JobStatusBadge';
 import ConnectivityHealthWidget from './components/ConnectivityHealthWidget';
-import { getJobCardProcessMetrics, getAcceptedRawMaterialIssuedQty, getJobCardDepartmentPending } from './lib/metrics';
+import { getJobCardProcessMetrics, getJobCardDepartmentPending } from './lib/metrics';
+import { assertHeatTreatmentRouting, process2SendAvailableQty } from './hardening/process2Manufacturing';
+import { ensureClientMovementOperationId } from './hardening/movementOperationId';
 
 // Dynamic code-split lazy imports for heavy screens & modals
 const DepartmentOperations = lazy(() => import('./components/DepartmentOperations'));
@@ -1514,28 +1516,19 @@ export default function App() {
   };
 
   const validateMovementProductionLimit = (mov: any) => {
-    if (mov.fromDepartment === 'Production') {
-      const isRawMaterialCompulsory = companyConfig?.requireRawMaterialForProduction !== false;
-      if (!isRawMaterialCompulsory) {
-        // Raw material requirement for production is disabled by Super Admin
-        return;
-      }
-      const job = jobCards.find(jc => jc.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
-      if (job && job.processType !== 'Purchase') {
-        const issuedQty = getAcceptedRawMaterialIssuedQty(job, movements);
-        if (issuedQty <= 0) {
-          throw new Error(`Production cannot be started or moved because raw material has not been issued yet for Job Card ${job.jobCardNo}.`);
-        }
-
-        const totalMovedFromProdBefore = movements
-          .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
-          .reduce((sum, m) => sum + m.quantity, 0);
-        const totalProducedIncludingCurrent = totalMovedFromProdBefore + mov.quantity;
-
-        if (totalProducedIncludingCurrent > issuedQty) {
-          throw new Error(`Combined production quantity (${totalProducedIncludingCurrent} KG) cannot exceed the issued raw material quantity (${issuedQty} KG). (Already recorded: ${totalMovedFromProdBefore} KG, trying to move: ${mov.quantity} KG)`);
-        }
-      }
+    const job = jobCards.find(jc => jc.jobCardNo.toLowerCase() === String(mov.jobCardNo || '').toLowerCase());
+    const htGate = assertHeatTreatmentRouting(job, mov.fromDepartment, mov.toDepartment, {
+      isIssueRequest: mov.isIssueRequest,
+      isRejectionReturn: Boolean(mov.processDetails?.isRejectionReturn)
+    });
+    if (!htGate.ok) {
+      throw new Error(htGate.error);
+    }
+    const cap = process2SendAvailableQty(mov.fromDepartment, job, movements, {
+      compulsory: companyConfig?.requireRawMaterialForProduction !== false
+    });
+    if (cap !== null && Number(mov.quantity) > cap) {
+      throw new Error(`Cannot transfer ${mov.quantity}. Only ${cap} is available in ${mov.fromDepartment}.`);
     }
   };
 
@@ -1570,6 +1563,7 @@ export default function App() {
       if (Array.isArray(movOrMovs)) {
         const createdMovs: MaterialMovement[] = [];
         for (const mov of movOrMovs) {
+          ensureClientMovementOperationId(mov);
           validateMovementProductionLimit(mov);
           const created = await DBService.createMovement(mov, currentUser.userId, currentUser.name);
           createdMovs.push(created);
@@ -1596,6 +1590,7 @@ export default function App() {
           }
         );
       } else {
+        ensureClientMovementOperationId(movOrMovs);
         validateMovementProductionLimit(movOrMovs);
         const created = await DBService.createMovement(movOrMovs, currentUser.userId, currentUser.name);
         refreshAllStates();
@@ -1705,6 +1700,7 @@ export default function App() {
 
       const createdMovs: MaterialMovement[] = [];
       for (const t of transfers) {
+        ensureClientMovementOperationId(t);
         const created = await DBService.createMovement(t, currentUser.userId, currentUser.name);
         createdMovs.push(created);
       }
@@ -1753,10 +1749,14 @@ export default function App() {
     }
   };
 
-  const handleRejectMovement = async (movementId: string, remarks: string) => {
+  const handleRejectMovement = async (
+    movementId: string,
+    remarks: string,
+    extra?: { rejectedQty?: number; acceptedQty?: number }
+  ) => {
     if (!currentUser) return;
     try {
-      await DBService.rejectMovement(movementId, currentUser.userId, currentUser.name, remarks);
+      await DBService.rejectMovement(movementId, currentUser.userId, currentUser.name, remarks, extra);
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to reject movement", err);
@@ -4408,6 +4408,7 @@ export default function App() {
             jobCard={quickTransferJob}
             movements={movements}
             currentUser={currentUser}
+            companyConfig={companyConfig}
             onSubmit={handleCreateMovement}
           />
         </Suspense>
@@ -4422,6 +4423,7 @@ export default function App() {
             selectedJobCards={jobCards.filter(j => selectedJobCardNos.includes(j.jobCardNo))}
             movements={movements}
             currentUser={currentUser}
+            companyConfig={companyConfig}
             onSubmit={handleBulkTransfer}
           />
         </Suspense>

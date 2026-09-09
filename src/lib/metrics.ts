@@ -1,5 +1,46 @@
 import { JobCard, MaterialMovement, ProcessTransfer } from '../types';
-import { storeAuthoritativeOnHand, getEffectiveDepartmentRejectionQty } from '../hardening/process2Manufacturing';
+import {
+  storeAuthoritativeOnHand,
+  getEffectiveDepartmentRejectionQty,
+  remainingAtDepartment,
+  remainingAtProduction,
+  creditedInboundQty,
+  process2SendAvailableQty,
+  getCumulativeDispatchedQty
+} from '../hardening/process2Manufacturing';
+
+function isLiveMovement(m: MaterialMovement | any): boolean {
+  if (!m) return false;
+  if (m.undone === true) return false;
+  if (m.processDetails?.isUndoReversal) return false;
+  if (m.deletedDate || m.isDeleted) return false;
+  return true;
+}
+
+function creditedToDepartment(cardMovements: MaterialMovement[], toDepartment: string): number {
+  return cardMovements
+    .filter((m) => isLiveMovement(m) && m.toDepartment === toDepartment)
+    .reduce((sum, m) => sum + creditedInboundQty(m), 0);
+}
+
+function routedToDepartment(cardMovements: MaterialMovement[], toDepartment: string): number {
+  return cardMovements
+    .filter((m) => isLiveMovement(m) && m.toDepartment === toDepartment)
+    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
+}
+
+export function jobCardLedgerWipQty(
+  j: JobCard,
+  movementsList: MaterialMovement[] = [],
+  opts?: { compulsory?: boolean }
+): number {
+  if (!j) return 0;
+  const dept = String(j.currentDepartment || "");
+  if (!dept || dept === "Completed") return 0;
+  const cap = process2SendAvailableQty(dept, j, movementsList, opts);
+  if (cap !== null) return cap;
+  return remainingAtDepartment(j, movementsList, dept);
+}
 
 export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMovement[] = [], processTransfersList: ProcessTransfer[] = []) {
   if (!j) return {
@@ -24,104 +65,51 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
   };
 
   const targetJc = String(j.jobCardNo || '').toLowerCase();
-  // Filter movements for this job card
   const cardMovements = (Array.isArray(movementsList) ? movementsList : []).filter(m => m && String(m.jobCardNo || '').toLowerCase() === targetJc);
-  const acceptedMovements = cardMovements.filter(m => m.accepted);
+  const liveMovements = cardMovements.filter(isLiveMovement);
 
-  // Process Transfers for this job card (Store -> Repacking / Replating)
   const cardTransfers = (Array.isArray(processTransfersList) ? processTransfersList : []).filter(t => t && String(t.jobCardNo || '').toLowerCase() === targetJc);
   const activeProcessTransfers = cardTransfers.filter(t => t.status !== 'Returned to Store');
   const qtyInProcessTransfers = activeProcessTransfers.reduce((sum, t) => sum + (t.quantity || 0), 0);
   const returnedTransfers = cardTransfers.filter(t => t.status === 'Returned to Store');
   const qtyReturnedFromProcess = returnedTransfers.reduce((sum, t) => sum + (t.returnedQty !== undefined ? t.returnedQty : t.quantity), 0);
 
+  const htRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Heat Treatment');
+  const platingRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Plating');
+  const packingRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Packing');
+
+  const qtyReceivedAtPlating = creditedToDepartment(liveMovements, 'Plating');
+  const qtyRoutedToPacking = routedToDepartment(liveMovements, 'Packing');
+  const qtyRemainingAtPlating = remainingAtDepartment(j, cardMovements, 'Plating');
+
+  const qtyReceivedAtPacking = creditedToDepartment(liveMovements, 'Packing');
+  const qtyRoutedToStore = routedToDepartment(liveMovements, 'Store');
+  const qtyRemainingAtPacking = remainingAtDepartment(j, cardMovements, 'Packing');
+
+  const qtyReceivedAtStore = creditedToDepartment(liveMovements, 'Store');
+  const qtyDispatched = getCumulativeDispatchedQty(j, cardMovements);
+  const qtyRemainingInStock = Math.max(0, storeAuthoritativeOnHand(j, cardMovements) - qtyInProcessTransfers);
+  const qtyReceivedAtRawStore = creditedToDepartment(liveMovements, 'Raw Material Store');
+  const qtyRoutedToPlating = routedToDepartment(liveMovements, 'Plating');
+
   if (j.processType === 'Purchase') {
-    const purchaseMovements = cardMovements.filter(m => m.fromDepartment === 'Purchase');
-    let qtyReceivedFromPurchase = purchaseMovements.reduce((sum, m) => sum + m.quantity, 0);
-    if (qtyReceivedFromPurchase === 0 && j.currentDepartment !== 'Purchase') {
-      qtyReceivedFromPurchase = j.purchaseDetails?.receivedQty || j.orderQty;
-    }
-
-    // HT (Heat Treatment) stage
-    let qtyReceivedAtHT = acceptedMovements
-      .filter(m => m.toDepartment === 'Heat Treatment')
-      .reduce((sum, m) => sum + m.quantity, 0);
-    if (qtyReceivedAtHT === 0 && j.currentDepartment === 'Heat Treatment') {
-      qtyReceivedAtHT = qtyReceivedFromPurchase;
-    }
-
-    const htRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Heat Treatment');
-
-    let qtyRoutedToPlating = acceptedMovements
-      .filter(m => m.toDepartment === 'Plating')
-      .reduce((sum, m) => sum + m.quantity, 0);
-
-    // Plating stage
-    let qtyReceivedAtPlating = acceptedMovements
-      .filter(m => m.toDepartment === 'Plating')
-      .reduce((sum, m) => sum + m.quantity, 0);
-    
-    // If no movements but in Plating (or later), fallback
-    if (qtyReceivedAtPlating === 0) {
-      if (j.currentDepartment === 'Plating') {
-        qtyReceivedAtPlating = qtyReceivedAtHT > 0 ? Math.max(0, qtyReceivedAtHT - htRejections) : qtyReceivedFromPurchase;
-      } else if (j.currentDepartment !== 'Purchase' && j.currentDepartment !== 'Heat Treatment') {
-        qtyReceivedAtPlating = qtyReceivedAtHT > 0 ? Math.max(0, qtyReceivedAtHT - htRejections) : qtyReceivedFromPurchase;
-      }
-    }
-
-    const qtyRoutedToPacking = acceptedMovements
-      .filter(m => m.toDepartment === 'Packing')
-      .reduce((sum, m) => sum + m.quantity, 0);
-
-    const platingRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Plating');
-    const qtyRemainingAtPlating = Math.max(0, qtyReceivedAtPlating - qtyRoutedToPacking - platingRejections);
-
-    // Packing stage
-    let qtyReceivedAtPacking = acceptedMovements
-      .filter(m => m.toDepartment === 'Packing')
-      .reduce((sum, m) => sum + m.quantity, 0);
-    if (qtyReceivedAtPacking === 0 && (j.currentDepartment === 'Packing' || j.currentDepartment === 'Store' || j.currentDepartment === 'Completed')) {
-      qtyReceivedAtPacking = Math.max(0, qtyReceivedAtPlating - platingRejections);
-    }
-
-    const qtyReceivedAtStoreFromPurchase = acceptedMovements
-      .filter(m => m.toDepartment === 'Store' && m.fromDepartment === 'Purchase')
-      .reduce((sum, m) => sum + m.quantity, 0);
-
-    const qtyReceivedAtStoreFromPacking = acceptedMovements
-      .filter(m => m.toDepartment === 'Store' && m.fromDepartment === 'Packing')
-      .reduce((sum, m) => sum + m.quantity, 0);
-
-    const qtyReceivedAtStore = qtyReceivedAtStoreFromPacking > 0 
-      ? qtyReceivedAtStoreFromPacking 
-      : (qtyReceivedAtStoreFromPurchase > 0 
-          ? qtyReceivedAtStoreFromPurchase 
-          : (j.currentDepartment === 'Store' ? qtyReceivedFromPurchase : 0));
-
-    const qtyDispatched = j.dispatchDetails?.dispatchQty || (j.completed ? j.currentQty : 0);
-    const qtyRemainingInStock = Math.max(0, storeAuthoritativeOnHand(j, cardMovements) - qtyInProcessTransfers);
-
-    const qtyReceivedAtRawStore = acceptedMovements
-      .filter(m => m.toDepartment === 'Raw Material Store')
-      .reduce((sum, m) => sum + m.quantity, 0);
+    const qtyReceivedFromPurchase = liveMovements
+      .filter((m) => m.fromDepartment === 'Purchase')
+      .reduce((sum, m) => sum + creditedInboundQty(m), 0);
 
     return {
-      qtyReceivedFromProd: qtyReceivedFromPurchase, // Map Purchase to Prod so it works with general UI
+      qtyReceivedFromProd: qtyReceivedFromPurchase,
       qtyRoutedToPlating,
-      qtyRemainingAtProd: Math.max(0, qtyReceivedFromPurchase - qtyReceivedAtHT - (j.purchaseDetails?.rejectionQty || 0)),
+      qtyRemainingAtProd: remainingAtDepartment(j, cardMovements, 'Purchase'),
       htRejections,
-
       qtyReceivedAtPlating,
       qtyRoutedToPacking,
       qtyRemainingAtPlating,
       platingRejections,
-
       qtyReceivedAtPacking,
-      qtyRoutedToStore: qtyReceivedAtStoreFromPacking,
-      qtyRemainingAtPacking: Math.max(0, qtyReceivedAtPacking - qtyReceivedAtStoreFromPacking - (j.packingDetails?.rejectionQty || 0)),
-      packingRejections: j.packingDetails?.rejectionQty || 0,
-
+      qtyRoutedToStore,
+      qtyRemainingAtPacking,
+      packingRejections,
       qtyReceivedAtStore,
       qtyDispatched,
       qtyInProcessTransfers,
@@ -131,118 +119,31 @@ export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMove
     };
   }
 
-  // --- PRODUCTION / HEAT TREATMENT ---> PLATING
-  // Received from production (actual weight produced)
-  const prodMovements = cardMovements.filter(m => m.fromDepartment === 'Production');
-  let qtyReceivedFromProd = prodMovements.reduce((sum, m) => sum + m.quantity, 0);
-  if (qtyReceivedFromProd === 0 && j.currentDepartment !== 'Production') {
-    qtyReceivedFromProd = j.currentQty;
-  }
-  
-  // Routed to plating (how much we will send / have sent for plating)
-  let qtyRoutedToPlating = j.customRoutedToPlating !== undefined && j.customRoutedToPlating !== null
-    ? j.customRoutedToPlating
-    : cardMovements
-        .filter(m => m.toDepartment === 'Plating')
-        .reduce((sum, m) => sum + m.quantity, 0);
+  const qtyReceivedFromProd = liveMovements
+    .filter((m) => m.fromDepartment === 'Production' && !m.processDetails?.isRejectionReturn)
+    .reduce((sum, m) => sum + Number(m.accepted ? creditedInboundQty(m) : m.quantity || 0), 0);
 
-  const htRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Heat Treatment');
-
-  if (j.customRoutedToPlating === undefined || j.customRoutedToPlating === null) {
-    if (qtyRoutedToPlating === 0) {
-      if (j.currentDepartment === 'Heat Treatment') {
-        // If in Heat Treatment, we will send to plating: ReceivedFromProd - HT rejections
-        qtyRoutedToPlating = Math.max(0, qtyReceivedFromProd - htRejections);
-      } else if (j.currentDepartment !== 'Production') {
-        // If past production and straightforward, same as received from prod
-        qtyRoutedToPlating = Math.max(0, qtyReceivedFromProd - htRejections);
-      }
-    }
-  }
-
-  // Remaining at Prod = Received - RoutedToPlating - HT_rejections
-  const qtyRemainingAtProd = Math.max(0, qtyReceivedFromProd - qtyRoutedToPlating - htRejections);
-
-
-  // --- PLATING ---> PACKING
-  // Received at plating
-  let qtyReceivedAtPlating = acceptedMovements
-    .filter(m => m.toDepartment === 'Plating')
-    .reduce((sum, m) => sum + m.quantity, 0);
-  
-  // If no movements but the card is in Plating or past Plating, we fallback to actual received from production minus HT rejections
-  if (qtyReceivedAtPlating === 0 && (j.currentDepartment !== 'Production' && j.currentDepartment !== 'Heat Treatment')) {
-    qtyReceivedAtPlating = Math.max(0, qtyReceivedFromProd - htRejections);
-  }
-
-  const qtyRoutedToPacking = acceptedMovements
-    .filter(m => m.toDepartment === 'Packing')
-    .reduce((sum, m) => sum + m.quantity, 0);
-
-  const platingRejections = getEffectiveDepartmentRejectionQty(j, cardMovements, 'Plating');
-  const qtyRemainingAtPlating = Math.max(0, qtyReceivedAtPlating - qtyRoutedToPacking - platingRejections);
-
-
-  // --- PACKING ---> STORE
-  let qtyReceivedAtPacking = acceptedMovements
-    .filter(m => m.toDepartment === 'Packing')
-    .reduce((sum, m) => sum + m.quantity, 0);
-
-  if (qtyReceivedAtPacking === 0 && (j.currentDepartment === 'Packing' || j.currentDepartment === 'Store' || j.currentDepartment === 'Completed')) {
-    qtyReceivedAtPacking = Math.max(0, qtyReceivedAtPlating - platingRejections);
-  }
-
-  const qtyRoutedToStore = acceptedMovements
-    .filter(m => m.toDepartment === 'Store')
-    .reduce((sum, m) => sum + m.quantity, 0);
-
-  const packingRejections = j.packingDetails?.rejectionQty || 0;
-  const qtyRemainingAtPacking = Math.max(0, qtyReceivedAtPacking - qtyRoutedToStore - packingRejections);
-
-
-  // --- STORE / WAREHOUSE ---> DISPATCH
-  let qtyReceivedAtStore = acceptedMovements
-    .filter(m => m.toDepartment === 'Store')
-    .reduce((sum, m) => sum + m.quantity, 0);
-
-  if (qtyReceivedAtStore === 0 && (j.currentDepartment === 'Store' || j.currentDepartment === 'Completed')) {
-    qtyReceivedAtStore = j.packingDetails?.packedQty || Math.max(0, qtyReceivedAtPacking - packingRejections);
-  }
-
-  // How much dispatch (shipped out)
-  const qtyDispatched = j.dispatchDetails?.dispatchQty || (j.completed ? j.currentQty : 0);
-
-  // On-hand = accepted Store inbound minus Store outbound (avoids Packing loop double-count)
-  const qtyRemainingInStock = Math.max(0, storeAuthoritativeOnHand(j, cardMovements) - qtyInProcessTransfers);
+  const qtyRemainingAtProd = remainingAtProduction(j, cardMovements, { compulsory: true });
 
   return {
-    // Prod/HT
     qtyReceivedFromProd,
     qtyRoutedToPlating,
     qtyRemainingAtProd,
     htRejections,
-
-    // Plating
     qtyReceivedAtPlating,
     qtyRoutedToPacking,
     qtyRemainingAtPlating,
     platingRejections,
-
-    // Packing
     qtyReceivedAtPacking,
     qtyRoutedToStore,
     qtyRemainingAtPacking,
     packingRejections,
-
-    // Store
     qtyReceivedAtStore,
     qtyDispatched,
     qtyInProcessTransfers,
     qtyReturnedFromProcess,
     qtyRemainingInStock,
-    qtyReceivedAtRawStore: acceptedMovements
-      .filter(m => m.toDepartment === 'Raw Material Store')
-      .reduce((sum, m) => sum + m.quantity, 0)
+    qtyReceivedAtRawStore
   };
 }
 
@@ -259,7 +160,7 @@ export function getWireScrapQty(job: JobCard, movements: MaterialMovement[] = []
 
 export function getAcceptedRawMaterialIssuedQty(job: JobCard, movements: MaterialMovement[] = []): number {
   if (!job) return 0;
-  if (job.processType === 'Purchase') return job.orderQty || 0;
+  if (job.processType === 'Purchase') return 0;
 
   const targetJc = String(job.jobCardNo || '').toLowerCase();
   return (Array.isArray(movements) ? movements : [])
@@ -267,12 +168,12 @@ export function getAcceptedRawMaterialIssuedQty(job: JobCard, movements: Materia
                  m.fromDepartment === 'Raw Material Store' &&
                  m.isIssueRequest &&
                  m.accepted === true)
-    .reduce((sum, m) => sum + (m.quantity || 0), 0);
+    .reduce((sum, m) => sum + creditedInboundQty(m), 0);
 }
 
 export function getRawMaterialIssuedQty(job: JobCard, movements: MaterialMovement[] = []): number {
   if (!job) return 0;
-  if (job.processType === 'Purchase') return job.orderQty || 0; // Purchase orders do not have raw material store issues
+  if (job.processType === 'Purchase') return 0;
   
   const targetJc = String(job.jobCardNo || '').toLowerCase();
   const issuedMovementsQty = (Array.isArray(movements) ? movements : [])
@@ -280,7 +181,7 @@ export function getRawMaterialIssuedQty(job: JobCard, movements: MaterialMovemen
                  m.fromDepartment === 'Raw Material Store' && 
                  m.isIssueRequest && 
                  (m.issueStatus === 'Issued' || m.accepted))
-    .reduce((sum, m) => sum + (m.quantity || 0), 0);
+    .reduce((sum, m) => sum + creditedInboundQty(m), 0);
 
   if (issuedMovementsQty > 0) return issuedMovementsQty;
 
@@ -301,25 +202,13 @@ export function getJobCardDepartmentPending(j: JobCard, movementsList: MaterialM
     };
   }
 
-  const m = getJobCardProcessMetrics(j, movementsList);
-
-  // 1. Production / HT Stage Pending
-  // If no material has been routed to Plating yet and card is in Production/HT/Purchase stage:
-  let prodPending = m.qtyRemainingAtProd;
-  if (m.qtyRoutedToPlating === 0 && (j.currentDepartment === 'Production' || j.currentDepartment === 'Heat Treatment' || j.currentDepartment === 'Purchase')) {
-    prodPending = Math.max(0, (m.qtyReceivedFromProd > 0 ? m.qtyReceivedFromProd : j.orderQty) - m.htRejections);
-  } else {
-    // If partial production sent to plating, remaining at production is max(0, orderQty/produced - routed - rejections)
-    prodPending = Math.max(0, Math.max(j.orderQty, m.qtyReceivedFromProd) - m.qtyRoutedToPlating - m.htRejections);
-  }
-
-  // 2. Plating Stage Pending
-  const platingPending = m.qtyRemainingAtPlating;
-
-  // 3. Packing Stage Pending
-  const packingPending = m.qtyRemainingAtPacking;
-
-  // Total Pending from Production to Packing (excluding Store & Dispatch)
+  const purchasePending = j.processType === 'Purchase' ? remainingAtDepartment(j, movementsList, 'Purchase') : 0;
+  const prodPending =
+    remainingAtDepartment(j, movementsList, 'Production') +
+    remainingAtDepartment(j, movementsList, 'Heat Treatment') +
+    purchasePending;
+  const platingPending = remainingAtDepartment(j, movementsList, 'Plating');
+  const packingPending = remainingAtDepartment(j, movementsList, 'Packing');
   const totalPending = prodPending + platingPending + packingPending;
 
   return {
@@ -329,5 +218,3 @@ export function getJobCardDepartmentPending(j: JobCard, movementsList: MaterialM
     totalPending
   };
 }
-
-

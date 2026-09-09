@@ -49,6 +49,15 @@ async function runProcess4Tests() {
     };
     await store.set("mfr_job_cards", "JC-P4-E2E-001", job);
 
+    await store.set("mfr_movements", "OP-P4-PACK-IN", {
+      movementId: "OP-P4-PACK-IN",
+      jobCardNo: "JC-P4-E2E-001",
+      fromDepartment: "Plating",
+      toDepartment: "Packing",
+      quantity: 1000,
+      accepted: true
+    });
+
     // 1. Inward from Packing to Store: 1000 KG
     const resIn = await commitMaterialMovementTx(store, {
       operationId: "OP-P4-001",
@@ -60,10 +69,14 @@ async function runProcess4Tests() {
     });
     assert("TEST 1 Packing -> Store transfer created", resIn.success);
 
-    // Accept in Store & clear pendingOutbound
+    // Accept the Packing -> Store inward by operationId (do not assume list order)
     const movs1 = await store.list("mfr_movements");
-    movs1[0].accepted = true;
-    await store.set("mfr_movements", movs1[0].movementId, movs1[0]);
+    const inward = movs1.find((m: any) => m.operationId === "OP-P4-001");
+    if (inward) {
+      inward.accepted = true;
+      inward.acceptedQty = inward.quantity;
+      await store.set("mfr_movements", inward.movementId, inward);
+    }
     await store.set("mfr_job_cards", "JC-P4-E2E-001", { ...job, status: "In Progress", pendingOutbound: [] });
 
     const onHand1 = storeAuthoritativeOnHand(job, await store.list("mfr_movements"));
@@ -165,6 +178,9 @@ async function runProcess4Tests() {
     const job = { jobCardNo: "JC-P4-REWORK", orderQty: 1000, currentQty: 1000, currentDepartment: "Store", unit: "PCS" };
     await store.set("mfr_job_cards", "JC-P4-REWORK", job);
 
+    await store.set("mfr_movements", "MOV-REV-0", {
+      movementId: "MOV-REV-0", jobCardNo: "JC-P4-REWORK", fromDepartment: "Plating", toDepartment: "Packing", quantity: 1000, accepted: true
+    });
     // Store receives 1000 PCS from Packing
     await store.set("mfr_movements", "MOV-REV-1", {
       movementId: "MOV-REV-1", jobCardNo: "JC-P4-REWORK", fromDepartment: "Packing", toDepartment: "Store", quantity: 1000, accepted: true
