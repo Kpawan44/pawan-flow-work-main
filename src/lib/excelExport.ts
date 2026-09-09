@@ -572,3 +572,118 @@ export function exportSingleReportExcel(reportTitle: string, data: any[]) {
   const filename = `${reportTitle.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().slice(0, 10)}.xlsx`;
   XLSX.writeFile(wb, filename);
 }
+
+/**
+ * Consolidated Executive Daily Summary Excel Export
+ */
+export function exportExecutiveDailySummary(
+  jobCards: JobCard[] = [],
+  movements: MaterialMovement[] = [],
+  outsourceOrders: any[] = [],
+  subcontractChallans: any[] = []
+) {
+  const dateStr = new Date().toISOString().split('T')[0];
+  const wb = XLSX.utils.book_new();
+
+  const activeJobs = jobCards.filter(j => !j.completed && j.status !== 'Rejected' && j.status !== 'Cancelled');
+  const completedJobs = jobCards.filter(j => j.completed);
+  const pendingAcceptance = movements.filter(m => !m.accepted);
+  const storeReady = jobCards.filter(j => j.currentDepartment === 'Store' && j.status === 'Completed');
+  const totalOrderQty = jobCards.reduce((acc, j) => acc + (j.orderQty || 0), 0);
+  const totalDispatchedQty = jobCards.reduce((acc, j) => acc + (j.dispatchDetails?.dispatchQty || 0), 0);
+
+  const totalRejection = movements.filter(m => m.rejectionRemarks || m.rejectedDate || (m.processDetails && m.processDetails.rejectionQty))
+    .reduce((acc, m) => acc + (m.processDetails?.rejectionQty || m.quantity || 0), 0);
+  const totalScrap = movements.filter(m => m.wireScrapQty || (m.processDetails && m.processDetails.wireScrapQty))
+    .reduce((acc, m) => acc + (m.wireScrapQty || m.processDetails?.wireScrapQty || 0), 0);
+
+  const execSummaryRows = [
+    ['PMW MANUFACTURING ERP - EXECUTIVE DAILY SUMMARY REPORT'],
+    ['Generated Date:', new Date().toLocaleString()],
+    ['Filename Reference:', `PMW_Executive_Daily_Summary_${dateStr}.xlsx`],
+    [''],
+    ['1. KEY OPERATIONAL METRICS'],
+    ['Total Registered Job Cards:', jobCards.length],
+    ['Active Production Line Jobs:', activeJobs.length],
+    ['Completed Jobs:', completedJobs.length],
+    ['Pending Material Transfers (Unaccepted):', pendingAcceptance.length],
+    ['Dispatch-Ready Jobs (In Store):', storeReady.length],
+    ['Total Target Order Quantity:', totalOrderQty],
+    ['Total Dispatched Quantity:', totalDispatchedQty],
+    ['Total Recorded Rejections:', totalRejection],
+    ['Total Recorded Wire Scrap:', totalScrap],
+    ['Subcontract Challans Active:', subcontractChallans.filter(c => c.status !== 'COMPLETED' && c.status !== 'CANCELLED').length],
+    [''],
+    ['2. REPORT SECTIONS INCLUDED IN THIS WORKBOOK:'],
+    ['Sheet 1: Executive Summary', 'High-level business overview and key metrics'],
+    ['Sheet 2: Delayed & At-Risk Jobs', 'Jobs with urgent priority or past delivery targets'],
+    ['Sheet 3: Department WIP', 'Work-in-progress quantity breakdown per department'],
+    ['Sheet 4: Raw Material & Store', 'Store inventory balances and raw material status'],
+    ['Sheet 5: Subcontractor Status', 'Vendor delivery challans, sent vs returned quantities'],
+    ['Sheet 6: Dispatch Summary', 'Manifest shipments and dispatched orders'],
+    ['Sheet 7: Quality & Rejection', 'Rejection trails and scrap accounting']
+  ];
+  const wsExec = XLSX.utils.aoa_to_sheet(execSummaryRows);
+  XLSX.utils.book_append_sheet(wb, wsExec, '1. Executive Summary');
+
+  // Sheet 2: Delayed & At-Risk Jobs
+  const atRiskHeaders = ['Job Card No', 'Order No', 'Customer Name', 'Item Name', 'Order Qty', 'Current Qty', 'Current Dept', 'Priority', 'Status', 'Delivery Date', 'Created Date'];
+  const atRiskRows = jobCards.filter(j => j.priority === 'Urgent' || j.priority === 'High' || (j.deliveryDate && new Date(j.deliveryDate) < new Date() && !j.completed))
+    .map(j => [
+      j.jobCardNo, j.orderNo || '', j.partyName, j.itemName, j.orderQty, j.currentQty, j.currentDepartment, j.priority || 'Normal', j.status, j.deliveryDate || 'N/A', j.createdAt
+    ]);
+  const wsAtRisk = XLSX.utils.aoa_to_sheet([atRiskHeaders, ...atRiskRows]);
+  XLSX.utils.book_append_sheet(wb, wsAtRisk, '2. Delayed & At-Risk Jobs');
+
+  // Sheet 3: Department WIP
+  const deptWipHeaders = ['Department', 'Active Job Count', 'Total WIP Quantity', 'Pending Transfers'];
+  const depts = ['Purchase', 'Raw Material Store', 'Production', 'Heat Treatment', 'Plating', 'Packing', 'Store', 'Dispatch'];
+  const deptWipRows = depts.map(d => {
+    const jobsInDept = jobCards.filter(j => j.currentDepartment === d && !j.completed);
+    const totalWip = jobsInDept.reduce((acc, j) => acc + (j.currentQty || 0), 0);
+    const pendingTransfers = movements.filter(m => m.toDepartment === d && !m.accepted).length;
+    return [d, jobsInDept.length, totalWip, pendingTransfers];
+  });
+  const wsWip = XLSX.utils.aoa_to_sheet([deptWipHeaders, ...deptWipRows]);
+  XLSX.utils.book_append_sheet(wb, wsWip, '3. Department WIP');
+
+  // Sheet 4: Raw Material & Store Summary
+  const rmHeaders = ['Job Card No', 'Item Name', 'Item Code', 'Quantity', 'Unit', 'Department', 'Rack / Location', 'Status'];
+  const rmRows = jobCards.map(j => [
+    j.jobCardNo, j.itemName, j.itemCode || '', j.currentQty, j.unit || 'KG', j.currentDepartment, j.storeDetails?.rackNo || j.storeDetails?.locationBin || 'N/A', j.status
+  ]);
+  const wsRm = XLSX.utils.aoa_to_sheet([rmHeaders, ...rmRows]);
+  XLSX.utils.book_append_sheet(wb, wsRm, '4. Raw Material & Store');
+
+  // Sheet 5: Subcontractor Status
+  const subHeaders = ['Challan No', 'Vendor Name', 'Dispatch Date', 'Expected Return', 'Total Sent Qty', 'Total Returned Qty', 'Status', 'Overdue Status'];
+  const subRows = subcontractChallans.map(c => {
+    const isOverdue = c.status !== 'COMPLETED' && c.status !== 'CANCELLED' && c.expectedReturnDate && new Date(c.expectedReturnDate) < new Date();
+    return [
+      c.challanNo, c.vendorName, c.dispatchDate, c.expectedReturnDate || 'N/A', c.totalSentQty, c.totalReturnedQty || 0, c.status, isOverdue ? 'OVERDUE' : 'ON TIME'
+    ];
+  });
+  const wsSub = XLSX.utils.aoa_to_sheet([subHeaders, ...subRows]);
+  XLSX.utils.book_append_sheet(wb, wsSub, '5. Subcontractor Status');
+
+  // Sheet 6: Dispatch Summary
+  const dispHeaders = ['Job Card No', 'Order No', 'Party Name', 'Item Name', 'Dispatched Qty', 'Dispatch Date', 'Vehicle No', 'Invoice No'];
+  const dispRows = jobCards.filter(j => j.dispatchDetails || j.currentDepartment === 'Dispatch')
+    .map(j => [
+      j.jobCardNo, j.orderNo || '', j.partyName, j.itemName, j.dispatchDetails?.dispatchQty || j.currentQty, j.dispatchDetails?.dispatchDate || j.updatedAt || '', j.dispatchDetails?.vehicleNo || 'N/A', j.dispatchDetails?.invoiceNo || 'N/A'
+    ]);
+  const wsDisp = XLSX.utils.aoa_to_sheet([dispHeaders, ...dispRows]);
+  XLSX.utils.book_append_sheet(wb, wsDisp, '6. Dispatch Summary');
+
+  // Sheet 7: Quality & Rejection Summary
+  const qualHeaders = ['Movement ID / Job Card', 'From Dept', 'To Dept', 'Rejection Qty', 'Wire Scrap Qty', 'Date', 'Remarks'];
+  const qualRows = movements.filter(m => m.wireScrapQty || m.rejectionRemarks || m.rejectedDate || (m.processDetails && m.processDetails.rejectionQty))
+    .map(m => [
+      m.jobCardNo || m.movementId, m.fromDepartment, m.toDepartment, m.processDetails?.rejectionQty || 0, m.wireScrapQty || m.processDetails?.wireScrapQty || 0, m.transferDate, m.rejectionRemarks || m.remarks || ''
+    ]);
+  const wsQual = XLSX.utils.aoa_to_sheet([qualHeaders, ...qualRows]);
+  XLSX.utils.book_append_sheet(wb, wsQual, '7. Quality & Rejection');
+
+  const filename = `PMW_Executive_Daily_Summary_${dateStr}.xlsx`;
+  XLSX.writeFile(wb, filename);
+}

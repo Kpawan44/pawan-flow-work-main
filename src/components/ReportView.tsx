@@ -748,6 +748,13 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
     exportComprehensiveExcelBackup(jobCards, movements);
   };
 
+  // Export Executive Daily Summary workbook
+  const handleExportExecutiveDailySummary = async () => {
+    const { exportExecutiveDailySummary } = await import('../lib/excelExport');
+    exportExecutiveDailySummary(jobCards, movements);
+  };
+
+
   return (
     <div className="space-y-6">
       
@@ -813,12 +820,20 @@ export default function ReportView({ jobCards, movements, processTransfers = [],
                 <span>Export Current Sheet (.xlsx)</span>
               </button>
               <button
+                onClick={handleExportExecutiveDailySummary}
+                className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold px-3 py-2 rounded-lg transition-all text-xs cursor-pointer shadow-xs border border-blue-500"
+                title="Download consolidated Executive Daily Summary Excel workbook"
+              >
+                <Sparkles className="h-4 w-4" />
+                <span>Executive Daily Summary (.xlsx)</span>
+              </button>
+              <button
                 onClick={handleExportFullExcelBackup}
                 className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-3 py-2 rounded-lg transition-all text-xs cursor-pointer shadow-xs border border-indigo-500"
                 title="Download a complete Excel backup workbook with a separate sheet for EVERY report (19 sheets)"
               >
                 <Download className="h-4 w-4" />
-                <span>Backup All Reports (.xlsx)</span>
+                <span>Full Workbook Backup (.xlsx)</span>
               </button>
               <button
                 onClick={() => window.print()}

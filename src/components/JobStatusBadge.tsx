@@ -106,4 +106,36 @@ export const JobStatusBadge: React.FC<JobStatusBadgeProps> = ({
   );
 };
 
+export interface JobPriorityBadgeProps {
+  priority?: 'Low' | 'Medium' | 'High' | 'Urgent' | string | null;
+  size?: 'xs' | 'sm' | 'md' | 'lg';
+  className?: string;
+}
+
+export const JobPriorityBadge: React.FC<JobPriorityBadgeProps> = ({
+  priority,
+  size = 'md',
+  className = ''
+}) => {
+  if (!priority || (priority !== 'Urgent' && priority !== 'High')) return null;
+  const isUrgent = priority === 'Urgent';
+
+  const sizeClasses = {
+    xs: 'text-[8.5px] px-1.5 py-0.5 gap-1 font-bold',
+    sm: 'text-[9.5px] sm:text-[10px] px-2 py-0.5 gap-1 font-bold',
+    md: 'text-[10px] sm:text-[11px] px-2.5 py-1 gap-1.5 font-bold',
+    lg: 'text-xs px-3 py-1.5 gap-2 font-extrabold'
+  };
+
+  const badgeStyle = isUrgent
+    ? 'bg-red-100 text-red-800 border-red-300 dark:bg-red-950/80 dark:text-red-300 dark:border-red-800 animate-pulse'
+    : 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-800';
+
+  return (
+    <span className={`inline-flex items-center rounded-md uppercase tracking-wider border shrink-0 font-sans shadow-2xs ${badgeStyle} ${sizeClasses[size]} ${className}`}>
+      <span>{isUrgent ? '⚡ URGENT' : '★ HIGH PRIORITY'}</span>
+    </span>
+  );
+};
+
 export default JobStatusBadge;

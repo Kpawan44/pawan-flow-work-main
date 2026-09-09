@@ -95,3 +95,23 @@ export function createSubcontractChallanTx(
 
   return { success: true, challan };
 }
+
+export function isSubcontractChallanOverdue(challan: SubcontractChallan | null | undefined): boolean {
+  if (!challan) return false;
+  if (challan.status === 'COMPLETED' || challan.status === 'CANCELLED') {
+    return false;
+  }
+  if (!challan.expectedReturnDate) {
+    return false;
+  }
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const returnDate = new Date(challan.expectedReturnDate);
+  if (isNaN(returnDate.getTime())) {
+    return false;
+  }
+  returnDate.setHours(0, 0, 0, 0);
+
+  return today.getTime() > returnDate.getTime();
+}
