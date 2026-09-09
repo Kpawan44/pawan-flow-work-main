@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { X, ArrowRight, Save, Info, AlertTriangle, ArrowUpDown, ChevronDown } from 'lucide-react';
-import { JobCard, MaterialMovement, Department, UserProfile } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile, CompanyConfig } from '../types';
 import { getJobCardProcessMetrics } from '../lib/metrics';
+import { assertHeatTreatmentRouting, process2SendAvailableQty } from '../hardening/process2Manufacturing';
 
 interface BulkTransferModalProps {
   isOpen: boolean;
@@ -9,6 +10,7 @@ interface BulkTransferModalProps {
   selectedJobCards: JobCard[];
   movements: MaterialMovement[];
   currentUser: UserProfile | null;
+  companyConfig?: CompanyConfig | null;
   onSubmit: (transfers: {
     jobCardNo: string;
     fromDepartment: Department;
@@ -38,28 +40,18 @@ const getNextLogicalDepartment = (from: Department, htRequired: boolean, jCard?:
 };
 
 // Helper to compute available weight
-const getAvailableWeight = (jobCard: JobCard, movements: MaterialMovement[]): number => {
+const getAvailableWeight = (jobCard: JobCard, movements: MaterialMovement[], companyConfig?: CompanyConfig | null): number => {
   const current = jobCard.currentDepartment;
   const fromDept = (current === 'Completed' || !current) ? 'Production' : (current as Department);
+  const cap = process2SendAvailableQty(fromDept, jobCard, movements, {
+    compulsory: companyConfig?.requireRawMaterialForProduction !== false
+  });
+  if (cap !== null) return cap;
   const m = getJobCardProcessMetrics(jobCard, movements);
-  
   if (fromDept === 'Production') {
-    return m.qtyRemainingAtProd > 0 ? m.qtyRemainingAtProd : jobCard.orderQty;
-  } else if (fromDept === 'Heat Treatment') {
-    const remainingAtHt = Math.max(0, m.qtyReceivedFromProd - m.qtyRoutedToPlating - m.htRejections);
-    return remainingAtHt > 0 ? remainingAtHt : jobCard.orderQty;
-  } else if (fromDept === 'Plating') {
-    return m.qtyRemainingAtPlating > 0 ? m.qtyRemainingAtPlating : jobCard.orderQty;
-  } else if (fromDept === 'Packing') {
-    return m.qtyRemainingAtPacking > 0 ? m.qtyRemainingAtPacking : jobCard.orderQty;
-  } else if (fromDept === 'Store') {
-    return m.qtyRemainingInStock > 0 ? m.qtyRemainingInStock : jobCard.orderQty;
-  } else {
-    const totalTransferred = movements
-      .filter(mov => mov.jobCardNo.toLowerCase() === jobCard.jobCardNo.toLowerCase())
-      .reduce((acc, curr) => acc + curr.quantity, 0);
-    return Math.max(0, jobCard.orderQty - totalTransferred);
+    return Math.max(m.qtyRemainingAtProd, jobCard.orderQty);
   }
+  return jobCard.currentQty || jobCard.orderQty;
 };
 
 export default function BulkTransferModal({
@@ -68,6 +60,7 @@ export default function BulkTransferModal({
   selectedJobCards,
   movements,
   currentUser,
+  companyConfig,
   onSubmit
 }: BulkTransferModalProps) {
   const [toDept, setToDept] = useState<Department | 'Completed'>('Heat Treatment');
@@ -100,7 +93,7 @@ export default function BulkTransferModal({
     // Initialize quantities with the available weight for each job card
     const initialQtys: Record<string, number> = {};
     activeSelectedCards.forEach(j => {
-      initialQtys[j.jobCardNo] = getAvailableWeight(j, movements);
+      initialQtys[j.jobCardNo] = getAvailableWeight(j, movements, companyConfig);
     });
     setQuantities(initialQtys);
   }, [isOpen, selectedJobCards, movements]);
@@ -135,6 +128,18 @@ export default function BulkTransferModal({
       const fromDept = (j.currentDepartment as Department) || 'Production';
       if (fromDept === toDept) {
         setError(`Job Card ${j.jobCardNo} source department (${fromDept}) cannot be the same as the target department.`);
+        return;
+      }
+      const htGate = assertHeatTreatmentRouting(j, fromDept, String(toDept));
+      if (!htGate.ok) {
+        setError(htGate.error || `Invalid routing for ${j.jobCardNo}.`);
+        return;
+      }
+      const cap = process2SendAvailableQty(fromDept, j, movements, {
+        compulsory: companyConfig?.requireRawMaterialForProduction !== false
+      });
+      if (cap !== null && qty > cap) {
+        setError(`Job Card ${j.jobCardNo}: cannot transfer ${qty}. Only ${cap} is available in ${fromDept}.`);
         return;
       }
 
@@ -224,7 +229,7 @@ export default function BulkTransferModal({
                 </div>
               ) : (
                 activeSelectedCards.map(j => {
-                  const available = getAvailableWeight(j, movements);
+                  const available = getAvailableWeight(j, movements, companyConfig);
                   const fromDept = j.currentDepartment || 'Production';
                   const isSameDept = fromDept === toDept;
                   
@@ -327,7 +332,7 @@ export default function BulkTransferModal({
             </div>
           )}
 
-          {activeSelectedCards.some(j => (quantities[j.jobCardNo] || 0) > getAvailableWeight(j, movements)) && (
+          {activeSelectedCards.some(j => (quantities[j.jobCardNo] || 0) > getAvailableWeight(j, movements, companyConfig)) && (
             <div className="p-3 bg-amber-50 text-amber-700 dark:bg-amber-950/10 dark:text-amber-400 border border-amber-100 dark:border-amber-900/20 rounded-xl flex items-start gap-2">
               <Info className="h-4 w-4 shrink-0 mt-0.5" />
               <span>Note: One or more requested quantities exceed the available floor balance. Overdraft state will be created for those job cards.</span>

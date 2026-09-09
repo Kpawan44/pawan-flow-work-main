@@ -1,6 +1,12 @@
 import { VALID_MANUFACTURING_DEPARTMENTS } from "./constants";
 import { canPurchaseUserOperateIncomingStore, isIncomingStoreDept } from "./process1Purchase";
-import { attachProcess2MovementContract } from "./process2Manufacturing";
+import {
+  assertHeatTreatmentRouting,
+  attachProcess2MovementContract,
+  findPendingDuplicateMovement,
+  process2SendAvailableQty
+} from "./process2Manufacturing";
+import { createMovementRequestFingerprint } from "./movementOperationId";
 
 export interface MovementCommitInput {
   operationId: string;
@@ -20,6 +26,7 @@ export interface MovementCommitInput {
   extra?: Record<string, any>;
   /** Optional preloaded movements to avoid collection list inside a Firestore transaction. */
   preloadedMovements?: any[];
+  requireRawMaterialForProduction?: boolean;
   actor: {
     userId: string;
     userName: string;
@@ -114,8 +121,23 @@ async function commitMaterialMovementTxInner(
     return { success: false, statusCode: 400, error: "operationId is required." };
   }
 
+  const requestFingerprint = createMovementRequestFingerprint({
+    jobCardNo: input.jobCardNo,
+    fromDepartment: input.fromDepartment,
+    toDepartment: input.toDepartment,
+    quantity: input.quantity
+  });
+
   const existingIdemp = await store.get("mfr_idempotency_keys", opKey);
   if (existingIdemp?.result) {
+    const storedFp = String(existingIdemp.requestFingerprint || existingIdemp.result?.requestFingerprint || "");
+    if (storedFp && storedFp !== requestFingerprint) {
+      return {
+        success: false,
+        statusCode: 409,
+        error: "operationId was already used for a different movement request. Use a new operationId for a distinct transfer."
+      };
+    }
     return { success: true, writes: [], ...existingIdemp.result, cached: true };
   }
 
@@ -160,33 +182,41 @@ async function commitMaterialMovementTxInner(
     }
 
     if (!isIssue && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
-      const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
-      if (reqQty > currentAvailableQty) {
-        return {
-          success: false,
-          statusCode: 400,
-          error: `Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
-        };
+      const movementsForQty = input.preloadedMovements || (await store.list("mfr_movements"));
+      const sendAvail = process2SendAvailableQty(normFrom, jobCardData, movementsForQty, {
+        compulsory: input.requireRawMaterialForProduction
+      });
+      if (sendAvail !== null) {
+        if (reqQty > sendAvail) {
+          return {
+            success: false,
+            statusCode: 400,
+            error: `Insufficient available quantity. Requested ${reqQty}, but only ${sendAvail} remaining in ${normFrom}.`
+          };
+        }
+      } else if (normFrom.toLowerCase() !== "production") {
+        const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
+        if (reqQty > currentAvailableQty) {
+          return {
+            success: false,
+            statusCode: 400,
+            error: `Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
+          };
+        }
       }
     }
 
+    const htGate = assertHeatTreatmentRouting(jobCardData, normFrom, normTo, {
+      isIssueRequest: isIssue,
+      isRejectionReturn: Boolean(input.processDetails?.isRejectionReturn)
+    });
+    if (!htGate.ok) {
+      return { success: false, statusCode: 400, error: htGate.error };
+    }
+
     if (!isIssue && !stockIn) {
-      const pendingOutbound = Array.isArray(jobCardData.pendingOutbound) ? jobCardData.pendingOutbound : [];
-      const pendingOnJob = pendingOutbound.find(
-        (p: any) => p && p.from === normFrom && p.to === normTo
-      );
       const movements = input.preloadedMovements || (await store.list("mfr_movements"));
-      const pendingDup =
-        pendingOnJob ||
-        movements.find(
-          (m) =>
-            !m.accepted &&
-            !m.deletedDate &&
-            String(m.jobCardNo || "").toLowerCase() === jobCardNo.toLowerCase() &&
-            m.fromDepartment === normFrom &&
-            m.toDepartment === normTo
-        );
-      if (pendingDup) {
+      if (findPendingDuplicateMovement(movements, { jobCardNo, fromDepartment: normFrom, toDepartment: normTo, isIssueRequest: isIssue })) {
         return {
           success: false,
           statusCode: 400,
@@ -231,6 +261,10 @@ async function commitMaterialMovementTxInner(
     initiatedByUserId: input.actor.userId,
     initiatedByUserName: input.actor.userName,
     accepted: false,
+    acceptedQty: 0,
+    rejectedQty: 0,
+    unit: contracted.unit || jobCardData?.unit || input.requestedUnit || "KGS",
+    transactionType: input.transactionType || (isIssue ? "ISSUE_REQUEST" : "TRANSFER"),
     operationId: opKey,
     isIssueRequest: isIssue,
     issueStatus: isIssue ? "Requested" : undefined,
@@ -238,7 +272,6 @@ async function commitMaterialMovementTxInner(
     processDetails: contracted.processDetails || input.processDetails || null,
     requestedQty: input.requestedQty,
     requestedUnit: input.requestedUnit,
-    transactionType: input.transactionType,
     dispatchGroupNo: input.dispatchGroupNo || (input.extra?.dispatchGroupNo as string) || undefined,
     manifestId: input.manifestId || (input.extra?.manifestId as string) || undefined,
     createdAt: now
@@ -334,6 +367,7 @@ async function commitMaterialMovementTxInner(
     id: opKey,
     data: {
       operationId: opKey,
+      requestFingerprint,
       createdAt: now,
       userId: input.actor.userId,
       result: resultPayload

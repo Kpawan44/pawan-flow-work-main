@@ -287,6 +287,7 @@ async function runProcess3Tests() {
       fromDepartment: "Production",
       toDepartment: "Heat Treatment",
       quantity: 400,
+      requireRawMaterialForProduction: false,
       actor: actor("Production")
     });
     assert("TEST 11 Standard commitMaterialMovementTx produces valid contracted movement", res.success === true && res.movement?.materialType !== undefined, res.error);
@@ -304,6 +305,7 @@ async function runProcess3Tests() {
       fromDepartment: "Production",
       toDepartment: "Plating",
       quantity: 300,
+      requireRawMaterialForProduction: false,
       actor: actor("Production")
     });
     const r2 = await commitMaterialMovementTx(store, {
@@ -312,6 +314,7 @@ async function runProcess3Tests() {
       fromDepartment: "Production",
       toDepartment: "Plating",
       quantity: 300,
+      requireRawMaterialForProduction: false,
       actor: actor("Production")
     });
     assert("TEST 12 Duplicate operationId returns cached flag", r2.cached === true && r1.movement.movementId === r2.movement.movementId);
@@ -329,6 +332,7 @@ async function runProcess3Tests() {
       fromDepartment: "Production",
       toDepartment: "Plating",
       quantity: 300,
+      requireRawMaterialForProduction: false,
       actor: actor("Production")
     });
 
@@ -338,6 +342,7 @@ async function runProcess3Tests() {
       fromDepartment: "Production",
       toDepartment: "Plating",
       quantity: 200,
+      requireRawMaterialForProduction: false,
       actor: actor("Production")
     });
 

@@ -69,20 +69,178 @@ export function canStartProductionWithRm(
   return { ok: true };
 }
 
-export function remainingAtProduction(
-  job: { orderQty?: number; jobCardNo?: string },
-  movements: Array<{ jobCardNo?: string; fromDepartment?: string; quantity?: number }> = []
-): number {
-  const order = Number(job.orderQty || 0);
-  const target = String(job.jobCardNo || "").toLowerCase();
-  const produced = (movements || [])
+export function isRejectionReturnMovement(m: { processDetails?: any; transactionType?: string } | null | undefined): boolean {
+  if (!m) return false;
+  return Boolean(m.processDetails?.isRejectionReturn) || String(m.transactionType || "").toUpperCase() === "REVERSAL";
+}
+
+export function isDeletedMovement(m: { deletedDate?: string; isDeleted?: boolean; status?: string } | null | undefined): boolean {
+  if (!m) return true;
+  return Boolean(m.deletedDate) || Boolean(m.isDeleted) || String(m.status || "") === "deleted";
+}
+
+export function isFullyRejectedMovement(m: { accepted?: boolean; issueStatus?: string; resolutionStatus?: string } | null | undefined): boolean {
+  if (!m) return false;
+  const status = String(m.issueStatus || m.resolutionStatus || "").toLowerCase();
+  return status === "rejected" && !m.accepted;
+}
+
+export function isUndoneMovement(m: { undone?: boolean; resolutionStatus?: string; issueStatus?: string } | null | undefined): boolean {
+  if (!m) return false;
+  if (m.undone === true) return true;
+  const status = String(m.resolutionStatus || m.issueStatus || "").toLowerCase();
+  return status === "undone" || status === "cancelled";
+}
+
+export function isUndoReversalMovement(m: { processDetails?: any } | null | undefined): boolean {
+  return Boolean(m?.processDetails?.isUndoReversal);
+}
+
+export function creditedInboundQty(m: {
+  accepted?: boolean;
+  quantity?: number;
+  acceptedQty?: number;
+  issueStatus?: string;
+  resolutionStatus?: string;
+}): number {
+  if (isFullyRejectedMovement(m) || isUndoneMovement(m as any) || isUndoReversalMovement(m as any)) return 0;
+  const acceptedQty = Number(m.acceptedQty);
+  if (Number.isFinite(acceptedQty) && acceptedQty > 0) return acceptedQty;
+  if (m.accepted) return Number(m.quantity || 0);
+  return 0;
+}
+
+export function unresolvedPendingQty(m: {
+  accepted?: boolean;
+  quantity?: number;
+  acceptedQty?: number;
+  rejectedQty?: number;
+  issueStatus?: string;
+  resolutionStatus?: string;
+  deletedDate?: string;
+  isDeleted?: boolean;
+  isIssueRequest?: unknown;
+}): number {
+  if (isDeletedMovement(m)) return 0;
+  if (isFullyRejectedMovement(m) || isUndoneMovement(m as any)) return 0;
+  const q = Number(m.quantity);
+  const acc = Number(m.acceptedQty || 0);
+  const rej = Number(m.rejectedQty || 0);
+  if (!Number.isFinite(q) || q <= 0) {
+    return m.accepted || isFullyRejectedMovement(m) ? 0 : 1;
+  }
+  if (m.accepted && !(acc > 0 && acc + rej < q)) return 0;
+  return Math.max(0, q - acc - rej);
+}
+
+export function isPendingAcceptanceMovement(m: {
+  accepted?: boolean;
+  deletedDate?: string;
+  isDeleted?: boolean;
+  status?: string;
+  issueStatus?: string;
+  resolutionStatus?: string;
+  toDepartment?: string;
+  quantity?: number;
+  acceptedQty?: number;
+  rejectedQty?: number;
+  isIssueRequest?: unknown;
+  fromDepartment?: string;
+  processDetails?: any;
+} | null | undefined): boolean {
+  if (!m || isDeletedMovement(m)) return false;
+  if (isUndoneMovement(m) || isUndoReversalMovement(m)) return false;
+  if (isRejectionReturnMovement(m)) return false;
+  if (isFullyRejectedMovement(m)) return false;
+  const resolved = String(m.issueStatus || m.resolutionStatus || "").toLowerCase();
+  if (resolved === "resolved" || resolved === "split") return false;
+  if (m.isIssueRequest) {
+    return (
+      normalizeDeptName(m.fromDepartment) === "raw material store" &&
+      normalizeDeptName(m.toDepartment) === "production" &&
+      !m.accepted &&
+      String(m.issueStatus || "") === "Issued"
+    );
+  }
+  return unresolvedPendingQty(m) > 0;
+}
+
+function jobMovements<T extends { jobCardNo?: string }>(jobCardNo: string, movements: T[]): T[] {
+  const target = String(jobCardNo || "").toLowerCase();
+  return (movements || []).filter((m) => m && String(m.jobCardNo || "").toLowerCase() === target);
+}
+
+export function productionSendAvailable(
+  job: { jobCardNo?: string; processType?: string; orderQty?: number },
+  movements: Array<{
+    jobCardNo?: string;
+    fromDepartment?: string;
+    toDepartment?: string;
+    quantity?: number;
+    accepted?: boolean;
+    isIssueRequest?: unknown;
+    processDetails?: any;
+    transactionType?: string;
+    deletedDate?: string;
+    isDeleted?: boolean;
+  }> = [],
+  opts?: { compulsory?: boolean }
+): number | null {
+  if (!job) return 0;
+  if (opts?.compulsory === false) return null;
+  if (job.processType === "Purchase") return null;
+
+  const targetMoves = jobMovements(String(job.jobCardNo || ""), movements).filter((m) => !isDeletedMovement(m));
+  const rm = getAcceptedRawMaterialIssuedQty(job, targetMoves);
+  const outbound = targetMoves
     .filter(
       (m) =>
-        String(m.jobCardNo || "").toLowerCase() === target &&
-        normalizeDeptName(m.fromDepartment) === "production"
+        normalizeDeptName(m.fromDepartment) === "production" &&
+        !isRejectionReturnMovement(m) &&
+        !isUndoneMovement(m as any) &&
+        !isUndoReversalMovement(m as any)
     )
     .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
-  return Math.max(0, order - produced);
+  const returnsIn = targetMoves
+    .filter(
+      (m) =>
+        normalizeDeptName(m.toDepartment) === "production" &&
+        isRejectionReturnMovement(m) &&
+        creditedInboundQty(m) > 0
+    )
+    .reduce((sum, m) => sum + creditedInboundQty(m), 0);
+  return Math.max(0, rm + returnsIn - outbound);
+}
+
+export function remainingAtProduction(
+  job: { orderQty?: number; jobCardNo?: string; processType?: string },
+  movements: Array<{ jobCardNo?: string; fromDepartment?: string; toDepartment?: string; quantity?: number; accepted?: boolean; isIssueRequest?: unknown; processDetails?: any; transactionType?: string }> = [],
+  opts?: { compulsory?: boolean }
+): number {
+  const available = productionSendAvailable(job, movements, opts);
+  if (available === null) {
+    return remainingAtDepartment(job, movements, "Production");
+  }
+  return available;
+}
+
+export function assertHeatTreatmentRouting(
+  job: { heatTreatmentRequired?: boolean } | null | undefined,
+  fromDepartment: string,
+  toDepartment: string,
+  extra?: { isIssueRequest?: unknown; isRejectionReturn?: boolean }
+): { ok: boolean; error?: string } {
+  if (extra?.isIssueRequest || extra?.isRejectionReturn) return { ok: true };
+  const from = normalizeDeptName(fromDepartment);
+  const to = normalizeDeptName(toDepartment);
+  if (from !== "production") return { ok: true };
+  if (job?.heatTreatmentRequired && to !== "heat treatment") {
+    return {
+      ok: false,
+      error: "Heat Treatment is required for this job card. Production must send material to Heat Treatment and cannot skip to another department."
+    };
+  }
+  return { ok: true };
 }
 
 export function getEffectiveDepartmentRejectionQty(
@@ -138,38 +296,56 @@ export function getEffectiveDepartmentRejectionQty(
 }
 
 export function remainingAtDepartment(
-  job: { jobCardNo?: string; heatTreatmentDetails?: { rejectionQty?: number }; platingDetails?: { rejectionQty?: number }; packingDetails?: { rejectionQty?: number } },
+  job: {
+    jobCardNo?: string;
+    currentQty?: number;
+    currentDepartment?: string;
+    heatTreatmentDetails?: { rejectionQty?: number };
+    platingDetails?: { rejectionQty?: number };
+    packingDetails?: { rejectionQty?: number };
+  },
   movements: Array<{
     jobCardNo?: string;
     fromDepartment?: string;
     toDepartment?: string;
     accepted?: boolean;
     quantity?: number;
+    acceptedQty?: number;
+    issueStatus?: string;
+    resolutionStatus?: string;
+    processDetails?: any;
+    transactionType?: string;
+    deletedDate?: string;
+    isDeleted?: boolean;
   }> = [],
   department: string
 ): number {
   if (!job) return 0;
   const target = String(job.jobCardNo || "").toLowerCase();
   const dept = normalizeDeptName(department);
-  const received = (movements || [])
-    .filter(
-      (m) =>
-        m &&
-        String(m.jobCardNo || "").toLowerCase() === target &&
-        normalizeDeptName(m.toDepartment) === dept &&
-        m.accepted === true
-    )
-    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
-  const sent = (movements || [])
-    .filter(
-      (m) =>
-        m &&
-        String(m.jobCardNo || "").toLowerCase() === target &&
-        normalizeDeptName(m.fromDepartment) === dept
-    )
+  const cardMoves = (movements || []).filter(
+    (m) => m && String(m.jobCardNo || "").toLowerCase() === target && !isDeletedMovement(m)
+  );
+  const received = cardMoves
+    .filter((m) => normalizeDeptName(m.toDepartment) === dept)
+    .reduce((sum, m) => sum + creditedInboundQty(m), 0);
+  const sent = cardMoves
+    .filter((m) => {
+      if (normalizeDeptName(m.fromDepartment) !== dept) return false;
+      if (isUndoneMovement(m as any) || isUndoReversalMovement(m as any)) return false;
+      if (isRejectionReturnMovement(m) && (m as any).parentMovementId) return false;
+      if (isRejectionReturnMovement(m) && (m as any).processDetails?.originalMovementId) return false;
+      return true;
+    })
     .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
 
   const effectiveRejection = getEffectiveDepartmentRejectionQty(job, movements, department);
+  if (received === 0 && sent === 0) {
+    // Ledger history for this job exists: a department with no inbound/outbound is empty.
+    // Do not let a manipulated currentQty cache invent transferable quantity.
+    if (cardMoves.length > 0) return 0;
+    return Math.max(0, Number(job.currentQty || 0));
+  }
   return Math.max(0, received - sent - effectiveRejection);
 }
 
@@ -182,6 +358,11 @@ export function storeAuthoritativeOnHand(
     toDepartment?: string;
     accepted?: boolean;
     quantity?: number;
+    processDetails?: any;
+    transactionType?: string;
+    deletedDate?: string;
+    isDeleted?: boolean;
+    status?: string;
   }> = []
 ): number {
   const target = String(job.jobCardNo || "").toLowerCase();
@@ -190,18 +371,24 @@ export function storeAuthoritativeOnHand(
       (m) =>
         String(m.jobCardNo || "").toLowerCase() === target &&
         normalizeDeptName(m.toDepartment) === "store" &&
-        m.accepted === true
+        !isDeletedMovement(m)
     )
-    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
+    .reduce((sum, m) => sum + creditedInboundQty(m), 0);
   const outbound = (movements || [])
     .filter(
       (m) =>
         String(m.jobCardNo || "").toLowerCase() === target &&
-        normalizeDeptName(m.fromDepartment) === "store"
+        normalizeDeptName(m.fromDepartment) === "store" &&
+        !isDeletedMovement(m) &&
+        !isRejectionReturnMovement(m)
     )
     .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
   const net = inbound - outbound;
   if (inbound > 0 || outbound > 0) return Math.max(0, net);
+  const hasLedger = (movements || []).some(
+    (m) => String(m.jobCardNo || "").toLowerCase() === target && !isDeletedMovement(m)
+  );
+  if (hasLedger) return 0;
   if (normalizeDeptName(job.currentDepartment) === "store") return Math.max(0, Number(job.currentQty || 0));
   return 0;
 }
@@ -243,8 +430,7 @@ export function findPendingDuplicateMovement(
   const to = normalizeDeptName(input.toDepartment);
   return (movements || []).some(
     (m) =>
-      !m.accepted &&
-      !m.deletedDate &&
+      isPendingAcceptanceMovement(m) &&
       String(m.jobCardNo || "").toLowerCase() === jc &&
       normalizeDeptName(m.fromDepartment) === from &&
       normalizeDeptName(m.toDepartment) === to
@@ -398,13 +584,31 @@ export function sameDepartmentTransferBlocked(fromDepartment: string, toDepartme
 export function process2SendAvailableQty(
   fromDepartment: string,
   job: any,
-  movements: any[]
+  movements: any[],
+  opts?: { compulsory?: boolean }
 ): number | null {
   const from = normalizeDeptName(fromDepartment);
-  if (from === "production") return remainingAtProduction(job, movements);
+  if (from === "production") return productionSendAvailable(job, movements, opts);
   if (from === "heat treatment") return remainingAtDepartment(job, movements, "Heat Treatment");
   if (from === "plating") return remainingAtDepartment(job, movements, "Plating");
   if (from === "packing") return remainingAtDepartment(job, movements, "Packing");
   if (from === "store") return storeAuthoritativeOnHand(job, movements);
   return null;
+}
+
+export function deriveCachedCurrentQty(
+  job: any,
+  movements: any[],
+  department: string,
+  opts?: { compulsory?: boolean }
+): number {
+  const from = normalizeDeptName(department);
+  if (from === "production") {
+    const avail = productionSendAvailable(job, movements, opts);
+    if (avail === null) return remainingAtDepartment(job, movements, "Production");
+    return avail;
+  }
+  const sendAvail = process2SendAvailableQty(department, job, movements, opts);
+  if (sendAvail !== null) return sendAvail;
+  return remainingAtDepartment(job, movements, department);
 }

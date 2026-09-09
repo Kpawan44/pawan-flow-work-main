@@ -56,7 +56,9 @@ import {
   canFinalizeDispatch,
   isVisibleInDispatchQueue,
   attachProcess2MovementContract,
-  sameDepartmentTransferBlocked
+  sameDepartmentTransferBlocked,
+  productionSendAvailable,
+  isPendingAcceptanceMovement
 } from '../hardening/process2Manufacturing';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
@@ -103,7 +105,7 @@ interface DepartmentOperationsProps {
     remarks?: string, 
     extraFields?: { allottedLocation?: string; rackNo?: string; quantity?: number; issueStatus?: 'Issued' | 'Rejected' }
   ) => Promise<void> | any;
-  onRejectMovement: (movementId: string, remarks: string) => void;
+  onRejectMovement: (movementId: string, remarks: string, extra?: { rejectedQty?: number; acceptedQty?: number }) => void;
   onSelectJobCard: (jobCard: JobCard) => void;
   onQuickTransfer?: (jobCard: JobCard) => void;
   onCreateProcessTransfer?: (transfer: any) => Promise<void>;
@@ -288,6 +290,8 @@ export default function DepartmentOperations({
   };
 
   const [rejectionNotes, setRejectionNotes] = useState('');
+  const [rejectQty, setRejectQty] = useState<number>(0);
+  const [acceptRemainderQty, setAcceptRemainderQty] = useState<number>(0);
   const [activeRejectionId, setActiveRejectionId] = useState<string | null>(null);
   const [showLinkedOutsourceDetails, setShowLinkedOutsourceDetails] = useState<boolean>(false);
 
@@ -896,8 +900,6 @@ export default function DepartmentOperations({
 
       if (opts.existingJob) {
         onUpdateJobCard(opts.existingJob.jobCardNo, {
-          currentDepartment: dest,
-          currentQty: opts.sentQty,
           status: 'Pending Acceptance',
           materialType: opts.materialType,
           isWire: route.isWire,
@@ -1165,10 +1167,7 @@ export default function DepartmentOperations({
         isWire: purchaseMaterialType === 'Raw Material' ? route.isWire : undefined,
         rawMaterialKind: route.rawMaterialKind || undefined
       },
-      currentQty: purchaseSentQty,
-      balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - rejNum),
       heatTreatmentRequired: jCard.heatTreatmentRequired || dest === 'Heat Treatment',
-      currentDepartment: dest,
       status: 'Pending Acceptance'
     });
 
@@ -1232,12 +1231,13 @@ To resolve:
 
     const issuedQty = getAcceptedRawMaterialIssuedQty(jCard, movements);
     const unitLabel = displayUnitLabel(jCard.unit);
+    const sendAvail = productionSendAvailable(jCard, movements, { compulsory: isRawMaterialCompulsory });
     const totalMovedFromProdBefore = movements
-      .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
+      .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.fromDepartment === 'Production' && !(m.processDetails?.isRejectionReturn || m.transactionType === 'REVERSAL'))
       .reduce((sum, m) => sum + m.quantity, 0);
     const totalProducedIncludingCurrent = totalMovedFromProdBefore + prodQty;
 
-    if (isRawMaterialCompulsory && jCard.processType !== 'Purchase' && totalProducedIncludingCurrent > issuedQty) {
+    if (sendAvail !== null && prodQty > sendAvail) {
       const hasUnacceptedIssuedMaterial = movements.some(m => 
         m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() &&
         m.fromDepartment === 'Raw Material Store' &&
@@ -1275,7 +1275,6 @@ Please adjust the quantity or request additional raw material issue.`);
 
     onUpdateJobCard(jCard.jobCardNo, {
       operatorName: prodOpName,
-      currentQty: prodQty,
       wireScrapQty: totalWireScrap,
       productionDetails: {
         operatorName: prodOpName,
@@ -1283,9 +1282,7 @@ Please adjust the quantity or request additional raw material issue.`);
         wireScrapQty: totalWireScrap,
         wireScrapReason: prodWireScrapReason,
         remarks: prodWireScrap > 0 ? `Produced: ${prodQty} ${unitLabel}, Wire Scrap: ${prodWireScrap} ${unitLabel} (${prodWireScrapReason})` : undefined
-      },
-      // Formula: Balance = Order Qty - Overall Processed Qty
-      balanceQty: Math.max(0, jCard.orderQty - totalProducedIncludingCurrent)
+      }
     });
 
     // Determine target department
@@ -1332,7 +1329,7 @@ Please adjust the quantity or request additional raw material issue.`);
     const receivedFromProd = htQtyReceived;
     const sentToPlating = htQtySentToPlating;
     const unitLabel = displayUnitLabel(jCard.unit);
-    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Heat Treatment') || receivedFromProd;
+    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Heat Treatment');
 
     if (sentToPlating > receivedFromProd) {
       alert(`Error: Sent quantity (${sentToPlating} ${unitLabel}) cannot exceed the received quantity (${receivedFromProd} ${unitLabel}).`);
@@ -1356,7 +1353,6 @@ Please adjust the quantity or request additional raw material issue.`);
       .reduce((sum, m) => sum + m.quantity, 0);
     onUpdateJobCard(jCard.jobCardNo, {
       customRoutedToPlating: (jCard.customRoutedToPlating || 0) + sentToPlating,
-      balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - htRejectionQty),
       heatTreatmentDetails: {
         hardnessRequired: htHardness,
         temperature: htTemp,
@@ -1386,7 +1382,7 @@ Please adjust the quantity or request additional raw material issue.`);
     const receivedFromHt = platingQtyReceived;
     const sentToPacking = platingQtySentToPacking;
     const unitLabel = displayUnitLabel(jCard.unit);
-    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Plating') || receivedFromHt;
+    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Plating');
 
     if (sentToPacking > receivedFromHt) {
       alert(`Error: Sent quantity (${sentToPacking} ${unitLabel}) cannot exceed the received quantity (${receivedFromHt} ${unitLabel}).`);
@@ -1410,7 +1406,6 @@ Please adjust the quantity or request additional raw material issue.`);
       .reduce((sum, m) => sum + m.quantity, 0);
     onUpdateJobCard(jCard.jobCardNo, {
       customRoutedToPacking: (jCard.customRoutedToPacking || 0) + sentToPacking,
-      balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - platingRejectionQty),
       platingDetails: {
         platingType,
         micronThickness: platingThick,
@@ -1440,7 +1435,7 @@ Please adjust the quantity or request additional raw material issue.`);
     const receivedFromPlating = packQtyReceived;
     const sentToStore = packQtySentToStore;
     const unitLabel = displayUnitLabel(jCard.unit);
-    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Packing') || receivedFromPlating;
+    const remainingAvailable = remainingAtDepartment(jCard, movements, 'Packing');
 
     if (sentToStore > receivedFromPlating) {
       alert(`Error: Sent quantity (${sentToStore} ${unitLabel}) cannot exceed the received quantity (${receivedFromPlating} ${unitLabel}).`);
@@ -1459,11 +1454,7 @@ Please adjust the quantity or request additional raw material issue.`);
 
     const prevPacking = jCard.packingDetails;
     const totalPackedIncludingCurrent = (prevPacking?.qtySentToStore || 0) + sentToStore;
-
-    const htRejectionTotal = jCard.heatTreatmentDetails?.rejectionQty || 0;
-    const platingRejectionTotal = jCard.platingDetails?.rejectionQty || 0;
     const packingRejectionTotal = (prevPacking?.rejectionQty || 0) + packRejectionQty;
-    const totalRejections = htRejectionTotal + platingRejectionTotal + packingRejectionTotal;
 
     const acceptedInbound = movements
       .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.toDepartment === 'Packing' && m.accepted)
@@ -1481,9 +1472,7 @@ Please adjust the quantity or request additional raw material issue.`);
         qtyRemaining: remainingQty,
         pcsPerBagOrBox: packPcsPerBagOrBox,
         totalPcs: (prevPacking?.totalPcs || 0) + packTotalPcs,
-      },
-      currentQty: sentToStore,
-      balanceQty: Math.max(0, jCard.orderQty - totalPackedIncludingCurrent - totalRejections)
+      }
     });
 
     onCreateMovement(attachProcess2MovementContract({
@@ -1682,9 +1671,7 @@ Please adjust the quantity or request additional raw material issue.`);
         qtyRemaining: remainingQty,
         pcsPerBagOrBox: jCard.packingDetails?.pcsPerBagOrBox,
         totalPcs: jCard.packingDetails?.totalPcs,
-      },
-      currentQty: sentToNext,
-      balanceQty: Math.max(0, jCard.orderQty - sentToNext)
+      }
     });
 
     onCreateMovement(attachProcess2MovementContract({
@@ -1718,8 +1705,6 @@ Please adjust the quantity or request additional raw material issue.`);
     const targetDept = 'Production';
 
     onUpdateJobCard(jCard.jobCardNo, {
-      currentQty: sentToNext,
-      balanceQty: Math.max(0, jCard.orderQty - sentToNext),
       storeDetails: {
         verifiedQty: sentToNext,
         locationBin: storeBinLoc,
@@ -1756,8 +1741,6 @@ Please adjust the quantity or request additional raw material issue.`);
     onUpdateJobCard(jCard.jobCardNo, {
       completed: true,
       status: 'Completed',
-      currentQty: dispQty,
-      balanceQty: Math.max(0, jCard.orderQty - dispQty),
       dispatchDetails: {
         invoiceNo: dispInvoice,
         vehicleNo: dispVehicle,
@@ -1833,7 +1816,7 @@ Please adjust the quantity or request additional raw material issue.`);
   const incomingTransfers = departmentIncomingTransfers;
 
   const pendingIssueRequests = movements.filter(m => {
-    return m.isIssueRequest && m.fromDepartment === 'Store' && !m.accepted;
+    return m.isIssueRequest && m.fromDepartment === 'Store' && !m.accepted && m.issueStatus !== 'Rejected';
   });
 
   const pendingRawMaterialRequests = movements.filter(m => {
@@ -1856,7 +1839,7 @@ Please adjust the quantity or request additional raw material issue.`);
       const hasUnacceptedIncomingToMe = movements.some(m => 
         m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && 
         m.toDepartment === activeDept && 
-        !m.accepted
+        isPendingAcceptanceMovement(m)
       );
       if (hasUnacceptedIncomingToMe) {
         return false;
@@ -1870,40 +1853,36 @@ Please adjust the quantity or request additional raw material issue.`);
       return c.processType === 'Purchase' && c.currentDepartment === 'Purchase';
     }
     if (activeDept === 'Production') {
-      return isVisibleInProductionQueue(c);
+      if (isVisibleInProductionQueue(c)) return true;
+      const returned = movements.some(m =>
+        m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() &&
+        m.toDepartment === 'Production' &&
+        (m.processDetails?.isRejectionReturn || m.transactionType === 'REVERSAL') &&
+        m.accepted
+      );
+      return returned && remainingAtProduction(c, movements, { compulsory: isRawMaterialCompulsory }) > 0;
     }
     if (activeDept === 'Heat Treatment') {
+      const pendingHTQty = remainingAtDepartment(c, movements, 'Heat Treatment');
       const totalReceivedAtHT = movements
         .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Heat Treatment' && m.accepted)
         .reduce((sum, m) => sum + m.quantity, 0);
-      const totalRoutedFromHT = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Heat Treatment')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingHTQty = totalReceivedAtHT - totalRoutedFromHT - (c.heatTreatmentDetails?.rejectionQty || 0);
-      
       const isHTRequiredOrRouted = c.heatTreatmentRequired || totalReceivedAtHT > 0 || c.currentDepartment === 'Heat Treatment';
       if (!isHTRequiredOrRouted) return false;
-
       return c.currentDepartment === 'Heat Treatment' || (totalReceivedAtHT > 0 && pendingHTQty > 0);
     }
     if (activeDept === 'Plating') {
       const totalReceivedAtPlating = movements
         .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Plating' && m.accepted)
         .reduce((sum, m) => sum + m.quantity, 0);
-      const totalRoutedFromPlating = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Plating')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingPlatingQty = totalReceivedAtPlating - totalRoutedFromPlating - (c.platingDetails?.rejectionQty || 0);
+      const pendingPlatingQty = remainingAtDepartment(c, movements, 'Plating');
       return c.currentDepartment === 'Plating' || (totalReceivedAtPlating > 0 && pendingPlatingQty > 0);
     }
     if (activeDept === 'Packing') {
       const totalReceivedAtPacking = movements
         .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Packing' && m.accepted)
         .reduce((sum, m) => sum + m.quantity, 0);
-      const totalRoutedFromPacking = movements
-        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Packing')
-        .reduce((sum, m) => sum + m.quantity, 0);
-      const pendingPackingQty = totalReceivedAtPacking - totalRoutedFromPacking - (c.packingDetails?.rejectionQty || 0);
+      const pendingPackingQty = remainingAtDepartment(c, movements, 'Packing');
       return c.currentDepartment === 'Packing' || (totalReceivedAtPacking > 0 && pendingPackingQty > 0);
     }
     return c.currentDepartment === activeDept;
@@ -1918,7 +1897,7 @@ Please adjust the quantity or request additional raw material issue.`);
       return Math.max(0, job.orderQty - totalMovedFromPurchase);
     }
     if (activeDept === 'Production') {
-      return remainingAtProduction(job, movements);
+      return remainingAtProduction(job, movements, { compulsory: isRawMaterialCompulsory });
     }
     if (activeDept === 'Heat Treatment') {
       const m = getJobCardProcessMetrics(job, movements);
@@ -3946,6 +3925,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                   onClick={() => {
                                     setActiveRejectionId(isRejecting ? null : mov.movementId);
                                     setRejectionNotes('');
+                                    setRejectQty(Number(mov.quantity) || 0);
+                                    setAcceptRemainderQty(0);
                                   }}
                                   disabled={isAccepting}
                                   className="bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold py-2.5 px-4 rounded-xl transition duration-200 flex-1 sm:flex-none flex items-center justify-center min-h-[44px] cursor-pointer"
@@ -3968,6 +3949,38 @@ Please adjust the quantity or request additional raw material issue.`);
                                   className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg p-2 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-rose-500"
                                   rows={2}
                                 />
+                                <div className="grid grid-cols-2 gap-2">
+                                  <label className="block text-[10px] text-rose-600 font-bold">
+                                    Reject qty
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={Number(mov.quantity) || 0}
+                                      value={rejectQty || ''}
+                                      onChange={e => {
+                                        const next = Number(e.target.value) || 0;
+                                        setRejectQty(next);
+                                        setAcceptRemainderQty(Math.max(0, Number(mov.quantity || 0) - next));
+                                      }}
+                                      className="mt-1 w-full bg-white dark:bg-slate-900 border border-rose-200 rounded p-1.5 font-mono text-xs"
+                                    />
+                                  </label>
+                                  <label className="block text-[10px] text-emerald-700 font-bold">
+                                    Accept remainder
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={Number(mov.quantity) || 0}
+                                      value={acceptRemainderQty || ''}
+                                      onChange={e => {
+                                        const next = Number(e.target.value) || 0;
+                                        setAcceptRemainderQty(next);
+                                        setRejectQty(Math.max(0, Number(mov.quantity || 0) - next));
+                                      }}
+                                      className="mt-1 w-full bg-white dark:bg-slate-900 border border-emerald-200 rounded p-1.5 font-mono text-xs"
+                                    />
+                                  </label>
+                                </div>
                                 <div className="flex justify-end gap-2">
                                   <button
                                     onClick={() => setActiveRejectionId(null)}
@@ -3978,10 +3991,14 @@ Please adjust the quantity or request additional raw material issue.`);
                                   <button
                                     onClick={() => {
                                       if (!rejectionNotes.trim()) return;
-                                      onRejectMovement(mov.movementId, rejectionNotes);
+                                      if (!(rejectQty > 0)) return;
+                                      onRejectMovement(mov.movementId, rejectionNotes, {
+                                        rejectedQty: rejectQty,
+                                        acceptedQty: acceptRemainderQty > 0 ? acceptRemainderQty : 0
+                                      });
                                       setActiveRejectionId(null);
                                     }}
-                                    disabled={!rejectionNotes.trim()}
+                                    disabled={!rejectionNotes.trim() || !(rejectQty > 0)}
                                     className="px-3 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white disabled:opacity-50"
                                   >
                                     Confirm Rejection
@@ -4258,17 +4275,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                           return;
                                         }
 
-                                        if (qtyNum < availableQty) {
-                                          // Partial release: Split job card
-                                          const remainingQty = availableQty - qtyNum;
-                                          
-                                          // 1. Update original card to keep remaining quantity in Incoming Store
-                                          onUpdateJobCard(job.jobCardNo, {
-                                            currentQty: remainingQty,
-                                            balanceQty: remainingQty
-                                          });
-
-                                          // 2. Create a new split-off job card for the released portion
+                                          if (qtyNum < availableQty) {
                                           const splitJobPayload: any = {
                                             partyName: job.partyName,
                                             itemName: job.itemName,
@@ -4299,9 +4306,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                         } else {
                                           // Full release: Move the entire card to target department
                                           onUpdateJobCard(job.jobCardNo, {
-                                            currentDepartment: storeReleaseDept,
                                             status: 'Pending Acceptance',
-                                            currentQty: qtyNum,
                                             heatTreatmentRequired: job.heatTreatmentRequired || storeReleaseDept === 'Heat Treatment'
                                           });
                                           onCreateMovement({
@@ -4717,6 +4722,8 @@ Please adjust the quantity or request additional raw material issue.`);
                           onSwipeLeft={() => {
                             setActiveRejectionId(isRejecting ? null : mov.movementId);
                             setRejectionNotes('');
+                            setRejectQty(Number(mov.quantity) || 0);
+                            setAcceptRemainderQty(0);
                           }}
                           rightLabel="Accept Cargo"
                           leftLabel="Reject Cargo"
@@ -4882,6 +4889,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                 onClick={() => {
                                   setActiveRejectionId(isRejecting ? null : mov.movementId);
                                   setRejectionNotes('');
+                                  setRejectQty(Number(mov.quantity) || 0);
+                                  setAcceptRemainderQty(0);
                                 }}
                                 disabled={isAccepting}
                                 className="bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold py-2.5 px-4 rounded-xl transition duration-200 flex-1 sm:flex-none flex items-center justify-center min-h-[44px] cursor-pointer"
@@ -4904,6 +4913,38 @@ Please adjust the quantity or request additional raw material issue.`);
                                 onChange={e => setRejectionNotes(e.target.value)}
                                 className="w-full bg-white dark:bg-slate-900 border border-slate-200 rounded p-2 focus:outline-none focus:border-rose-500"
                               />
+                              <div className="grid grid-cols-2 gap-2">
+                                <label className="block text-[10px] text-rose-600 font-bold">
+                                  Reject qty
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={Number(mov.quantity) || 0}
+                                    value={rejectQty || ''}
+                                    onChange={e => {
+                                      const next = Number(e.target.value) || 0;
+                                      setRejectQty(next);
+                                      setAcceptRemainderQty(Math.max(0, Number(mov.quantity || 0) - next));
+                                    }}
+                                    className="mt-1 w-full bg-white dark:bg-slate-900 border border-rose-200 rounded p-1.5 font-mono text-xs"
+                                  />
+                                </label>
+                                <label className="block text-[10px] text-emerald-700 font-bold">
+                                  Accept remainder
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    max={Number(mov.quantity) || 0}
+                                    value={acceptRemainderQty || ''}
+                                    onChange={e => {
+                                      const next = Number(e.target.value) || 0;
+                                      setAcceptRemainderQty(next);
+                                      setRejectQty(Math.max(0, Number(mov.quantity || 0) - next));
+                                    }}
+                                    className="mt-1 w-full bg-white dark:bg-slate-900 border border-emerald-200 rounded p-1.5 font-mono text-xs"
+                                  />
+                                </label>
+                              </div>
                               <div className="flex gap-1.5 justify-end">
                                 <button
                                   onClick={() => setActiveRejectionId(null)}
@@ -4914,10 +4955,14 @@ Please adjust the quantity or request additional raw material issue.`);
                                 <button
                                   onClick={() => {
                                     if (!rejectionNotes) return;
-                                    onRejectMovement(mov.movementId, rejectionNotes);
+                                    if (!(rejectQty > 0)) return;
+                                    onRejectMovement(mov.movementId, rejectionNotes, {
+                                      rejectedQty: rejectQty,
+                                      acceptedQty: acceptRemainderQty > 0 ? acceptRemainderQty : 0
+                                    });
                                     setActiveRejectionId(null);
                                   }}
-                                  disabled={!rejectionNotes}
+                                  disabled={!rejectionNotes || !(rejectQty > 0)}
                                   className="bg-rose-600 hover:bg-rose-500 text-white px-3 py-1.5 rounded text-[10px] font-bold disabled:opacity-40"
                                 >
                                   Finalize Rejection Back to Sender

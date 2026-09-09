@@ -77,8 +77,11 @@ async function run() {
     isIssueRequest: true, fromDepartment: "Raw Material Store", toDepartment: "Production", issueStatus: "Issued"
   }) === true);
 
-  const prodMoves = [{ jobCardNo: "JC-P2", fromDepartment: "Production", toDepartment: "Heat Treatment", quantity: 600, accepted: false }];
-  assert("TEST 6 remaining after 600 of 1000 is 400", remainingAtProduction(job, prodMoves) === 400);
+  const prodMoves = [
+    { jobCardNo: "JC-P2", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 1000 },
+    { jobCardNo: "JC-P2", fromDepartment: "Production", toDepartment: "Heat Treatment", quantity: 600, accepted: false }
+  ];
+  assert("TEST 6 remaining after 600 of 1000 accepted RM is 400", remainingAtProduction(job, prodMoves, { compulsory: true }) === 400);
 
   const sfgProd = { jobCardNo: "PUR-SFG", processType: "Purchase", currentDepartment: "Production", status: "Pending", completed: false };
   assert("TEST 7 Purchase SFG accepted in Production is visible", isVisibleInProductionQueue(sfgProd) === true);

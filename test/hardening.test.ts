@@ -53,6 +53,7 @@ async function run() {
     fromDepartment: "Production",
     toDepartment: "Heat Treatment",
     quantity: 10,
+    requireRawMaterialForProduction: false,
     actor: a
   });
   assert("1 concurrent first movement succeeds", r1.success === true && r1.movement?.accepted === false);
@@ -65,6 +66,7 @@ async function run() {
     fromDepartment: "Production",
     toDepartment: "Heat Treatment",
     quantity: 10,
+    requireRawMaterialForProduction: false,
     actor: a
   });
   assert("2 duplicate operationId returns cached original", r1b.cached === true && r1b.movement?.movementId === r1.movement?.movementId);
@@ -75,23 +77,39 @@ async function run() {
     fromDepartment: "Production",
     toDepartment: "Heat Treatment",
     quantity: 5,
+    requireRawMaterialForProduction: false,
     actor: a
   });
   assert("duplicate pending same route rejected", rDupPending.success === false);
 
   const store2 = new MemoryStore();
-  await seedJob(store2, 20);
+  await store2.set("mfr_job_cards", "JC-1001", {
+    jobCardNo: "JC-1001",
+    orderQty: 20,
+    currentQty: 20,
+    currentDepartment: "Packing",
+    status: "In Process",
+    version: 1
+  });
+  await store2.set("mfr_movements", "M-IN-PK", {
+    movementId: "M-IN-PK",
+    jobCardNo: "JC-1001",
+    fromDepartment: "Plating",
+    toDepartment: "Packing",
+    quantity: 20,
+    accepted: true
+  });
   const rInsuf = await commitMaterialMovementTx(store2, {
     operationId: "op-insuf",
     jobCardNo: "JC-1001",
-    fromDepartment: "Production",
-    toDepartment: "Plating",
+    fromDepartment: "Packing",
+    toDepartment: "Store",
     quantity: 50,
-    actor: a
+    actor: actor({ department: "Packing", allowedDepartments: ["Packing"] })
   });
   const jobUnchanged = await store2.get("mfr_job_cards", "JC-1001");
   assert("3 insufficient quantity rejected", rInsuf.success === false && (rInsuf.error || "").toLowerCase().includes("insufficient"));
-  assert("3b job unchanged after insufficient qty", jobUnchanged.currentQty === 20 && jobUnchanged.currentDepartment === "Production" && jobUnchanged.version === 1);
+  assert("3b job unchanged after insufficient qty", jobUnchanged.currentQty === 20 && jobUnchanged.currentDepartment === "Packing" && jobUnchanged.version === 1);
 
   const purchaseStore = new MemoryStore();
   await purchaseStore.set("mfr_job_cards", "PUR-1002", {
@@ -180,6 +198,7 @@ async function run() {
     fromDepartment: "Production",
     toDepartment: "Production",
     quantity: 1,
+    requireRawMaterialForProduction: false,
     actor: a
   });
   assert("9 same-department normal transfer rejected", rSame.success === false);
@@ -262,6 +281,7 @@ async function run() {
     fromDepartment: "Production",
     toDepartment: "Packing",
     quantity: 2,
+    requireRawMaterialForProduction: false,
     actor: a
   });
   const second = await commitMaterialMovementTx(idempStore, {
@@ -270,6 +290,7 @@ async function run() {
     fromDepartment: "Production",
     toDepartment: "Packing",
     quantity: 2,
+    requireRawMaterialForProduction: false,
     actor: a
   });
   const movs = await idempStore.list("mfr_movements");
@@ -330,6 +351,7 @@ async function run() {
       fromDepartment: "Production",
       toDepartment: "Heat Treatment",
       quantity: 4,
+      requireRawMaterialForProduction: false,
       actor: a
     }),
     commitMaterialMovementTx(concJob, {
@@ -338,6 +360,7 @@ async function run() {
       fromDepartment: "Production",
       toDepartment: "Heat Treatment",
       quantity: 4,
+      requireRawMaterialForProduction: false,
       actor: a
     })
   ]);
@@ -358,6 +381,7 @@ async function run() {
     fromDepartment: "Production",
     toDepartment: "Plating",
     quantity: 1,
+    requireRawMaterialForProduction: false,
     actor: a
   });
   const secondId = await commitMaterialMovementTx(collide, {
@@ -367,6 +391,7 @@ async function run() {
     fromDepartment: "Production",
     toDepartment: "Packing",
     quantity: 1,
+    requireRawMaterialForProduction: false,
     actor: a
   });
   assert("movementId collision rejected", firstId.success && secondId.success === false && secondId.statusCode === 409);

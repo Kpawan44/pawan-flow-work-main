@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { JobCard, MaterialMovement, Department, UserProfile } from '../../types';
 import { getJobCardProcessMetrics } from '../../lib/metrics';
+import { assertHeatTreatmentRouting, process2SendAvailableQty } from '../../hardening/process2Manufacturing';
 
 interface SplitBatchEntry {
   id: string;
@@ -77,20 +78,11 @@ export const MobileTransferSplitSheet: React.FC<MobileTransferSplitSheetProps> =
   // Compute available mass at source station using authoritative metrics
   const availableMass = useMemo(() => {
     if (!jobCard) return 0;
+    const cap = process2SendAvailableQty(fromDept, jobCard, movements, { compulsory: true });
+    if (cap !== null) return cap;
     const m = getJobCardProcessMetrics(jobCard, movements);
-    if (fromDept === 'Production') return m.qtyRemainingAtProd > 0 ? m.qtyRemainingAtProd : jobCard.orderQty;
-    if (fromDept === 'Heat Treatment') {
-      const remainingAtHt = Math.max(0, m.qtyReceivedFromProd - m.qtyRoutedToPlating - m.htRejections);
-      return remainingAtHt > 0 ? remainingAtHt : jobCard.orderQty;
-    }
-    if (fromDept === 'Plating') return m.qtyRemainingAtPlating > 0 ? m.qtyRemainingAtPlating : jobCard.orderQty;
-    if (fromDept === 'Packing') return m.qtyRemainingAtPacking > 0 ? m.qtyRemainingAtPacking : jobCard.orderQty;
-    if (fromDept === 'Store') return m.qtyRemainingInStock > 0 ? m.qtyRemainingInStock : jobCard.orderQty;
-
-    const totalTransferred = movements
-      .filter(mov => mov.jobCardNo.toLowerCase() === jobCard.jobCardNo.toLowerCase())
-      .reduce((acc, curr) => acc + curr.quantity, 0);
-    return Math.max(0, jobCard.orderQty - totalTransferred);
+    if (fromDept === 'Production') return Math.max(m.qtyRemainingAtProd, jobCard.orderQty);
+    return jobCard.currentQty || jobCard.orderQty;
   }, [jobCard, movements, fromDept]);
 
   // Initialize single entry when modal opens or jobCard changes
@@ -176,6 +168,13 @@ export const MobileTransferSplitSheet: React.FC<MobileTransferSplitSheetProps> =
     if (!isConservationValid) {
       setErrorMessage(`Invalid split mass. Total split (${totalSplitQuantity} KG) cannot exceed available (${availableMass} KG).`);
       return;
+    }
+    for (const e of splitEntries) {
+      const htGate = assertHeatTreatmentRouting(jobCard, fromDept, String(e.toDepartment));
+      if (!htGate.ok) {
+        setErrorMessage(htGate.error || "Invalid department routing.");
+        return;
+      }
     }
 
     setIsProcessing(true);

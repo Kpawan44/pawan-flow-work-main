@@ -251,6 +251,7 @@ describe("PROCESS 7 — UI & REST API SPLIT INTEGRATION & PARITY TESTS", () => {
       fromDepartment: "Production",
       toDepartment: "Heat Treatment",
       quantity: 200,
+      requireRawMaterialForProduction: false,
       actor: mockActor
     });
 

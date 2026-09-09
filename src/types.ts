@@ -340,6 +340,13 @@ export interface MaterialMovement {
   rejectedByUserId?: string;
   rejectedDate?: string;
   rejectionRemarks?: string;
+  acceptedQty?: number;
+  rejectedQty?: number;
+  resolutionStatus?: 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'PARTIAL' | 'SPLIT';
+  rejectionCycle?: number;
+  returnMovementId?: string;
+  returnMovementIds?: string[];
+  parentMovementId?: string;
 
   // Perfect Audit Trail Tracking
   initiatedByUserId?: string;
