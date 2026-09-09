@@ -72,6 +72,7 @@ import JobStatusBadge from './components/JobStatusBadge';
 import ConnectivityHealthWidget from './components/ConnectivityHealthWidget';
 import { getJobCardProcessMetrics, getJobCardDepartmentPending } from './lib/metrics';
 import { assertHeatTreatmentRouting, process2SendAvailableQty } from './hardening/process2Manufacturing';
+import { ensureClientMovementOperationId } from './hardening/movementOperationId';
 
 // Dynamic code-split lazy imports for heavy screens & modals
 const DepartmentOperations = lazy(() => import('./components/DepartmentOperations'));
@@ -1562,6 +1563,7 @@ export default function App() {
       if (Array.isArray(movOrMovs)) {
         const createdMovs: MaterialMovement[] = [];
         for (const mov of movOrMovs) {
+          ensureClientMovementOperationId(mov);
           validateMovementProductionLimit(mov);
           const created = await DBService.createMovement(mov, currentUser.userId, currentUser.name);
           createdMovs.push(created);
@@ -1588,6 +1590,7 @@ export default function App() {
           }
         );
       } else {
+        ensureClientMovementOperationId(movOrMovs);
         validateMovementProductionLimit(movOrMovs);
         const created = await DBService.createMovement(movOrMovs, currentUser.userId, currentUser.name);
         refreshAllStates();
@@ -1697,6 +1700,7 @@ export default function App() {
 
       const createdMovs: MaterialMovement[] = [];
       for (const t of transfers) {
+        ensureClientMovementOperationId(t);
         const created = await DBService.createMovement(t, currentUser.userId, currentUser.name);
         createdMovs.push(created);
       }

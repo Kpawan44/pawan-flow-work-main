@@ -20,6 +20,24 @@ export function resolveCreateMovementOperationId(body: Record<string, any> | nul
   return { ok: true, operationId: op };
 }
 
+/**
+ * Stamp a stable operationId onto a client payload object so retries reuse it.
+ * Does not mint a new id when one is already present.
+ */
+export function ensureClientMovementOperationId(payload: Record<string, any> | null | undefined): string {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("operationId is required.");
+  }
+  const existing = String(payload.operationId || "").trim();
+  if (existing) return existing;
+  const minted =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? `op-${crypto.randomUUID()}`
+      : `op-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  payload.operationId = minted;
+  return minted;
+}
+
 export function defaultAcceptOperationId(movementId: string, acceptQty?: number): string {
   if (acceptQty !== undefined && Number.isFinite(acceptQty)) {
     return `op-accept-${movementId}-${acceptQty}`;

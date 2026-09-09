@@ -1,4 +1,5 @@
 import { BatchScanVerificationItem, BatchScanVerificationResult } from '../types';
+import { ledgerAuthorizedExternalQty } from './process2Manufacturing';
 
 export interface BatchScanInput {
   scannedCode: string;
@@ -9,7 +10,8 @@ export function verifyBatchManifestTx(
   scannedInputs: BatchScanInput[],
   activeJobCardsMap: Map<string, any>,
   manifestId?: string,
-  dispatchGroupNo?: string
+  dispatchGroupNo?: string,
+  movements: any[] = []
 ): BatchScanVerificationResult {
   let validCount = 0;
   let invalidCount = 0;
@@ -43,7 +45,7 @@ export function verifyBatchManifestTx(
       continue;
     }
 
-    const availableQty = typeof jobCard.currentQty === 'number' ? jobCard.currentQty : 0;
+    const availableQty = ledgerAuthorizedExternalQty(jobCard, movements);
     const isCompleted = jobCard.status === 'Completed' || jobCard.stage === 'Completed';
 
     if (isCompleted || availableQty <= 0) {

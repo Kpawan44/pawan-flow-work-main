@@ -179,6 +179,7 @@ async function run() {
     orderQty: 100,
     version: 1
   });
+  await issueStore.set("mfr_rm_sku_master", "EN8-R", { code: "EN8-R", openingQty: 1000 });
   const rIssue = await commitMaterialMovementTx(issueStore, {
     operationId: "op-issue",
     jobCardNo: "JC-1001",
@@ -187,6 +188,7 @@ async function run() {
     quantity: 12,
     isIssueRequest: true,
     requestedQty: 12,
+    processDetails: { rawMaterialCode: "EN8-R" },
     actor: actor({ department: "Raw Material Store", allowedDepartments: ["Raw Material Store"] })
   });
   const jobAfterIssue = await issueStore.get("mfr_job_cards", "JC-1001");

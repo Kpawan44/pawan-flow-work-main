@@ -1,4 +1,5 @@
 import { SubcontractChallan, SubcontractChallanItem } from '../types';
+import { ledgerAuthorizedExternalQty } from './process2Manufacturing';
 
 export interface CreateChallanInput {
   vendorName: string;
@@ -19,7 +20,8 @@ export interface CreateChallanInput {
 export function createSubcontractChallanTx(
   input: CreateChallanInput,
   activeJobCardsMap: Map<string, any>,
-  existingChallanNos: Set<string>
+  existingChallanNos: Set<string>,
+  movements: any[] = []
 ): { success: boolean; challan?: SubcontractChallan; error?: string } {
   if (!input.vendorName || input.vendorName.trim() === '') {
     return { success: false, error: 'Vendor name is required for subcontract delivery challans.' };
@@ -46,7 +48,7 @@ export function createSubcontractChallanTx(
       return { success: false, error: `Job card ${item.jobCardNo} not found in active inventory.` };
     }
 
-    const available = typeof jobCard.currentQty === 'number' ? jobCard.currentQty : 0;
+    const available = ledgerAuthorizedExternalQty(jobCard, movements);
     if (item.sentQty > available) {
       return {
         success: false,

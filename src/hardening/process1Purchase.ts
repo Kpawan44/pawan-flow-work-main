@@ -284,7 +284,8 @@ export function isHeldInIncomingStore(job: {
 export function incomingStoreAvailableQty(
   jobs: Array<{ currentQty?: number; orderQty?: number; completed?: boolean; currentDepartment?: string; status?: string; materialType?: string }>
 ): number {
-  return jobs.filter(isHeldInIncomingStore).reduce((sum, j) => sum + Number(j.currentQty ?? j.orderQty ?? 0), 0);
+  // Display/cache helper only. Never inflate with orderQty. Transfer auth uses remainingAtDepartment / process2SendAvailableQty.
+  return jobs.filter(isHeldInIncomingStore).reduce((sum, j) => sum + Number(j.currentQty || 0), 0);
 }
 
 export function isVisibleInProductionQueue(job: {

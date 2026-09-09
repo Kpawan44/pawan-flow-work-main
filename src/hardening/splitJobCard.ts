@@ -1,4 +1,5 @@
 import { SimpleStore } from "./commitMaterialMovement";
+import { parentSplitAvailableQty } from "./process2Manufacturing";
 
 export interface JobSplitChildInput {
   childJobCardNo: string;
@@ -111,7 +112,8 @@ async function splitJobCardTxInner(
     totalChildQty += cQty;
   }
 
-  const parentAvailableQty = Number(parentJob.currentQty ?? parentJob.orderQty ?? 0);
+  const movements = await store.list("mfr_movements");
+  const parentAvailableQty = parentSplitAvailableQty(parentJob, movements);
   if (totalChildQty > parentAvailableQty) {
     return {
       success: false,

@@ -31,9 +31,17 @@ export const JOB_CARD_LEDGER_PROTECTED_FIELDS = [
   "undone"
 ] as const;
 
+/** Staff may record ordinary shop-floor status. Terminal ledger/workflow states are privileged. */
+const STAFF_ALLOWED_STATUS = new Set([
+  "in process",
+  "in progress",
+  "pending",
+  "pending acceptance",
+  "on hold"
+]);
+
 const WORKFLOW_ALLOWED_FIELDS = new Set([
   "operatorName",
-  "status",
   "productionDetails",
   "heatTreatmentDetails",
   "platingDetails",
@@ -56,7 +64,6 @@ const WORKFLOW_ALLOWED_FIELDS = new Set([
   "rawStoreDate",
   "outsourceDetails",
   "remarks",
-  "heatTreatmentRequired",
   "customRoutedToPlating",
   "customRoutedToPacking",
   "customRoutedToStore",
@@ -77,7 +84,31 @@ const WORKFLOW_ALLOWED_FIELDS = new Set([
   "poNumber"
 ]);
 
-const DISPATCH_OR_ADMIN_EXTRA = new Set(["completed"]);
+const DISPATCH_OR_ADMIN_EXTRA = new Set(["completed", "heatTreatmentRequired"]);
+
+/** Department-owned workflow blobs. Ordinary staff may update only their own department's fields. */
+const DEPARTMENT_OWNED_FIELDS: Record<string, string> = {
+  productionDetails: "Production",
+  heatTreatmentDetails: "Heat Treatment",
+  platingDetails: "Plating",
+  packingDetails: "Packing",
+  packingCompleted: "Packing",
+  packingDate: "Packing",
+  storeDetails: "Store",
+  storeCompleted: "Store",
+  storeDate: "Store",
+  purchaseDetails: "Purchase",
+  purchaseCompleted: "Purchase",
+  purchaseDate: "Purchase",
+  dispatchDetails: "Dispatch",
+  rawMaterialStoreDetails: "Raw Material Store",
+  rawStoreDetails: "Raw Material Store",
+  rawStoreCompleted: "Raw Material Store",
+  rawStoreDate: "Raw Material Store",
+  incomingStoreDetails: "Incoming Store",
+  incomingStoreCompleted: "Incoming Store",
+  incomingStoreDate: "Incoming Store"
+};
 
 export interface JobCardPutPolicyResult {
   ok: boolean;
@@ -124,7 +155,22 @@ export function applyJobCardPutPolicy(
       sanitized[key] = updates[key];
       continue;
     }
+    if (key === "status") {
+      const nextStatus = String(updates[key] ?? "").trim();
+      const isStaffStatus = STAFF_ALLOWED_STATUS.has(nextStatus.toLowerCase());
+      if (!isStaffStatus && !canDispatchExtras) {
+        rejectedFields.push(key);
+        continue;
+      }
+      sanitized[key] = updates[key];
+      continue;
+    }
     if (!WORKFLOW_ALLOWED_FIELDS.has(key)) {
+      rejectedFields.push(key);
+      continue;
+    }
+    const ownedDept = DEPARTMENT_OWNED_FIELDS[key];
+    if (ownedDept && !isAdmin && !canDispatchExtras && !isDeptAuthorized(actor, ownedDept)) {
       rejectedFields.push(key);
       continue;
     }

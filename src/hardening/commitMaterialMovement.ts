@@ -1,10 +1,14 @@
 import { VALID_MANUFACTURING_DEPARTMENTS } from "./constants";
 import { canPurchaseUserOperateIncomingStore, isIncomingStoreDept } from "./process1Purchase";
+import { computeRmRuntimeStock } from "./rmSkuMaster";
 import {
   assertHeatTreatmentRouting,
   attachProcess2MovementContract,
   findPendingDuplicateMovement,
-  process2SendAvailableQty
+  process2SendAvailableQty,
+  remainingAtDepartment,
+  rmIssueAvailableQty,
+  storeAuthoritativeOnHand
 } from "./process2Manufacturing";
 import { createMovementRequestFingerprint } from "./movementOperationId";
 
@@ -181,39 +185,6 @@ async function commitMaterialMovementTxInner(
       return { success: false, statusCode: 404, error: `Job Card '${jobCardNo}' not found.` };
     }
 
-    if (!isIssue && normFrom !== "Purchase" && normFrom !== "Raw Material Store") {
-      const movementsForQty = input.preloadedMovements || (await store.list("mfr_movements"));
-      const sendAvail = process2SendAvailableQty(normFrom, jobCardData, movementsForQty, {
-        compulsory: input.requireRawMaterialForProduction
-      });
-      if (sendAvail !== null) {
-        if (reqQty > sendAvail) {
-          return {
-            success: false,
-            statusCode: 400,
-            error: `Insufficient available quantity. Requested ${reqQty}, but only ${sendAvail} remaining in ${normFrom}.`
-          };
-        }
-      } else if (normFrom.toLowerCase() !== "production") {
-        const currentAvailableQty = Number(jobCardData.currentQty ?? jobCardData.orderQty ?? 0);
-        if (reqQty > currentAvailableQty) {
-          return {
-            success: false,
-            statusCode: 400,
-            error: `Insufficient available quantity. Requested ${reqQty} KG, but only ${currentAvailableQty} KG available in ${normFrom}.`
-          };
-        }
-      }
-    }
-
-    const htGate = assertHeatTreatmentRouting(jobCardData, normFrom, normTo, {
-      isIssueRequest: isIssue,
-      isRejectionReturn: Boolean(input.processDetails?.isRejectionReturn)
-    });
-    if (!htGate.ok) {
-      return { success: false, statusCode: 400, error: htGate.error };
-    }
-
     if (!isIssue && !stockIn) {
       const movements = input.preloadedMovements || (await store.list("mfr_movements"));
       if (findPendingDuplicateMovement(movements, { jobCardNo, fromDepartment: normFrom, toDepartment: normTo, isIssueRequest: isIssue })) {
@@ -223,6 +194,57 @@ async function commitMaterialMovementTxInner(
           error: `A transfer request for Job Card ${jobCardNo} from ${normFrom} to ${normTo} is already pending acceptance.`
         };
       }
+    }
+
+    const movementsForQty = input.preloadedMovements || (await store.list("mfr_movements"));
+    if (isIssue) {
+      let issueAvail = 0;
+      if (normFrom === "Raw Material Store") {
+        const skuCode = String(
+          input.processDetails?.rawMaterialCode ||
+            input.extra?.processDetails?.rawMaterialCode ||
+            jobCardData?.itemCode ||
+            ""
+        ).trim();
+        let opening = 0;
+        if (skuCode) {
+          const sku =
+            (await store.get("mfr_rm_sku_master", skuCode.toUpperCase())) ||
+            (await store.get("mfr_rm_sku_master", skuCode));
+          opening = Number(sku?.openingQty || 0);
+        }
+        issueAvail = rmIssueAvailableQty(jobCardData, movementsForQty, skuCode, opening);
+      } else if (normFrom === "Store") {
+        issueAvail = storeAuthoritativeOnHand(jobCardData, movementsForQty);
+      } else {
+        issueAvail = remainingAtDepartment(jobCardData, movementsForQty, normFrom);
+      }
+      if (reqQty > issueAvail) {
+        return {
+          success: false,
+          statusCode: 400,
+          error: `Insufficient available quantity. Requested ${reqQty}, but only ${issueAvail} remaining for issue from ${normFrom}.`
+        };
+      }
+    } else {
+      const sendAvail = process2SendAvailableQty(normFrom, jobCardData, movementsForQty, {
+        compulsory: input.requireRawMaterialForProduction
+      });
+      if (sendAvail !== null && reqQty > sendAvail) {
+        return {
+          success: false,
+          statusCode: 400,
+          error: `Insufficient available quantity. Requested ${reqQty}, but only ${sendAvail} remaining in ${normFrom}.`
+        };
+      }
+    }
+
+    const htGate = assertHeatTreatmentRouting(jobCardData, normFrom, normTo, {
+      isIssueRequest: isIssue,
+      isRejectionReturn: Boolean(input.processDetails?.isRejectionReturn)
+    });
+    if (!htGate.ok) {
+      return { success: false, statusCode: 400, error: htGate.error };
     }
   }
 

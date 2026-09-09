@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, ArrowRight, Save, Info, AlertTriangle, ArrowUpDown, ChevronDown } from 'lucide-react';
 import { JobCard, MaterialMovement, Department, UserProfile, CompanyConfig } from '../types';
-import { getJobCardProcessMetrics } from '../lib/metrics';
-import { assertHeatTreatmentRouting, process2SendAvailableQty } from '../hardening/process2Manufacturing';
+import { assertHeatTreatmentRouting, process2SendAvailableQty, remainingAtDepartment } from '../hardening/process2Manufacturing';
 
 interface BulkTransferModalProps {
   isOpen: boolean;
@@ -17,6 +16,7 @@ interface BulkTransferModalProps {
     toDepartment: Department | 'Completed';
     quantity: number;
     remarks?: string;
+    operationId?: string;
   }[]) => Promise<void>;
 }
 
@@ -47,11 +47,7 @@ const getAvailableWeight = (jobCard: JobCard, movements: MaterialMovement[], com
     compulsory: companyConfig?.requireRawMaterialForProduction !== false
   });
   if (cap !== null) return cap;
-  const m = getJobCardProcessMetrics(jobCard, movements);
-  if (fromDept === 'Production') {
-    return Math.max(m.qtyRemainingAtProd, jobCard.orderQty);
-  }
-  return jobCard.currentQty || jobCard.orderQty;
+  return remainingAtDepartment(jobCard, movements, fromDept);
 };
 
 export default function BulkTransferModal({
@@ -70,6 +66,11 @@ export default function BulkTransferModal({
   
   // Keep track of quantities per job card in a state dictionary
   const [quantities, setQuantities] = useState<Record<string, number>>({});
+  const retryOperationIdsRef = useRef<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!isOpen) retryOperationIdsRef.current = {};
+  }, [isOpen]);
 
   // Filter out any selected job cards that are already Completed
   const activeSelectedCards = selectedJobCards.filter(j => j.currentDepartment !== 'Completed');
@@ -143,12 +144,20 @@ export default function BulkTransferModal({
         return;
       }
 
+      if (!retryOperationIdsRef.current[j.jobCardNo]) {
+        retryOperationIdsRef.current[j.jobCardNo] =
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? `op-bulk-${j.jobCardNo}-${crypto.randomUUID()}`
+            : `op-bulk-${j.jobCardNo}-${Date.now()}`;
+      }
+
       transfersPayload.push({
         jobCardNo: j.jobCardNo,
         fromDepartment: fromDept,
         toDepartment: toDept,
         quantity: qty,
-        remarks: remarks.trim() || `Bulk transfer execution via grid ledger view.`
+        remarks: remarks.trim() || `Bulk transfer execution via grid ledger view.`,
+        operationId: retryOperationIdsRef.current[j.jobCardNo]
       });
     }
 

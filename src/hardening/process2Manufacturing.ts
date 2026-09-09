@@ -344,6 +344,8 @@ export function remainingAtDepartment(
     // Ledger history for this job exists: a department with no inbound/outbound is empty.
     // Do not let a manipulated currentQty cache invent transferable quantity.
     if (cardMoves.length > 0) return 0;
+    // LEGACY_NO_HISTORY_FALLBACK: only when this job has zero movements. Never use orderQty.
+    // Once any movement exists, cache cannot increase transferable quantity.
     return Math.max(0, Number(job.currentQty || 0));
   }
   return Math.max(0, received - sent - effectiveRejection);
@@ -538,7 +540,7 @@ export function getCumulativeDispatchedQty(
         normalizeDeptName(m.toDepartment) === "dispatch" &&
         m.accepted === true
     )
-    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
+    .reduce((sum, m) => sum + creditedInboundQty(m), 0);
 
   if (dispatchedMovQty > 0) return dispatchedMovQty;
   return Number(job.dispatchDetails?.dispatchQty || 0);
@@ -581,6 +583,62 @@ export function sameDepartmentTransferBlocked(fromDepartment: string, toDepartme
   return normalizeDeptName(fromDepartment) === normalizeDeptName(toDepartment) && Boolean(fromDepartment);
 }
 
+/** Split authorization: ledger remaining when history exists; currentQty only if there are zero movements. Never orderQty. */
+export function parentSplitAvailableQty(
+  job: {
+    jobCardNo?: string;
+    currentQty?: number;
+    currentDepartment?: string;
+    processType?: string;
+    orderQty?: number;
+  },
+  movements: any[] = [],
+  opts?: { compulsory?: boolean }
+): number {
+  if (!job) return 0;
+  const target = String(job.jobCardNo || "").toLowerCase();
+  const hasLedger = (movements || []).some(
+    (m) => m && String(m.jobCardNo || "").toLowerCase() === target && !isDeletedMovement(m)
+  );
+  if (hasLedger) {
+    const dept = job.currentDepartment || "Production";
+    const cap = process2SendAvailableQty(dept, job, movements, opts);
+    if (cap !== null) return cap;
+    return remainingAtDepartment(job, movements, dept);
+  }
+  return Math.max(0, Number(job.currentQty || 0));
+}
+
+/** Store/challan/scan: ledger custody when history exists; currentQty only with zero movements. */
+export function ledgerAuthorizedExternalQty(job: any, movements: any[] = []): number {
+  if (!job) return 0;
+  const target = String(job.jobCardNo || "").toLowerCase();
+  const related = (movements || []).filter(
+    (m) => m && String(m.jobCardNo || "").toLowerCase() === target && !isDeletedMovement(m)
+  );
+  if (related.length > 0) {
+    const dept = job.currentDepartment || "Store";
+    if (normalizeDeptName(dept) === "store") return storeAuthoritativeOnHand(job, movements);
+    const cap = process2SendAvailableQty(dept, job, movements);
+    if (cap !== null) return cap;
+    return remainingAtDepartment(job, movements, dept);
+  }
+  return Math.max(0, Number(job.currentQty || 0));
+}
+
+export function rmIssueAvailableQty(
+  job: any,
+  movements: any[],
+  skuCode: string | undefined,
+  skuOpeningQty: number
+): number {
+  const code = String(skuCode || job?.itemCode || "").trim();
+  if (code) {
+    return computeRmRuntimeStock(Number(skuOpeningQty) || 0, movements || [], code);
+  }
+  return remainingAtDepartment(job, movements, "Raw Material Store");
+}
+
 export function process2SendAvailableQty(
   fromDepartment: string,
   job: any,
@@ -588,12 +646,15 @@ export function process2SendAvailableQty(
   opts?: { compulsory?: boolean }
 ): number | null {
   const from = normalizeDeptName(fromDepartment);
-  if (from === "production") return productionSendAvailable(job, movements, opts);
-  if (from === "heat treatment") return remainingAtDepartment(job, movements, "Heat Treatment");
-  if (from === "plating") return remainingAtDepartment(job, movements, "Plating");
-  if (from === "packing") return remainingAtDepartment(job, movements, "Packing");
+  if (from === "production") {
+    const rmCap = productionSendAvailable(job, movements, opts);
+    // OPTIONAL_RM_NO_LEDGER_CEILING: when RM is not compulsory (or Purchase), do not invent a
+    // transferable qty from orderQty/currentQty. Compulsory RM uses the RM+returns-outbound ledger.
+    if (rmCap !== null) return rmCap;
+    return null;
+  }
   if (from === "store") return storeAuthoritativeOnHand(job, movements);
-  return null;
+  return remainingAtDepartment(job, movements, fromDepartment);
 }
 
 export function deriveCachedCurrentQty(

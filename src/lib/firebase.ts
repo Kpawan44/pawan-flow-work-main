@@ -34,9 +34,16 @@ import {
   denyDirectMovementDelete,
   denyDirectMovementUpdate,
   isLedgerCollectionBlockedFromClientSync,
-  JOB_CARD_CREATE_NO_CLIENT_FALLBACK_MESSAGE
+  JOB_CARD_CREATE_NO_CLIENT_FALLBACK_MESSAGE,
+  FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE
 } from '../hardening/clientLedgerGuards';
 import { omitLedgerFieldsFromJobCardPut } from '../hardening/jobCardUpdatePolicy';
+import {
+  authorizeDatabaseRestore,
+  isLedgerRestoreCollection,
+  RESTORE_LEDGER_CLIENT_BLOCKED_MESSAGE
+} from '../hardening/restoreDatabaseDumpPolicy';
+import { JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE } from '../hardening/jobCardTombstone';
 
 // Directly use configuration from firebase-applet-config.json
 export { firebaseConfig };
@@ -1328,10 +1335,7 @@ export class DBService {
     setLocalStorageItem('mfr_job_cards', updatedCards);
     this.setMemCache('mfr_job_cards', updatedCards);
 
-    const cachedMovements = getLocalStorageItem<MaterialMovement[]>('mfr_movements', []);
-    const updatedMovements = cachedMovements.filter(m => m.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
-    setLocalStorageItem('mfr_movements', updatedMovements);
-    this.setMemCache('mfr_movements', updatedMovements);
+    // Keep movement history in local cache; do not physically delete ledger rows.
 
     const cachedNotifications = getLocalStorageItem<any[]>('mfr_notifications', []);
     const updatedNotifications = cachedNotifications.filter(n => !n.message?.toLowerCase().includes(jobCardNo.toLowerCase()));
@@ -1353,64 +1357,23 @@ export class DBService {
         }
       }
     } catch (apiErr) {
-      // Fall through to direct Firestore
+      throw new Error(JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE);
     }
 
-    // 3. Direct Physical Firestore fallback with tombstone creation
-    if (!apiDeleted && useRealFirebase && db) {
-      try {
-        const refUpper = doc(db, 'mfr_job_cards', upperNo);
-        const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
-        
-        // Write tombstone
-        const tombRef = doc(db, 'mfr_deleted_job_cards', upperNo);
-        await setDoc(tombRef, {
-          jobCardNo: upperNo,
-          deletedAt: new Date().toISOString(),
-          deletedBy: userId,
-          deletedByName: userName,
-          tombstone: true
-        });
-
-        const snapUpper = await getDoc(refUpper);
-        if (snapUpper.exists()) {
-          await deleteDoc(refUpper);
-        }
-        const snapAsIs = await getDoc(refAsIs);
-        if (snapAsIs.exists()) {
-          await deleteDoc(refAsIs);
-        }
-
-        // Cascade delete movements from Firestore
-        const movementsSnap = await getDocs(query(collection(db, 'mfr_movements'), where('jobCardNo', '==', jobCardNo)));
-        for (const docSnap of movementsSnap.docs) {
-          await deleteDoc(doc(db, 'mfr_movements', docSnap.id));
-        }
-
-        // Cascade delete notifications mentioning this job card
-        const notificationsSnap = await getDocs(collection(db, 'mfr_notifications'));
-        for (const docSnap of notificationsSnap.docs) {
-          const notif = docSnap.data();
-          if (notif.message && notif.message.toLowerCase().includes(jobCardNo.toLowerCase())) {
-            await deleteDoc(doc(db, 'mfr_notifications', docSnap.id));
-          }
-        }
-      } catch (err: any) {
-        handleFirestoreError(err, OperationType.DELETE, `mfr_job_cards/${upperNo}`);
-      }
+    if (!apiDeleted) {
+      throw new Error(JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE);
     }
 
     // 4. Broadcast instant cross-device SSE synchronization
     await this.broadcastEvent('JOB_UPDATED').catch(() => {});
     await this.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
 
-    await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Deleted Job Card: ${jobCardNo} and all related material transitions/notifications`);
+    await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Tombstoned Job Card: ${jobCardNo}. Movement history preserved.`);
   }
 
   static async deleteAllJobCards(userId: string, userName: string): Promise<{ success: boolean; deletedCollections?: Record<string, number>; remainingDocuments: number; superAdminPreserved: boolean; message: string }> {
     await this.verifyAdmin(userId);
 
-    // 1. Invalidate caches and clear Local Storage offline caches & sync queues
     const targetCollections = [
       'mfr_job_cards',
       'mfr_movements',
@@ -1423,15 +1386,7 @@ export class DBService {
       'mfr_idempotency_keys'
     ];
 
-    for (const col of targetCollections) {
-      this.invalidateCache(col);
-      setLocalStorageItem(col, []);
-      this.setMemCache(col, []);
-    }
-    setLocalStorageItem('mfr_sync_queue', []);
-    this.setMemCache('mfr_sync_queue', []);
-
-    // 2. Authoritative Server API Deletion
+    // Authoritative Server API only. Never deleteDoc ledger collections from the client.
     let apiResult: any = null;
     try {
       const headers = await this.getAuthHeaders();
@@ -1439,7 +1394,6 @@ export class DBService {
         method: 'POST',
         headers
       });
-      // Fallback: If backend exposes legacy /api/job-cards/delete-all endpoint
       if (res.status === 404) {
         res = await fetch(`${getApiBaseUrl()}/api/job-cards/delete-all`, {
           method: 'POST',
@@ -1453,7 +1407,6 @@ export class DBService {
         }
       } else {
         const errJson = await res.json().catch(() => ({}));
-        // Provide specific, actionable error messages per HTTP status
         if (res.status === 404) {
           throw new Error(
             'Factory purge service is not available on the connected server. ' +
@@ -1472,7 +1425,6 @@ export class DBService {
         }
       }
     } catch (apiErr: any) {
-      // Re-throw specific HTTP errors (404, 401, 403, 500 etc.) — these are actionable
       const isSpecificHttpError = apiErr.message && (
         apiErr.message.includes('not available on the connected server') ||
         apiErr.message.includes('Authentication required') ||
@@ -1483,25 +1435,21 @@ export class DBService {
       if (isSpecificHttpError) {
         throw apiErr;
       }
-      // Network / fetch errors: fall through to Firestore fallback
-      console.warn("[FACTORY_PURGE] Backend API unreachable, falling back to direct Firestore:", apiErr);
+      throw new Error(FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE);
     }
 
-    // 3. Physical Firestore fallback (Only if backend endpoint was unreachable)
-    if (!apiResult && useRealFirebase && db) {
-      try {
-        for (const colName of targetCollections) {
-          const querySnapshot = await getDocs(collection(db, colName));
-          for (const docSnap of querySnapshot.docs) {
-            await deleteDoc(doc(db, colName, docSnap.id));
-          }
-        }
-      } catch (err) {
-        handleFirestoreError(err, OperationType.DELETE, 'mfr_job_cards');
-      }
+    if (!apiResult) {
+      throw new Error(FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE);
     }
 
-    // 4. Broadcast instant cross-device SSE synchronization
+    for (const col of targetCollections) {
+      this.invalidateCache(col);
+      setLocalStorageItem(col, []);
+      this.setMemCache(col, []);
+    }
+    setLocalStorageItem('mfr_sync_queue', []);
+    this.setMemCache('mfr_sync_queue', []);
+
     await this.broadcastEvent('ALL_UPDATED').catch(() => {});
     await this.broadcastEvent('JOB_UPDATED').catch(() => {});
     await this.broadcastEvent('MOVEMENT_UPDATED').catch(() => {});
@@ -1509,13 +1457,7 @@ export class DBService {
 
     await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Complete factory data purge executed by ${userName}. Erased all job cards, movements, raw material items, process transfers, outsource orders, and notifications. Super Admin preserved.`);
 
-    return apiResult || {
-      success: true,
-      deletedCollections: {},
-      remainingDocuments: 0,
-      superAdminPreserved: true,
-      message: "All factory operational and Raw Material data completely purged. Super Admin account preserved."
-    };
+    return apiResult;
   }
 
   static async factoryReset(pin: string): Promise<{ success: boolean; resetOperationId?: string; factoryResetGeneration?: string; superAdminPreserved?: any; message?: string }> {
@@ -1649,9 +1591,10 @@ export class DBService {
     const newId = `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const nowIso = new Date().toISOString();
     const providedOp = String((movement as any).operationId || "").trim();
-    const opKey = providedOp || (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-      ? `op-${crypto.randomUUID()}`
-      : `op-${newId}`);
+    if (!providedOp) {
+      throw new Error("operationId is required. Retry the same create with the identical operationId to avoid duplicate movements.");
+    }
+    const opKey = providedOp;
     
     const newMov: MaterialMovement = {
       ...(contracted as any),
@@ -2456,6 +2399,10 @@ export class DBService {
   }
 
   static async addToSyncQueue(action: string, description: string, operations: SyncQueueOperation[]): Promise<void> {
+    const ledgerOps = (operations || []).filter((op) => isLedgerCollectionBlockedFromClientSync(op.collection));
+    if (ledgerOps.length > 0) {
+      return;
+    }
     const queue = this.getSyncQueue();
     // Avoid duplicates of pending identical items
     const isDup = queue.some(item => 
@@ -2892,52 +2839,46 @@ export class DBService {
   }
 
   static async restoreDatabaseDump(dump: Record<string, any>, userId: string, userName: string): Promise<void> {
+    await this.verifyAdmin(userId);
+
+    const users = await this.getUsers();
+    const actor = users.find(u => u.userId === userId);
+    const gate = authorizeDatabaseRestore(actor);
+    if (!gate.ok) {
+      throw new Error(gate.error);
+    }
+
     if (!dump || typeof dump !== 'object') {
       throw new Error("Invalid backup payload");
     }
 
-    // Restore to local storage caches first
     if (Array.isArray(dump.users)) setLocalStorageItem('mfr_users', dump.users);
-    if (Array.isArray(dump.jobCards)) setLocalStorageItem('mfr_job_cards', dump.jobCards);
-    if (Array.isArray(dump.movements)) setLocalStorageItem('mfr_movements', dump.movements);
     if (Array.isArray(dump.notifications)) setLocalStorageItem('mfr_notifications', dump.notifications);
     if (Array.isArray(dump.auditLogs)) setLocalStorageItem('mfr_audit_logs', dump.auditLogs);
     if (Array.isArray(dump.items)) setLocalStorageItem('mfr_items', dump.items);
     if (dump.companyConfig) setLocalStorageItem('mfr_company_config', dump.companyConfig);
 
-    // If live firebase is active, we can write them physically to Firestore as well!
+    const skippedLedger = Array.isArray(dump.jobCards) || Array.isArray(dump.movements);
+
     if (useRealFirebase && db) {
       try {
-        // Write company config
         if (dump.companyConfig) {
           await setDoc(doc(db, 'mfr_company_config', 'global'), dump.companyConfig);
         }
-        // Write users
         if (Array.isArray(dump.users)) {
           for (const u of dump.users) {
-            await setDoc(doc(db, 'mfr_users', u.userId), u);
+            if (u?.userId) await setDoc(doc(db, 'mfr_users', u.userId), u);
           }
         }
-        // Write job cards
-        if (Array.isArray(dump.jobCards)) {
-          for (const j of dump.jobCards) {
-            await setDoc(doc(db, 'mfr_job_cards', j.jobCardNo), j);
-          }
-        }
-        // Write movements
-        if (Array.isArray(dump.movements)) {
-          for (const m of dump.movements) {
-            await setDoc(doc(db, 'mfr_movements', m.movementId), m);
-          }
-        }
-        // Write items
         if (Array.isArray(dump.items)) {
           for (const i of dump.items) {
-            await setDoc(doc(db, 'mfr_items', i.id), i);
+            if (i?.id && !isLedgerRestoreCollection('mfr_items')) {
+              await setDoc(doc(db, 'mfr_items', i.id), i);
+            }
           }
         }
       } catch (err) {
-        console.warn("Could not sync all backup collections to physical Firestore:", err);
+        console.warn("Could not sync non-ledger backup collections to Firestore:", err);
       }
     }
 
@@ -2945,7 +2886,7 @@ export class DBService {
       userId,
       userName,
       'RESTORE_DATABASE',
-      `Database restored from backup timestamped ${dump.exportedAt || 'unknown'}`
+      `Non-ledger collections restored from backup timestamped ${dump.exportedAt || 'unknown'}.${skippedLedger ? " " + RESTORE_LEDGER_CLIENT_BLOCKED_MESSAGE : ""}`
     );
   }
 

@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 import { JobCard, MaterialMovement, AuditLog } from '../types';
-import { getJobCardProcessMetrics, getJobCardDepartmentPending } from './metrics';
+import { getJobCardProcessMetrics, getJobCardDepartmentPending, jobCardLedgerWipQty } from './metrics';
+import { getCumulativeDispatchedQty, remainingAtDepartment } from '../hardening/process2Manufacturing';
 import { getDynamicRawMaterialsStock } from '../components/RawMaterialRequestModal';
 import { isHeldInIncomingStore } from '../hardening/process1Purchase';
 
@@ -26,7 +27,7 @@ export function exportComprehensiveExcelBackup(
   const completedJobs = jobCards.filter(j => j.completed);
   const rejectedJobs = jobCards.filter(j => j.status === 'Rejected');
   const totalTargetQty = jobCards.reduce((acc, j) => acc + (j.orderQty || 0), 0);
-  const totalDispatchedQty = jobCards.reduce((acc, j) => acc + (j.dispatchDetails?.dispatchQty || (j.completed ? j.currentQty : 0)), 0);
+  const totalDispatchedQty = jobCards.reduce((acc, j) => acc + getCumulativeDispatchedQty(j, movements), 0);
 
   const overviewRows = [
     ['MFR ERP SYSTEM - COMPREHENSIVE BACKUP REPORT WORKBOOK'],
@@ -189,7 +190,7 @@ export function exportComprehensiveExcelBackup(
       c.itemName,
       c.itemCode || 'N/A',
       c.materialType || c.processType || 'Purchase Inward',
-      c.currentQty || c.orderQty || 0,
+      remainingAtDepartment(c, movements, 'Incoming Store'),
       c.unit || 'KG',
       c.purchaseDetails?.billNo || 'N/A',
       latestMov?.allottedLocation || c.storeDetails?.locationBin || 'Purchase Buffer',
@@ -363,7 +364,7 @@ export function exportComprehensiveExcelBackup(
       c.jobCardNo, c.partyName, c.itemName, c.createdBy || 'Unknown',
       c.dispatchDetails?.invoiceNo || 'INV-Pending',
       c.dispatchDetails?.vehicleNo || 'Self Pick',
-      c.dispatchDetails?.dispatchQty || c.currentQty,
+      getCumulativeDispatchedQty(c, movements),
       c.dispatchDetails?.dispatchDate || c.createdAt
     ]);
   const wsDispatch = XLSX.utils.aoa_to_sheet([dispatchHeaders, ...dispatchRows]);
@@ -419,11 +420,15 @@ export function exportComprehensiveExcelBackup(
     'Balance Weight (KG)', 'Current Dept', 'Status'
   ];
   const balanceRows = jobCards.map(c => {
-    const processedWeight = c.completed ? c.currentQty : 0;
+    const processedWeight = getCumulativeDispatchedQty(c, movements);
+    const scrapWeight =
+      Number(c.heatTreatmentDetails?.rejectionQty || 0) +
+      Number(c.platingDetails?.rejectionQty || 0) +
+      Number(c.packingDetails?.rejectionQty || 0);
     return [
       c.jobCardNo, c.partyName, c.itemCode || '', c.createdBy || 'Unknown',
-      c.orderQty, processedWeight, Math.max(0, c.orderQty - c.currentQty),
-      c.balanceQty, c.currentDepartment, c.status
+      c.orderQty, processedWeight, scrapWeight,
+      jobCardLedgerWipQty(c, movements), c.currentDepartment, c.status
     ];
   });
   const wsBalance = XLSX.utils.aoa_to_sheet([balanceHeaders, ...balanceRows]);
@@ -590,7 +595,7 @@ export function exportExecutiveDailySummary(
   const pendingAcceptance = movements.filter(m => !m.accepted);
   const storeReady = jobCards.filter(j => j.currentDepartment === 'Store' && j.status === 'Completed');
   const totalOrderQty = jobCards.reduce((acc, j) => acc + (j.orderQty || 0), 0);
-  const totalDispatchedQty = jobCards.reduce((acc, j) => acc + (j.dispatchDetails?.dispatchQty || 0), 0);
+  const totalDispatchedQty = jobCards.reduce((acc, j) => acc + getCumulativeDispatchedQty(j, movements), 0);
 
   const totalRejection = movements.filter(m => m.rejectionRemarks || m.rejectedDate || (m.processDetails && m.processDetails.rejectionQty))
     .reduce((acc, m) => acc + (m.processDetails?.rejectionQty || m.quantity || 0), 0);
@@ -640,7 +645,7 @@ export function exportExecutiveDailySummary(
   const depts = ['Purchase', 'Raw Material Store', 'Production', 'Heat Treatment', 'Plating', 'Packing', 'Store', 'Dispatch'];
   const deptWipRows = depts.map(d => {
     const jobsInDept = jobCards.filter(j => j.currentDepartment === d && !j.completed);
-    const totalWip = jobsInDept.reduce((acc, j) => acc + (j.currentQty || 0), 0);
+    const totalWip = jobsInDept.reduce((acc, j) => acc + jobCardLedgerWipQty(j, movements), 0);
     const pendingTransfers = movements.filter(m => m.toDepartment === d && !m.accepted).length;
     return [d, jobsInDept.length, totalWip, pendingTransfers];
   });
@@ -650,7 +655,7 @@ export function exportExecutiveDailySummary(
   // Sheet 4: Raw Material & Store Summary
   const rmHeaders = ['Job Card No', 'Item Name', 'Item Code', 'Quantity', 'Unit', 'Department', 'Rack / Location', 'Status'];
   const rmRows = jobCards.map(j => [
-    j.jobCardNo, j.itemName, j.itemCode || '', j.currentQty, j.unit || 'KG', j.currentDepartment, j.storeDetails?.rackNo || j.storeDetails?.locationBin || 'N/A', j.status
+    j.jobCardNo, j.itemName, j.itemCode || '', jobCardLedgerWipQty(j, movements), j.unit || 'KG', j.currentDepartment, j.storeDetails?.rackNo || j.storeDetails?.locationBin || 'N/A', j.status
   ]);
   const wsRm = XLSX.utils.aoa_to_sheet([rmHeaders, ...rmRows]);
   XLSX.utils.book_append_sheet(wb, wsRm, '4. Raw Material & Store');
@@ -670,7 +675,7 @@ export function exportExecutiveDailySummary(
   const dispHeaders = ['Job Card No', 'Order No', 'Party Name', 'Item Name', 'Dispatched Qty', 'Dispatch Date', 'Vehicle No', 'Invoice No'];
   const dispRows = jobCards.filter(j => j.dispatchDetails || j.currentDepartment === 'Dispatch')
     .map(j => [
-      j.jobCardNo, j.orderNo || '', j.partyName, j.itemName, j.dispatchDetails?.dispatchQty || j.currentQty, j.dispatchDetails?.dispatchDate || j.updatedAt || '', j.dispatchDetails?.vehicleNo || 'N/A', j.dispatchDetails?.invoiceNo || 'N/A'
+      j.jobCardNo, j.orderNo || '', j.partyName, j.itemName, getCumulativeDispatchedQty(j, movements), j.dispatchDetails?.dispatchDate || j.updatedAt || '', j.dispatchDetails?.vehicleNo || 'N/A', j.dispatchDetails?.invoiceNo || 'N/A'
     ]);
   const wsDisp = XLSX.utils.aoa_to_sheet([dispHeaders, ...dispRows]);
   XLSX.utils.book_append_sheet(wb, wsDisp, '6. Dispatch Summary');

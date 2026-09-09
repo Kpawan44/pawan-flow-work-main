@@ -2631,13 +2631,17 @@ async function startServer() {
         return res.status(400).json({ success: false, error: "parentJobCardNo and non-empty childSplits array are required." });
       }
 
+      const opId = String(operationId || "").trim();
+      if (!opId) {
+        return res.status(400).json({ success: false, error: "operationId is required. Retry the same split with the identical operationId." });
+      }
+
       for (const cs of childSplits) {
         if (!cs.childJobCardNo || typeof cs.quantity !== "number" || cs.quantity <= 0) {
           return res.status(400).json({ success: false, error: "Each child split must have a valid childJobCardNo and positive quantity." });
         }
       }
 
-      const opId = operationId || `op-split-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
       const serverStore = {
         async get(collection: string, id: string): Promise<any | null> {
           try {
@@ -2752,7 +2756,7 @@ async function startServer() {
         }
       } catch (_) {}
 
-      const result = verifyBatchManifestTx(scannedInputs, activeMap, manifestId, dispatchGroupNo);
+      const result = verifyBatchManifestTx(scannedInputs, activeMap, manifestId, dispatchGroupNo, Array.from(inMemoryMovements.values()));
       return res.json({ success: true, result });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || "Failed to verify batch manifest" });
@@ -2807,7 +2811,8 @@ async function startServer() {
           userName: requester.name || requester.userId || "Authorized Staff"
         },
         activeMap,
-        existingNos
+        existingNos,
+        Array.from(inMemoryMovements.values())
       );
 
       if (!result.success || !result.challan) {
@@ -2886,21 +2891,7 @@ async function startServer() {
             await dbAdmin.collection("mfr_job_cards").doc(upperId).delete().catch(() => {});
             await dbAdmin.collection("mfr_job_cards").doc(asIsId).delete().catch(() => {});
 
-            // Cascade delete movements
-            const movSnap = await dbAdmin.collection("mfr_movements").where("jobCardNo", "==", jobCardNo).get().catch(() => null);
-            if (movSnap && !movSnap.empty) {
-              const batch = dbAdmin.batch();
-              movSnap.docs.forEach(d => batch.delete(d.ref));
-              await batch.commit().catch(() => {});
-            }
-            if (upperId !== asIsId) {
-              const movUpperSnap = await dbAdmin.collection("mfr_movements").where("jobCardNo", "==", upperId).get().catch(() => null);
-              if (movUpperSnap && !movUpperSnap.empty) {
-                const batch = dbAdmin.batch();
-                movUpperSnap.docs.forEach(d => batch.delete(d.ref));
-                await batch.commit().catch(() => {});
-              }
-            }
+            // Movement history is immutable — never cascade-delete mfr_movements.
 
             // Cascade delete notifications mentioning this job card
             const notifSnap = await dbAdmin.collection("mfr_notifications").get().catch(() => null);

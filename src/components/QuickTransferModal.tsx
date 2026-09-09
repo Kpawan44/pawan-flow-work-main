@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, ArrowRight, Save, Info, AlertTriangle, ArrowUpDown } from 'lucide-react';
 import { JobCard, MaterialMovement, Department, UserProfile, CompanyConfig } from '../types';
-import { getJobCardProcessMetrics } from '../lib/metrics';
-import { assertHeatTreatmentRouting, process2SendAvailableQty } from '../hardening/process2Manufacturing';
+import { assertHeatTreatmentRouting, process2SendAvailableQty, remainingAtDepartment } from '../hardening/process2Manufacturing';
 
 interface QuickTransferModalProps {
   isOpen: boolean;
@@ -17,6 +16,7 @@ interface QuickTransferModalProps {
     toDepartment: Department | 'Completed';
     quantity: number;
     remarks?: string;
+    operationId?: string;
   }) => Promise<void>;
 }
 
@@ -35,6 +35,11 @@ export default function QuickTransferModal({
   const [remarks, setRemarks] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string>('');
+  const retryOperationIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) retryOperationIdRef.current = null;
+  }, [isOpen]);
 
   // Ordered sequence of normal departments
   const departmentSequence: (Department | 'Completed')[] = [
@@ -73,9 +78,7 @@ export default function QuickTransferModal({
       compulsory: companyConfig?.requireRawMaterialForProduction !== false
     });
     if (cap !== null) return cap;
-    const m = getJobCardProcessMetrics(card, movements);
-    if (from === 'Production') return Math.max(m.qtyRemainingAtProd, card.orderQty);
-    return card.currentQty || card.orderQty;
+    return remainingAtDepartment(card, movements, from);
   };
 
   // Calculate metrics and set defaults when modal opens or job card changes
@@ -109,39 +112,23 @@ export default function QuickTransferModal({
 
   if (!isOpen || !jobCard) return null;
 
-  // Render current metrics for the selected From department
-  const m = getJobCardProcessMetrics(jobCard, movements);
   const rmCompulsory = companyConfig?.requireRawMaterialForProduction !== false;
   const ledgerAvailable = process2SendAvailableQty(fromDept, jobCard, movements, { compulsory: rmCompulsory });
-  let availableWeightInDept = ledgerAvailable === null ? 0 : ledgerAvailable;
-  let labelText = "Total Job Order Weight";
+  let availableWeightInDept = ledgerAvailable === null ? remainingAtDepartment(jobCard, movements, fromDept) : ledgerAvailable;
+  let labelText = "Ledger available at source";
 
   if (fromDept === 'Production') {
-    if (ledgerAvailable === null) {
-      availableWeightInDept = Math.max(m.qtyRemainingAtProd, jobCard.orderQty);
-      labelText = "Production output (order qty is not a ceiling)";
-    } else {
-      availableWeightInDept = ledgerAvailable;
-      labelText = "Remaining Production capacity (accepted RM)";
-    }
+    labelText = rmCompulsory
+      ? "Remaining Production capacity (accepted RM)"
+      : "Remaining Production quantity (movement ledger)";
   } else if (fromDept === 'Heat Treatment') {
-    availableWeightInDept = ledgerAvailable ?? Math.max(0, m.qtyReceivedFromProd - m.qtyRoutedToPlating - m.htRejections);
     labelText = "Available Weight at Heat Treatment";
   } else if (fromDept === 'Plating') {
-    availableWeightInDept = ledgerAvailable ?? m.qtyRemainingAtPlating;
     labelText = "Remaining Weight at Plating";
   } else if (fromDept === 'Packing') {
-    availableWeightInDept = ledgerAvailable ?? m.qtyRemainingAtPacking;
     labelText = "Remaining Weight at Packing Line";
   } else if (fromDept === 'Store') {
-    availableWeightInDept = ledgerAvailable ?? m.qtyRemainingInStock;
     labelText = "Remaining Weight in Storehouse Stock";
-  } else {
-    const totalTransferred = movements
-      .filter(mov => mov.jobCardNo.toLowerCase() === jobCard.jobCardNo.toLowerCase())
-      .reduce((acc, curr) => acc + curr.quantity, 0);
-    availableWeightInDept = Math.max(0, jobCard.orderQty - totalTransferred);
-    labelText = "Order Remaining Balance";
   }
 
   const handleFormSubmit = async (e: React.FormEvent) => {
@@ -164,12 +151,16 @@ export default function QuickTransferModal({
       return;
     }
 
-    const cap = process2SendAvailableQty(fromDept, jobCard, movements, {
-      compulsory: companyConfig?.requireRawMaterialForProduction !== false
-    });
-    if (cap !== null && quantity > cap) {
-      setError(`Cannot transfer ${quantity}. Only ${cap} is available in ${fromDept}.`);
+    if (ledgerAvailable !== null && quantity > ledgerAvailable) {
+      setError(`Cannot transfer ${quantity}. Only ${ledgerAvailable} is available in ${fromDept}.`);
       return;
+    }
+
+    if (!retryOperationIdRef.current) {
+      retryOperationIdRef.current =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? `op-quick-${crypto.randomUUID()}`
+          : `op-quick-${Date.now()}`;
     }
 
     setIsSubmitting(true);
@@ -179,7 +170,8 @@ export default function QuickTransferModal({
         fromDepartment: fromDept,
         toDepartment: toDept,
         quantity,
-        remarks: remarks.trim() || `Quick transfer initiated from All Orders database view.`
+        remarks: remarks.trim() || `Quick transfer initiated from All Orders database view.`,
+        operationId: retryOperationIdRef.current
       });
       setIsSubmitting(false);
       onClose();

@@ -58,7 +58,8 @@ import {
   attachProcess2MovementContract,
   sameDepartmentTransferBlocked,
   productionSendAvailable,
-  isPendingAcceptanceMovement
+  isPendingAcceptanceMovement,
+  process2SendAvailableQty
 } from '../hardening/process2Manufacturing';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
@@ -1900,39 +1901,22 @@ Please adjust the quantity or request additional raw material issue.`);
       return remainingAtProduction(job, movements, { compulsory: isRawMaterialCompulsory });
     }
     if (activeDept === 'Heat Treatment') {
-      const m = getJobCardProcessMetrics(job, movements);
-      const totalReceivedAtHT = movements
-        .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.toDepartment === 'Heat Treatment' && mov.accepted)
-        .reduce((sum, mov) => sum + mov.quantity, 0);
-      const htInputDisplay = totalReceivedAtHT > 0 ? totalReceivedAtHT : (job.currentDepartment === 'Heat Treatment' ? m.qtyReceivedFromProd : 0);
-      const totalRoutedFromHT = movements
-        .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.fromDepartment === 'Heat Treatment')
-        .reduce((sum, mov) => sum + mov.quantity, 0);
-      return Math.max(0, htInputDisplay - totalRoutedFromHT - (job.heatTreatmentDetails?.rejectionQty || 0));
+      return remainingAtDepartment(job, movements, 'Heat Treatment');
     }
     if (activeDept === 'Plating') {
-      const m = getJobCardProcessMetrics(job, movements);
-      const totalReceivedAtPlating = movements
-        .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.toDepartment === 'Plating' && mov.accepted)
-        .reduce((sum, mov) => sum + mov.quantity, 0);
-      const platingInputDisplay = totalReceivedAtPlating > 0 ? totalReceivedAtPlating : (job.currentDepartment === 'Plating' ? m.qtyReceivedAtPlating : 0);
-      const totalRoutedFromPlating = movements
-        .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.fromDepartment === 'Plating')
-        .reduce((sum, mov) => sum + mov.quantity, 0);
-      return Math.max(0, platingInputDisplay - totalRoutedFromPlating - (job.platingDetails?.rejectionQty || 0));
+      return remainingAtDepartment(job, movements, 'Plating');
     }
     if (activeDept === 'Packing') {
-      const m = getJobCardProcessMetrics(job, movements);
-      const totalReceivedAtPacking = movements
-        .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.toDepartment === 'Packing' && mov.accepted)
-        .reduce((sum, mov) => sum + mov.quantity, 0);
-      const packingInputDisplay = totalReceivedAtPacking > 0 ? totalReceivedAtPacking : (job.currentDepartment === 'Packing' ? m.qtyReceivedAtPacking : 0);
-      const totalRoutedFromPacking = movements
-        .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.fromDepartment === 'Packing')
-        .reduce((sum, mov) => sum + mov.quantity, 0);
-      return Math.max(0, packingInputDisplay - totalRoutedFromPacking - (job.packingDetails?.rejectionQty || 0));
+      return remainingAtDepartment(job, movements, 'Packing');
     }
-    return storeAuthoritativeOnHand(job, movements) || job.currentQty || 0;
+    if (activeDept === 'Incoming Store') {
+      return remainingAtDepartment(job, movements, 'Incoming Store');
+    }
+    if (activeDept === 'Dispatch') {
+      return remainingAtDepartment(job, movements, 'Dispatch');
+    }
+    return process2SendAvailableQty(activeDept, job, movements, { compulsory: isRawMaterialCompulsory })
+      ?? remainingAtDepartment(job, movements, activeDept);
   };
 
   // Memoized: getJobWipQtyForDept calls getJobCardProcessMetrics+movements.filter per job = O(N×M)
@@ -4260,7 +4244,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                     <button
                                       type="button"
                                       onClick={() => {
-                                        const availableQty = job.currentQty || job.orderQty;
+                                        const incomingCap = process2SendAvailableQty('Incoming Store', job, movements);
+                                        const availableQty = incomingCap === null ? remainingAtDepartment(job, movements, 'Incoming Store') : incomingCap;
                                         const qtyNum = typeof storeReleaseQty === 'number' 
                                           ? storeReleaseQty 
                                           : (parseFloat(String(storeReleaseQty)) || availableQty);

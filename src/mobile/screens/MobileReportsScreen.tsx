@@ -33,7 +33,8 @@ import {
   CheckCircle
 } from 'lucide-react';
 import { JobCard, MaterialMovement, UserProfile, Department, ProcessTransfer } from '../../types';
-import { getJobCardProcessMetrics, getWireScrapQty, getRawMaterialIssuedQty, getJobCardDepartmentPending } from '../../lib/metrics';
+import { getJobCardProcessMetrics, getWireScrapQty, getRawMaterialIssuedQty, getJobCardDepartmentPending, jobCardLedgerWipQty } from '../../lib/metrics';
+import { getCumulativeDispatchedQty, remainingAtDepartment } from '../../hardening/process2Manufacturing';
 import { exportComprehensiveExcelBackup } from '../../lib/excelExport';
 import { exportJobCards, exportMaterialMovements } from '../../lib/csvExport';
 import { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from '../../components/RawMaterialRequestModal';
@@ -272,9 +273,9 @@ export const MobileReportsScreen: React.FC<MobileReportsScreenProps> = ({
     const rejectedJobs = filteredJobCards.filter(j => j && j.status === 'Rejected');
 
     const totalTargetMass = filteredJobCards.reduce((sum, j) => sum + (Number(j.orderQty) || 0), 0);
-    const activeWipMass = activeJobs.reduce((sum, j) => sum + (Number(j.currentQty) || Number(j.balanceQty) || Number(j.orderQty) || 0), 0);
+    const activeWipMass = activeJobs.reduce((sum, j) => sum + jobCardLedgerWipQty(j, filteredMovements), 0);
     const totalDispatchedMass = filteredJobCards.reduce(
-      (sum, j) => sum + (Number(j.dispatchDetails?.dispatchQty) || (j.completed ? Number(j.currentQty) || Number(j.orderQty) || 0 : 0)),
+      (sum, j) => sum + getCumulativeDispatchedQty(j, filteredMovements),
       0
     );
 
@@ -319,7 +320,7 @@ export const MobileReportsScreen: React.FC<MobileReportsScreenProps> = ({
         const createdDate = j.createdAt ? new Date(j.createdAt).getTime() : now;
         const created = isNaN(createdDate) ? now : createdDate;
         const diffDays = Math.max(0, Math.floor((now - created) / (1000 * 60 * 60 * 24)));
-        const mass = Number(j.currentQty) || Number(j.orderQty) || 0;
+        const mass = jobCardLedgerWipQty(j, filteredMovements);
 
         if (diffDays <= 1) {
           buckets['0-1 Day'].count++;
@@ -340,7 +341,7 @@ export const MobileReportsScreen: React.FC<MobileReportsScreenProps> = ({
       });
 
     return buckets;
-  }, [filteredJobCards]);
+  }, [filteredJobCards, filteredMovements]);
 
   // Department Breakdown
   const departmentBreakdown = useMemo(() => {
@@ -349,7 +350,7 @@ export const MobileReportsScreen: React.FC<MobileReportsScreenProps> = ({
       const deptJobs = (Array.isArray(jobCards) ? jobCards : []).filter(
         j => j && String(j.currentDepartment || '').toLowerCase() === deptLower && j.status !== 'Completed' && j.currentDepartment !== 'Completed'
       );
-      const mass = deptJobs.reduce((sum, j) => sum + (Number(j.currentQty) || Number(j.orderQty) || 0), 0);
+      const mass = deptJobs.reduce((sum, j) => sum + jobCardLedgerWipQty(j, movements), 0);
       const pendingIngress = (Array.isArray(movements) ? movements : []).filter(
         m => m && String(m.toDepartment || '').toLowerCase() === deptLower && !m.accepted && m.issueStatus !== 'Rejected'
       ).length;
@@ -438,7 +439,7 @@ export const MobileReportsScreen: React.FC<MobileReportsScreenProps> = ({
     filteredJobCards.forEach(j => {
       const name = j.itemName || 'Unnamed Item';
       const m = getJobCardProcessMetrics(j, filteredMovements);
-      const stock = m.qtyRemainingInStock > 0 ? m.qtyRemainingInStock : (j.currentDepartment === 'Store' ? (j.currentQty || 0) : 0);
+      const stock = m.qtyRemainingInStock;
       const boxes = Number(j.packingDetails?.boxCount) || 0;
 
       if (!map.has(name)) {
@@ -974,7 +975,7 @@ export const MobileReportsScreen: React.FC<MobileReportsScreenProps> = ({
                     </div>
                     <div className="text-[11px] font-mono text-slate-500 flex justify-between">
                       <span>{j.itemName}</span>
-                      <span>Net Mass: {j.currentQty || j.orderQty} KG</span>
+                      <span>Net Mass: {remainingAtDepartment(j, movements || [], 'Packing')} KG</span>
                     </div>
                   </div>
                 ))}

@@ -9,6 +9,9 @@ export const MOVEMENT_DELETE_BLOCKED_MESSAGE =
 export const JOB_CARD_CREATE_NO_CLIENT_FALLBACK_MESSAGE =
   "Server connection unavailable. Job card was not created. Direct Firestore fallback is disabled.";
 
+export const FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE =
+  "Server connection unavailable. Factory purge was not executed. Direct Firestore deletion of job cards, movements, and idempotency keys is disabled.";
+
 export function denyDirectMovementUpdate(): never {
   throw new Error(MOVEMENT_UPDATE_BLOCKED_MESSAGE);
 }

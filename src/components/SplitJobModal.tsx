@@ -1,9 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, GitBranch, AlertCircle, Plus, Trash2, CheckCircle2 } from 'lucide-react';
 import { JobCard, UserProfile } from '../types';
-import { splitJobCardTx } from '../hardening/splitJobCard';
-import { DBService } from '../lib/firebase';
+import { DBService, getApiBaseUrl } from '../lib/firebase';
 import { SimpleStore } from '../hardening/commitMaterialMovement';
 
 interface SplitJobModalProps {
@@ -16,47 +15,14 @@ interface SplitJobModalProps {
 
 export function createClientStore(): SimpleStore {
   return {
-    async get(collection: string, id: string): Promise<any | null> {
-      try {
-        if (collection === 'mfr_job_cards') {
-          const res = await fetch('/api/job-cards');
-          if (res.ok) {
-            const data = await res.json();
-            const cards = data.jobCards || [];
-            return cards.find((c: any) => String(c.jobCardNo || c.id).toUpperCase() === String(id).toUpperCase()) || null;
-          }
-        }
-        return null;
-      } catch (_) {
-        return null;
-      }
+    async get(): Promise<any | null> {
+      return null;
     },
-    async set(collection: string, id: string, data: any): Promise<void> {
-      try {
-        if (collection === 'mfr_job_cards') {
-          await fetch(`/api/job-cards/${encodeURIComponent(id)}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-          });
-        }
-      } catch (e) {
-        console.warn('Client store update error:', e);
-      }
+    async set(): Promise<void> {
+      throw new Error("Job card split cannot write from the client. Use POST /api/job-card/split.");
     },
-    async list(collection: string): Promise<any[]> {
-      try {
-        if (collection === 'mfr_job_cards') {
-          const res = await fetch('/api/job-cards');
-          if (res.ok) {
-            const data = await res.json();
-            return data.jobCards || [];
-          }
-        }
-        return [];
-      } catch (_) {
-        return [];
-      }
+    async list(): Promise<any[]> {
+      return [];
     }
   };
 }
@@ -85,6 +51,7 @@ export const SplitJobModal: React.FC<SplitJobModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const retryOperationIdRef = useRef<string>("");
 
   if (!isOpen || !jobCard) return null;
 
@@ -162,56 +129,29 @@ export const SplitJobModal: React.FC<SplitJobModalProps> = ({
     setLoading(true);
 
     try {
-      const operationId = `op-split-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-      const actorPayload = {
-        userId: currentUser?.userId || currentUser?.email || 'operator',
-        userName: currentUser?.name || currentUser?.userId || 'Operator',
-        role: currentUser?.role || 'staff',
-        department: currentUser?.department || 'Production'
-      };
-
-      // 1. Try REST API endpoint first
-      let apiSuccess = false;
-      try {
-        const res = await fetch('/api/job-card/split', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            parentJobCardNo: parentJobNo,
-            childSplits: childSplitsInput,
-            operationId,
-            actor: actorPayload
-          })
-        });
-
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success) {
-            apiSuccess = true;
-            setSuccessMsg(`Successfully split ${parentJobNo} into ${childSplitsInput.map(c => c.childJobCardNo).join(', ')}.`);
-            if (onSuccess) onSuccess(data);
-          }
-        }
-      } catch (_) {
-        // Fallback to client-side transactional domain engine if REST endpoint is unreachable
+      if (!retryOperationIdRef.current) {
+        retryOperationIdRef.current =
+          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+            ? `op-split-${crypto.randomUUID()}`
+            : `op-split-${Date.now()}`;
       }
-
-      // 2. Fallback execution via splitJobCardTx if REST API didn't handle it
-      if (!apiSuccess) {
-        const result = await splitJobCardTx(createClientStore(), {
-          operationId,
+      const operationId = retryOperationIdRef.current;
+      const headers = await DBService.getAuthHeaders();
+      const res = await fetch(`${getApiBaseUrl()}/api/job-card/split`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
           parentJobCardNo: parentJobNo,
           childSplits: childSplitsInput,
-          actor: actorPayload
-        });
-
-        if (result.success) {
-          setSuccessMsg(`Successfully split ${parentJobNo} into ${childSplitsInput.map(c => c.childJobCardNo).join(', ')}.`);
-          if (onSuccess) onSuccess(result);
-        } else {
-          setError(result.error || 'Split job transaction failed.');
-        }
+          operationId
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || `Split failed (status ${res.status}). Direct client fallback is disabled.`);
       }
+      setSuccessMsg(`Successfully split ${parentJobNo} into ${childSplitsInput.map(c => c.childJobCardNo).join(', ')}.`);
+      if (onSuccess) onSuccess(data);
     } catch (err: any) {
       setError(err?.message || 'Failed to execute job card split.');
     } finally {
