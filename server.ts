@@ -17,9 +17,12 @@ import {
   resolveJobCurrentQtyOnCreate,
   shouldCreateInitialMovement,
   purchaseNotificationDepartment,
-  nextStatusOnPurchaseAccept
+  nextStatusOnPurchaseAccept,
+  validatePurchaseReceiptInput,
+  createPurchaseCreationFingerprint
 } from "./src/hardening/process1Purchase";
 import { mountLedgerRoutes } from "./src/hardening/ledgerHttp";
+import { commitMaterialMovementTx } from "./src/hardening/commitMaterialMovement";
 import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
 import { verifyBatchManifestTx } from "./src/hardening/batchManifestScanner";
@@ -237,6 +240,22 @@ async function startServer() {
     }
   }
 
+  async function firestoreRestGetDocEnvelope(collectionName: string, docId: string): Promise<{ data: any; updateTime?: string } | null> {
+    try {
+      const gcpToken = await getGcpAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken));
+      const res = await fetch(url, { headers });
+      if (res.status === 404 || !res.ok) return null;
+      const raw = await res.json();
+      if (!raw?.fields) return null;
+      return { data: { id: docId, ...parseFirestoreFields(raw.fields) }, updateTime: raw.updateTime };
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function firestoreRestQuery(collectionName: string, field: string, value: string): Promise<any> {
     try {
       const queryBody = {
@@ -358,6 +377,36 @@ async function startServer() {
     }
   }
 
+  async function firestoreRestCreateDocIfAbsent(collectionName: string, docId: string, data: any): Promise<"created" | "exists" | "failed"> {
+    try {
+      const encodedFields = encodeFirestoreFields(data);
+      const gcpToken = await getGcpAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken), { "currentDocument.exists": "false" });
+      const res = await fetch(url, { method: "PATCH", headers, body: JSON.stringify({ fields: encodedFields }) });
+      if (res.ok) return "created";
+      if (res.status === 409 || res.status === 412) return "exists";
+      return "failed";
+    } catch (_) {
+      return "failed";
+    }
+  }
+
+  async function firestoreRestUpdateIfVersion(collectionName: string, docId: string, data: any, updateTime: string): Promise<boolean> {
+    try {
+      const encodedFields = encodeFirestoreFields(data);
+      const gcpToken = await getGcpAccessToken();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (gcpToken) headers["Authorization"] = `Bearer ${gcpToken}`;
+      const url = buildFirestoreRestUrl(`/${collectionName}/${encodeURIComponent(docId)}`, Boolean(gcpToken), { "currentDocument.updateTime": updateTime });
+      const res = await fetch(url, { method: "PATCH", headers, body: JSON.stringify({ fields: encodedFields }) });
+      return res.ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
   async function firestoreRestDeleteDoc(collectionName: string, docId: string): Promise<boolean> {
     try {
       const gcpToken = await getGcpAccessToken();
@@ -462,6 +511,102 @@ async function startServer() {
   // Authoritative in-memory maps for sub-millisecond consistency and zero read-after-write lag
   const inMemoryJobCards = new Map<string, any>();
   const inMemoryMovements = new Map<string, any>();
+  const purchaseCreationTails = new Map<string, Promise<void>>();
+  const PURCHASE_CLAIM_LEASE_MS = 5 * 60 * 1000;
+
+  type PurchaseClaimResult =
+    | { kind: "claimed" | "recovered"; claim: any }
+    | { kind: "completed"; claim: any }
+    | { kind: "busy"; claim: any }
+    | { kind: "conflict"; claim: any };
+
+  async function claimPurchaseOperation(jobCardNo: string, fingerprint: string, actor: string): Promise<PurchaseClaimResult> {
+    const claimId = `purchase-create-${jobCardNo}`;
+    const now = new Date();
+    const claim = {
+      operationId: claimId,
+      operationType: "PURCHASE_CREATE",
+      jobCardNo,
+      requestFingerprint: fingerprint,
+      status: "PENDING",
+      ownerId: actor,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      leaseUntil: new Date(now.getTime() + PURCHASE_CLAIM_LEASE_MS).toISOString()
+    };
+
+    const db = getFirestoreAdmin();
+    if (db) {
+      try {
+        return await db.runTransaction(async (tx: any) => {
+          const ref = db.collection("mfr_idempotency_keys").doc(claimId);
+          const snap = await tx.get(ref);
+          if (!snap.exists) {
+            tx.create(ref, claim);
+            return { kind: "claimed", claim };
+          }
+          const existing = snap.data() || {};
+          if (String(existing.requestFingerprint || "") !== fingerprint) return { kind: "conflict", claim: existing };
+          if (existing.status === "COMPLETED") return { kind: "completed", claim: existing };
+          if (existing.status === "PENDING" && Date.parse(String(existing.leaseUntil || "")) > Date.now()) return { kind: "busy", claim: existing };
+          const recovered = { ...existing, ...claim, status: "PENDING", createdAt: existing.createdAt || claim.createdAt };
+          tx.update(ref, recovered);
+          return { kind: "recovered", claim: recovered };
+        });
+      } catch (_) {
+        // Fall through to REST create-if-absent when Admin SDK is unavailable.
+      }
+    }
+
+    const created = await firestoreRestCreateDocIfAbsent("mfr_idempotency_keys", claimId, claim);
+    if (created === "created") return { kind: "claimed", claim };
+    const existingEnvelope = await firestoreRestGetDocEnvelope("mfr_idempotency_keys", claimId);
+    const existing = existingEnvelope?.data || claim;
+    if (String(existing.requestFingerprint || "") !== fingerprint) return { kind: "conflict", claim: existing };
+    if (existing.status === "COMPLETED") return { kind: "completed", claim: existing };
+    if (existing.status === "PENDING" && Date.parse(String(existing.leaseUntil || "")) > Date.now()) return { kind: "busy", claim: existing };
+    if (existingEnvelope?.updateTime) {
+      const recovered = { ...existing, ...claim, status: "PENDING", createdAt: existing.createdAt || claim.createdAt };
+      if (await firestoreRestUpdateIfVersion("mfr_idempotency_keys", claimId, recovered, existingEnvelope.updateTime)) return { kind: "recovered", claim: recovered };
+    }
+    return { kind: "busy", claim: existing };
+  }
+
+  async function completePurchaseOperation(jobCardNo: string, fingerprint: string, result: any): Promise<void> {
+    const claimId = `purchase-create-${jobCardNo}`;
+    const completed = {
+      operationId: claimId,
+      operationType: "PURCHASE_CREATE",
+      jobCardNo,
+      requestFingerprint: fingerprint,
+      status: "COMPLETED",
+      completedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      result
+    };
+    const db = getFirestoreAdmin();
+    if (db) {
+      try {
+        await db.collection("mfr_idempotency_keys").doc(claimId).set(completed, { merge: true });
+        return;
+      } catch (_) {}
+    }
+    await firestoreRestSetDoc("mfr_idempotency_keys", claimId, completed);
+  }
+
+  async function acquirePurchaseCreationLock(jobCardNo: string): Promise<() => void> {
+    const key = String(jobCardNo || "").toUpperCase();
+    const previous = purchaseCreationTails.get(key) || Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => current);
+    purchaseCreationTails.set(key, tail);
+    await previous;
+    return () => {
+      release();
+      if (purchaseCreationTails.get(key) === tail) purchaseCreationTails.delete(key);
+    };
+  }
   const inMemoryDeletedJobCards = new Set<string>();
   // PERSISTENT DELETED-USER TOMBSTONES (ANTI-RESURRECTION)
   // ----------------------------------------------------
@@ -2434,6 +2579,9 @@ async function startServer() {
 
   // POST /api/job-cards — Authoritative Server Job Card Creation
   app.post("/api/job-cards", requireFirebaseAuth, async (req, res) => {
+    let releasePurchaseLock: (() => void) | null = null;
+    let purchaseLockReleased = false;
+    let purchaseClaim: { jobCardNo: string; fingerprint: string } | null = null;
     try {
       const authUid = (req as any).authUid;
       const requester = (req as any).user;
@@ -2452,6 +2600,10 @@ async function startServer() {
       }
 
       const isPurchase = jobCard.processType === 'Purchase' || Boolean(jobCard.purchaseDetails && Object.keys(jobCard.purchaseDetails).length > 0);
+      const purchaseReceipt = isPurchase ? validatePurchaseReceiptInput(jobCard) : { ok: true };
+      if (!purchaseReceipt.ok) {
+        return res.status(400).json({ success: false, error: purchaseReceipt.error });
+      }
       const userRole = String(requester.role || "staff").toLowerCase();
       const userDept = String(requester.department || "").toLowerCase();
       const allowedDepts: string[] = [
@@ -2470,10 +2622,50 @@ async function startServer() {
         });
       }
 
+      const upperJobNo = String(jobCard.jobCardNo).toUpperCase().trim();
+      const purchaseFingerprint = isPurchase ? createPurchaseCreationFingerprint({ ...jobCard, jobCardNo: upperJobNo }) : "";
+      if (isPurchase) {
+        releasePurchaseLock = await acquirePurchaseCreationLock(upperJobNo);
+        const existingJob = await createServerStore().get("mfr_job_cards", upperJobNo);
+        if (existingJob) {
+          const existingFingerprint = String(existingJob.purchaseCreationFingerprint || createPurchaseCreationFingerprint(existingJob));
+          if (existingFingerprint !== purchaseFingerprint) {
+            releasePurchaseLock();
+            purchaseLockReleased = true;
+            return res.status(409).json({ success: false, error: "Purchase job already exists with different immutable receipt data." });
+          }
+          const existingReceipt = await createServerStore().get("mfr_movements", `M-SUPPLIER-RECEIPT-purchase-receipt-${upperJobNo}`);
+          if (existingReceipt) {
+            const existingInitialMovement = await createServerStore().get("mfr_movements", `M-PURCHASE-INITIAL-${upperJobNo}`);
+            releasePurchaseLock();
+            purchaseLockReleased = true;
+            return res.json({ success: true, cached: true, jobCard: existingJob, movement: existingInitialMovement });
+          }
+        }
+        const claimResult = await claimPurchaseOperation(upperJobNo, purchaseFingerprint, authUid);
+        if (claimResult.kind === "conflict") {
+          releasePurchaseLock();
+          purchaseLockReleased = true;
+          return res.status(409).json({ success: false, error: "Purchase operation already exists with different immutable receipt data." });
+        }
+        if (claimResult.kind === "busy") {
+          releasePurchaseLock();
+          purchaseLockReleased = true;
+          return res.status(409).json({ success: false, error: "Purchase operation is already being processed. Retry with the same payload." });
+        }
+        if (claimResult.kind === "completed") {
+          const completedJob = await createServerStore().get("mfr_job_cards", upperJobNo);
+          const completedMovement = await createServerStore().get("mfr_movements", `M-PURCHASE-INITIAL-${upperJobNo}`);
+          releasePurchaseLock();
+          purchaseLockReleased = true;
+          return res.json({ success: true, cached: true, jobCard: completedJob, movement: completedMovement });
+        }
+        purchaseClaim = { jobCardNo: upperJobNo, fingerprint: purchaseFingerprint };
+      }
+
       const authoritativeUserId = authUid;
       const authoritativeUserName = requester.name || requester.userId || "Authorized User";
       const now = new Date().toISOString();
-      const upperJobNo = String(jobCard.jobCardNo).toUpperCase().trim();
       const unitLabel = jobCard.unit === 'PCS' ? 'PCS' : (jobCard.unit || 'KG');
       const sentQty = resolveJobCurrentQtyOnCreate(jobCard.currentQty, numOrderQty);
 
@@ -2488,13 +2680,16 @@ async function startServer() {
         balanceQty: numOrderQty,
         version: 1,
         createdAt: now,
-        completed: false
+        completed: false,
+        ...(isPurchase ? { purchaseCreationFingerprint: purchaseFingerprint } : {})
       };
 
       const destDept = jobCard.currentDepartment || (isPurchase ? 'Store' : 'Production');
       const fromDept = isPurchase ? 'Purchase' : 'Dispatch';
       const createInitialMov = shouldCreateInitialMovement(fromDept, destDept);
-      const movId = `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const movId = isPurchase
+        ? `M-PURCHASE-INITIAL-${upperJobNo}`
+        : `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
       const purchaseMeta = isPurchase ? {
         itemCode: jobCard.itemCode || '',
         itemName: jobCard.itemName || '',
@@ -2545,7 +2740,9 @@ async function startServer() {
         ...(customInitialMovement || {})
       };
 
-      const notifId = `N-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const notifId = isPurchase
+        ? `N-PURCHASE-${upperJobNo}`
+        : `N-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
       const targetDept = isPurchase ? purchaseNotificationDepartment(destDept) : destDept;
       const notifData = {
         notificationId: notifId,
@@ -2559,7 +2756,9 @@ async function startServer() {
         createdAt: now
       };
 
-      const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const auditId = isPurchase
+        ? `AL-PURCHASE-${upperJobNo}`
+        : `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
       const auditData = {
         id: auditId,
         timestamp: now,
@@ -2600,18 +2799,67 @@ async function startServer() {
         inMemoryMovements.set(initialMovement.movementId, initialMovement);
       }
 
+      if (isPurchase && createInitialMov) {
+        const receiptQty = Number(jobCard.purchaseDetails?.receivedQty);
+        const rejectedQty = Number(jobCard.purchaseDetails?.rejectionQty || 0);
+        const receipt = await commitMaterialMovementTx(createServerStore(), {
+          operationId: `purchase-receipt-${upperJobNo}`,
+          jobCardNo: upperJobNo,
+          fromDepartment: "Supplier",
+          toDepartment: "Purchase",
+          quantity: receiptQty - rejectedQty,
+          transactionType: "PURCHASE_RECEIPT",
+          processDetails: {
+            isSupplierReceipt: true,
+            supplierName: jobCard.purchaseDetails?.supplierName || jobCard.partyName,
+            billNo: jobCard.purchaseDetails?.billNo
+          },
+          isSupplierReceipt: true,
+          actor: {
+            userId: authoritativeUserId,
+            userName: authoritativeUserName,
+            role: requester.role || "staff",
+            department: requester.department || "Purchase",
+            allowedDepartments: requester.allowedDepartments || [],
+            accessList: requester.accessList || []
+          }
+        });
+        if (!receipt.success) {
+          if (releasePurchaseLock && !purchaseLockReleased) {
+            releasePurchaseLock();
+            purchaseLockReleased = true;
+          }
+          return res.status(receipt.statusCode || 400).json({ success: false, error: receipt.error });
+        }
+      }
+
+      if (purchaseClaim) {
+        await completePurchaseOperation(purchaseClaim.jobCardNo, purchaseClaim.fingerprint, {
+          jobCard: newJob,
+          movement: initialMovement
+        });
+      }
+
       broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: upperJobNo });
       if (createInitialMov) {
         broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: initialMovement.movementId, jobCardNo: upperJobNo });
       }
       broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
 
+      if (releasePurchaseLock && !purchaseLockReleased) {
+        releasePurchaseLock();
+        purchaseLockReleased = true;
+      }
       return res.json({
         success: true,
         jobCard: newJob,
         movement: createInitialMov ? initialMovement : null
       });
     } catch (err: any) {
+      if (releasePurchaseLock && !purchaseLockReleased) {
+        releasePurchaseLock();
+        purchaseLockReleased = true;
+      }
       console.error("[JOB_CARDS] Error creating job card:", err);
       return res.status(500).json({ success: false, error: err.message || "Failed to create job card" });
     }

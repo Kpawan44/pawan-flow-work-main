@@ -1854,7 +1854,7 @@ Please adjust the quantity or request additional raw material issue.`);
       return c.processType === 'Purchase' && c.currentDepartment === 'Purchase';
     }
     if (activeDept === 'Production') {
-      if (isVisibleInProductionQueue(c)) return true;
+      if (isVisibleInProductionQueue(c) || remainingAtProduction(c, movements, { compulsory: isRawMaterialCompulsory }) > 0) return true;
       const returned = movements.some(m =>
         m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() &&
         m.toDepartment === 'Production' &&
@@ -1887,7 +1887,7 @@ Please adjust the quantity or request additional raw material issue.`);
       return c.currentDepartment === 'Packing' || (totalReceivedAtPacking > 0 && pendingPackingQty > 0);
     }
     return c.currentDepartment === activeDept;
-  }), [jobCards, movements, activeDept]);
+  }), [jobCards, movements, activeDept, isRawMaterialCompulsory]);
 
   // Calculate WIP quantity for each job in the active department
   const getJobWipQtyForDept = (job: JobCard): number => {

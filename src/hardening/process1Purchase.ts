@@ -369,3 +369,97 @@ export function resolveJobCurrentQtyOnCreate(sentQty: unknown, orderQty: unknown
   const order = parseDecimalQuantity(orderQty);
   return isNaN(order) ? 0 : order;
 }
+
+export interface PurchaseReceiptValidationResult {
+  ok: boolean;
+  receivedQty?: number;
+  rejectionQty?: number;
+  creditedQty?: number;
+  sentQty?: number;
+  error?: string;
+}
+
+export function validatePurchaseReceiptInput(job: {
+  partyName?: unknown;
+  itemName?: unknown;
+  materialType?: unknown;
+  currentQty?: unknown;
+  purchaseDetails?: {
+    supplierName?: unknown;
+    receivedQty?: unknown;
+    rejectionQty?: unknown;
+  } | null;
+}): PurchaseReceiptValidationResult {
+  const details = job?.purchaseDetails;
+  if (!details) return { ok: false, error: "Purchase receipt details are required." };
+  if (!String(job.partyName || details.supplierName || "").trim()) {
+    return { ok: false, error: "Supplier metadata is required for a purchase receipt." };
+  }
+  if (!String(job.itemName || "").trim() || !String(job.materialType || "").trim()) {
+    return { ok: false, error: "Purchase item metadata is required for a purchase receipt." };
+  }
+
+  const receivedQty = parseDecimalQuantity(details.receivedQty);
+  const rejectionQty = details.rejectionQty === undefined || details.rejectionQty === null || details.rejectionQty === ""
+    ? 0
+    : parseDecimalQuantity(details.rejectionQty);
+  const sentQty = parseDecimalQuantity(job.currentQty);
+  if (!Number.isFinite(receivedQty) || receivedQty <= 0) {
+    return { ok: false, error: "receivedQty must be a positive finite quantity." };
+  }
+  if (!Number.isFinite(rejectionQty) || rejectionQty < 0) {
+    return { ok: false, error: "rejectionQty must be a non-negative finite quantity." };
+  }
+  if (rejectionQty > receivedQty) {
+    return { ok: false, error: "rejectionQty cannot exceed receivedQty." };
+  }
+  const creditedQty = receivedQty - rejectionQty;
+  if (!(creditedQty > 0)) {
+    return { ok: false, error: "Purchase receipt must credit a positive quantity." };
+  }
+  if (!Number.isFinite(sentQty) || sentQty <= 0 || sentQty > creditedQty) {
+    return { ok: false, error: "Purchase transfer quantity must be positive and no greater than credited quantity." };
+  }
+  return { ok: true, receivedQty, rejectionQty, creditedQty, sentQty };
+}
+
+export function createPurchaseCreationFingerprint(job: {
+  jobCardNo?: unknown;
+  partyName?: unknown;
+  itemName?: unknown;
+  itemCode?: unknown;
+  materialType?: unknown;
+  isWire?: unknown;
+  rawMaterialKind?: unknown;
+  unit?: unknown;
+  currentDepartment?: unknown;
+  orderQty?: unknown;
+  currentQty?: unknown;
+  purchaseDetails?: {
+    supplierName?: unknown;
+    billNo?: unknown;
+    receivedQty?: unknown;
+    rejectionQty?: unknown;
+  } | null;
+}): string {
+  const details = job.purchaseDetails || {};
+  return JSON.stringify([
+    String(job.jobCardNo || "").trim().toUpperCase(),
+    String(job.partyName || "").trim().toLowerCase(),
+    String(details.supplierName || job.partyName || "").trim().toLowerCase(),
+    normalizeItemCode(String(job.itemCode || "")),
+    String(job.itemName || "").trim().toLowerCase(),
+    String(job.materialType || "").trim().toLowerCase(),
+    Boolean(job.isWire),
+    String(job.rawMaterialKind || "").trim().toLowerCase(),
+    String(job.unit || "").trim().toUpperCase(),
+    String(job.currentDepartment || "").trim().toLowerCase(),
+    parseDecimalQuantity(job.orderQty),
+    parseDecimalQuantity(job.currentQty),
+    parseDecimalQuantity(details.receivedQty),
+    details.rejectionQty === undefined || details.rejectionQty === null || details.rejectionQty === ""
+      ? 0
+      : parseDecimalQuantity(details.rejectionQty),
+    String(details.billNo || "").trim().toLowerCase()
+  ]);
+}

@@ -31,6 +31,8 @@ export interface MovementCommitInput {
   /** Optional preloaded movements to avoid collection list inside a Firestore transaction. */
   preloadedMovements?: any[];
   requireRawMaterialForProduction?: boolean;
+  /** Internal server-side supplier receipt; never accepted from client movement routes. */
+  isSupplierReceipt?: boolean;
   actor: {
     userId: string;
     userName: string;
@@ -149,11 +151,12 @@ async function commitMaterialMovementTxInner(
   const normFrom = normalizeDept(input.fromDepartment);
   const normTo = normalizeDept(input.toDepartment);
   const reqQty = Number(input.quantity);
+  const isSupplierReceipt = Boolean(input.isSupplierReceipt);
 
   if (!jobCardNo || !normFrom || !normTo) {
     return { success: false, statusCode: 400, error: "jobCardNo, fromDepartment, and toDepartment are required." };
   }
-  if (!isValidDepartmentName(normFrom) || !isValidDepartmentName(normTo)) {
+  if ((!isSupplierReceipt && !isValidDepartmentName(normFrom)) || !isValidDepartmentName(normTo)) {
     return {
       success: false,
       statusCode: 400,
@@ -166,7 +169,13 @@ async function commitMaterialMovementTxInner(
   if (normFrom.toLowerCase() === normTo.toLowerCase() && !isWireRejection(input)) {
     return { success: false, statusCode: 400, error: "Source and target departments cannot be identical." };
   }
-  if (!isDeptAuthorized(input.actor, normFrom)) {
+  if (isSupplierReceipt && (normFrom.toLowerCase() !== "supplier" || normTo.toLowerCase() !== "purchase")) {
+    return { success: false, statusCode: 400, error: "Supplier receipts must credit Purchase from Supplier." };
+  }
+  if (isSupplierReceipt && !isDeptAuthorized(input.actor, "Purchase")) {
+    return { success: false, statusCode: 403, error: "Forbidden: only an authorized Purchase user may record supplier receipts." };
+  }
+  if (!isSupplierReceipt && !isDeptAuthorized(input.actor, normFrom)) {
     return {
       success: false,
       statusCode: 403,
@@ -185,7 +194,17 @@ async function commitMaterialMovementTxInner(
       return { success: false, statusCode: 404, error: `Job Card '${jobCardNo}' not found.` };
     }
 
-    if (!isIssue && !stockIn) {
+    if (isSupplierReceipt && !input.movementId) {
+      const existingReceipt = await store.get("mfr_movements", `M-SUPPLIER-RECEIPT-${opKey}`);
+      if (existingReceipt) {
+        if (existingReceipt.operationId === opKey) {
+          return { success: true, cached: true, movement: existingReceipt, updatedJobCard: jobCardData, writes: [] };
+        }
+        return { success: false, statusCode: 409, error: `Movement ID 'M-SUPPLIER-RECEIPT-${opKey}' already exists.` };
+      }
+    }
+
+    if (!isIssue && !stockIn && !isSupplierReceipt) {
       const movements = input.preloadedMovements || (await store.list("mfr_movements"));
       if (findPendingDuplicateMovement(movements, { jobCardNo, fromDepartment: normFrom, toDepartment: normTo, isIssueRequest: isIssue })) {
         return {
@@ -197,7 +216,29 @@ async function commitMaterialMovementTxInner(
     }
 
     const movementsForQty = input.preloadedMovements || (await store.list("mfr_movements"));
-    if (isIssue) {
+    if (isSupplierReceipt) {
+      if (jobCardData.processType !== "Purchase") {
+        return { success: false, statusCode: 400, error: "Supplier receipts require a Purchase job card." };
+      }
+      const purchaseDetails = jobCardData.purchaseDetails || {};
+      const receivedQty = Number(purchaseDetails.receivedQty);
+      const rejectedQty = Number(purchaseDetails.rejectionQty || 0);
+      const receiptLimit = receivedQty - rejectedQty;
+      const credited = movementsForQty
+        .filter((m: any) => String(m.jobCardNo || "").toLowerCase() === jobCardNo.toLowerCase())
+        .filter((m: any) => m.processDetails?.isSupplierReceipt && m.accepted === true)
+        .reduce((sum: number, m: any) => sum + Number(m.quantity || 0), 0);
+      if (!Number.isFinite(receivedQty) || receivedQty <= 0 || rejectedQty < 0 || rejectedQty > receivedQty) {
+        return { success: false, statusCode: 400, error: "Supplier receipt quantity must be recorded with a valid received quantity and rejection quantity." };
+      }
+      if (reqQty > receiptLimit - credited + 1e-9) {
+        return {
+          success: false,
+          statusCode: 400,
+          error: `Supplier receipt exceeds the uncredited received quantity. Only ${Math.max(0, receiptLimit - credited)} remains.`
+        };
+      }
+    } else if (isIssue) {
       let issueAvail = 0;
       if (normFrom === "Raw Material Store") {
         const skuCode = String(
@@ -248,7 +289,9 @@ async function commitMaterialMovementTxInner(
     }
   }
 
-  let movId = input.movementId || `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  let movId = input.movementId || (isSupplierReceipt
+    ? `M-SUPPLIER-RECEIPT-${opKey}`
+    : `M-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`);
   const existingMov = await store.get("mfr_movements", movId);
   if (existingMov) {
     if (existingMov.operationId && existingMov.operationId === opKey) {
@@ -282,16 +325,19 @@ async function commitMaterialMovementTxInner(
     transferBy: input.actor.userName,
     initiatedByUserId: input.actor.userId,
     initiatedByUserName: input.actor.userName,
-    accepted: false,
-    acceptedQty: 0,
+    accepted: isSupplierReceipt,
+    acceptedQty: isSupplierReceipt ? reqQty : 0,
     rejectedQty: 0,
     unit: contracted.unit || jobCardData?.unit || input.requestedUnit || "KGS",
-    transactionType: input.transactionType || (isIssue ? "ISSUE_REQUEST" : "TRANSFER"),
+    transactionType: input.transactionType || (isSupplierReceipt ? "PURCHASE_RECEIPT" : isIssue ? "ISSUE_REQUEST" : "TRANSFER"),
     operationId: opKey,
     isIssueRequest: isIssue,
     issueStatus: isIssue ? "Requested" : undefined,
     remarks: input.remarks || "",
-    processDetails: contracted.processDetails || input.processDetails || null,
+    processDetails: {
+      ...(contracted.processDetails || input.processDetails || {}),
+      ...(isSupplierReceipt ? { isSupplierReceipt: true } : {})
+    },
     requestedQty: input.requestedQty,
     requestedUnit: input.requestedUnit,
     dispatchGroupNo: input.dispatchGroupNo || (input.extra?.dispatchGroupNo as string) || undefined,
@@ -300,7 +346,7 @@ async function commitMaterialMovementTxInner(
   };
 
   let updatedJobCard: any = null;
-  if (jobCardData && !isIssue && !stockIn) {
+  if (jobCardData && !isIssue && !stockIn && !isSupplierReceipt) {
     const nextVersion = (jobCardData.version || 1) + 1;
     const pendingOutbound = Array.isArray(jobCardData.pendingOutbound) ? [...jobCardData.pendingOutbound] : [];
     pendingOutbound.push({ from: normFrom, to: normTo, movementId: movId });
