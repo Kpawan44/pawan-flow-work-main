@@ -1,0 +1,91 @@
+name: PMW Safety & Regression CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  server-lint-test-build:
+    name: Node Server — Lint, Security & Regression Suite, Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Typecheck & Lint
+        run: npm run lint
+
+      - name: Run Environment Safety Tests (envGuard Fail-Closed)
+        run: npx tsx test/envGuard.test.ts
+
+      - name: Run Server Security Suite (Process 28)
+        run: npx tsx test/process28-ledger-security.test.ts
+
+      - name: Run Full Server Regression Suite (15 Test Files)
+        run: |
+          npx tsx \
+            test/hardening.test.ts \
+            test/process1-purchase.test.ts \
+            test/process2-manufacturing.test.ts \
+            test/process3-inventory-flow.test.ts \
+            test/process4-e2e-workflow.test.ts \
+            test/process5-mobile-and-reports.test.ts \
+            test/process6-split-job-lineage.test.ts \
+            test/process7-ui-and-api-split-integration.test.ts \
+            test/process9-batch-scan-and-subcontract-challan.test.ts \
+            test/process20-ui-management.test.ts \
+            test/process24-movement-engine.test.ts \
+            test/process26-1-live-path.test.ts \
+            test/process26-ledger-bypasses.test.ts \
+            test/process27-ledger-truth.test.ts \
+            test/process28-ledger-security.test.ts
+
+      - name: Run Staging Manufacturing Resilience Suite (Process 147/148)
+        run: npm run test:staging:process147
+
+      - name: Build Web Application & Server Bundle
+        run: npm run build
+
+  flutter-tests:
+    name: Flutter App — Unit & Widget Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install Flutter Dependencies
+        working-directory: ./pmw_tracker_flutter
+        run: flutter pub get
+
+      - name: Run Flutter Widget & Unit Tests
+        working-directory: ./pmw_tracker_flutter
+        run: flutter test

@@ -13,7 +13,9 @@
     "cap:sync": "vite build && npx cap sync",
     "migrate:pins": "node migrate-remove-plaintext-pins.js",
     "clean": "rm -rf dist dist-electron release",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx test/envGuard.test.ts && tsx test/hardening.test.ts",
+    "test:staging:process147": "tsx test/stagingProcess147.test.ts"
   },
   "build": {
     "appId": "com.pmw.tracker",
