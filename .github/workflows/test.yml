@@ -54,7 +54,9 @@ jobs:
             test/process26-1-live-path.test.ts \
             test/process26-ledger-bypasses.test.ts \
             test/process27-ledger-truth.test.ts \
-            test/process28-ledger-security.test.ts
+            test/process28-ledger-security.test.ts \
+            test/process182-wire-purchase-production.test.ts \
+            test/process191-multi-instance-concurrency.test.ts
 
       - name: Run Staging Manufacturing Resilience Suite (Process 147/148)
         run: npm run test:staging:process147
@@ -83,9 +85,13 @@ jobs:
           cache: true
 
       - name: Install Flutter Dependencies
-        working-directory: ./pmw_tracker_flutter
+        working-directory: ./flutter_app
         run: flutter pub get
 
+      - name: Analyze Flutter Application
+        working-directory: ./flutter_app
+        run: flutter analyze
+
       - name: Run Flutter Widget & Unit Tests
-        working-directory: ./pmw_tracker_flutter
+        working-directory: ./flutter_app
         run: flutter test

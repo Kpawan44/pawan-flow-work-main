@@ -212,16 +212,122 @@ export function productionSendAvailable(
   return Math.max(0, rm + returnsIn - outbound);
 }
 
+function productionOutboundQty(
+  jobCardNo: string,
+  movements: Array<{
+    jobCardNo?: string;
+    fromDepartment?: string;
+    quantity?: number;
+    processDetails?: any;
+    transactionType?: string;
+    deletedDate?: string;
+    isDeleted?: boolean;
+  }> = []
+): number {
+  return jobMovements(jobCardNo, movements)
+    .filter((m) => !isDeletedMovement(m))
+    .filter(
+      (m) =>
+        normalizeDeptName(m.fromDepartment) === "production" &&
+        !isRejectionReturnMovement(m) &&
+        !isUndoneMovement(m as any) &&
+        !isUndoReversalMovement(m as any)
+    )
+    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
+}
+
+function productionReturnQty(
+  jobCardNo: string,
+  movements: Array<{
+    jobCardNo?: string;
+    toDepartment?: string;
+    accepted?: boolean;
+    quantity?: number;
+    acceptedQty?: number;
+    processDetails?: any;
+    transactionType?: string;
+    deletedDate?: string;
+    isDeleted?: boolean;
+  }> = []
+): number {
+  return jobMovements(jobCardNo, movements)
+    .filter((m) => !isDeletedMovement(m))
+    .filter(
+      (m) =>
+        normalizeDeptName(m.toDepartment) === "production" &&
+        isRejectionReturnMovement(m) &&
+        creditedInboundQty(m) > 0
+    )
+    .reduce((sum, m) => sum + creditedInboundQty(m), 0);
+}
+
+/** Order qty still unproduced. Partial production of 200 / 1000 leaves 800 pending. */
+export function unproducedOrderQty(
+  job: { orderQty?: number; jobCardNo?: string },
+  movements: Array<any> = []
+): number {
+  if (!job) return 0;
+  const opening = Math.max(0, Number(job.orderQty || 0));
+  const outbound = productionOutboundQty(String(job.jobCardNo || ""), movements);
+  const returnsIn = productionReturnQty(String(job.jobCardNo || ""), movements);
+  return Math.max(0, opening + returnsIn - outbound);
+}
+
 export function remainingAtProduction(
-  job: { orderQty?: number; jobCardNo?: string; processType?: string },
+  job: { orderQty?: number; jobCardNo?: string; processType?: string; currentQty?: number },
   movements: Array<{ jobCardNo?: string; fromDepartment?: string; toDepartment?: string; quantity?: number; accepted?: boolean; isIssueRequest?: unknown; processDetails?: any; transactionType?: string }> = [],
   opts?: { compulsory?: boolean }
 ): number {
   const available = productionSendAvailable(job, movements, opts);
-  if (available === null) {
-    return remainingAtDepartment(job, movements, "Production");
+  if (available !== null) return available;
+  const ledger = remainingAtDepartment(job, movements, "Production");
+  const unproduced = unproducedOrderQty(job, movements);
+  const target = String(job.jobCardNo || "").toLowerCase();
+  const hasInboundToProduction = (movements || []).some(
+    (m) =>
+      m &&
+      String(m.jobCardNo || "").toLowerCase() === target &&
+      !isDeletedMovement(m as { deletedDate?: string; isDeleted?: boolean; status?: string }) &&
+      normalizeDeptName(m.toDepartment) === "production" &&
+      creditedInboundQty(m) > 0
+  );
+  // Optional RM / no inbound: do not treat the first partial outbound as wiping the order.
+  if (!hasInboundToProduction) return unproduced;
+  return ledger;
+}
+
+export function remainingAtSourceDepartment(
+  job: any,
+  movements: any[] = [],
+  department: string,
+  opts?: { compulsory?: boolean }
+): number {
+  if (normalizeDeptName(department) === "production") {
+    return remainingAtProduction(job, movements, opts);
   }
-  return available;
+  const cap = process2SendAvailableQty(department, job, movements, opts);
+  if (cap !== null) return cap;
+  return remainingAtDepartment(job, movements, department);
+}
+
+export function shouldRelocateJobOnQuantityMove(
+  job: any,
+  movementsIncludingThisMove: any[] = [],
+  fromDepartment: string,
+  opts?: { compulsory?: boolean }
+): boolean {
+  if (normalizeDeptName(fromDepartment) === "production") {
+    return unproducedOrderQty(job, movementsIncludingThisMove) <= 1e-9;
+  }
+  return remainingAtSourceDepartment(job, movementsIncludingThisMove, fromDepartment, opts) <= 1e-9;
+}
+
+export function activeStatusWhileRemaining(job: { status?: string } | null | undefined, department: string): string {
+  const current = String(job?.status || "").trim();
+  const lower = current.toLowerCase();
+  if (lower === "pending" || lower === "in process" || lower === "in progress") return current;
+  if (normalizeDeptName(department) === "production") return "In Process";
+  return "In Process";
 }
 
 export function assertHeatTreatmentRouting(
@@ -348,6 +454,10 @@ export function remainingAtDepartment(
     // Once any movement exists, cache cannot increase transferable quantity.
     return Math.max(0, Number(job.currentQty || 0));
   }
+  // Partial production with no credited inbound (optional RM): keep unproduced order qty.
+  if (received === 0 && dept === "production") {
+    return unproducedOrderQty(job as { orderQty?: number; jobCardNo?: string }, movements);
+  }
   return Math.max(0, received - sent - effectiveRejection);
 }
 
@@ -437,6 +547,30 @@ export function findPendingDuplicateMovement(
       normalizeDeptName(m.fromDepartment) === from &&
       normalizeDeptName(m.toDepartment) === to
   );
+}
+
+/**
+ * Same-route pending lock: one in-flight handover per job + from + to.
+ *
+ * Exception (narrow): Production shop-floor transfers may enqueue additional
+ * partial batches while a prior Production outbound is still pending acceptance.
+ * Quantity is enforced by process2SendAvailableQty under serialized commit.
+ * Store → Dispatch and all other routes keep the original duplicate-pending reject.
+ */
+export function shouldBlockPendingDuplicateRoute(
+  movements: Array<{
+    accepted?: boolean;
+    deletedDate?: string;
+    jobCardNo?: string;
+    fromDepartment?: string;
+    toDepartment?: string;
+    isIssueRequest?: unknown;
+  }>,
+  input: { jobCardNo: string; fromDepartment: string; toDepartment: string; isIssueRequest?: unknown }
+): boolean {
+  if (!findPendingDuplicateMovement(movements, input)) return false;
+  if (normalizeDeptName(input.fromDepartment) === "production") return false;
+  return true;
 }
 
 export function attachProcess2MovementContract(

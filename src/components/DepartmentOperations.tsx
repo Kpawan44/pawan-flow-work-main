@@ -59,7 +59,8 @@ import {
   sameDepartmentTransferBlocked,
   productionSendAvailable,
   isPendingAcceptanceMovement,
-  process2SendAvailableQty
+  process2SendAvailableQty,
+  unproducedOrderQty
 } from '../hardening/process2Manufacturing';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
@@ -860,6 +861,10 @@ export default function DepartmentOperations({
       alert("Please specify Supplier / Vendor Name.");
       return;
     }
+    if (!String(purchaseBill || "").trim()) {
+      alert("Please specify Bill / Invoice / Challan No. Duplicate invoices are rejected.");
+      return;
+    }
 
     const recNum = parseDecimalQuantity(purchaseRecQty);
     const rejNum = parseDecimalQuantity(purchaseRejQty) || 0;
@@ -1120,6 +1125,10 @@ export default function DepartmentOperations({
     const recNum = parseDecimalQuantity(purchaseRecQty);
     const rejNum = parseDecimalQuantity(purchaseRejQty) || 0;
     if (!(purchaseSentQty > 0) || !purchaseSupplier) return;
+    if (!String(purchaseBill || "").trim()) {
+      alert("Please specify Bill / Invoice / Challan No. Duplicate invoices are rejected.");
+      return;
+    }
     if (!(recNum > 0) || purchaseSentQty > recNum) {
       alert(`Error: Sent quantity (${purchaseSentQty}) cannot exceed the received quantity (${recNum}).`);
       return;
@@ -1854,6 +1863,8 @@ Please adjust the quantity or request additional raw material issue.`);
       return c.processType === 'Purchase' && c.currentDepartment === 'Purchase';
     }
     if (activeDept === 'Production') {
+      if (unproducedOrderQty(c, movements) > 0) return true;
+      if (remainingAtProduction(c, movements, { compulsory: isRawMaterialCompulsory }) > 0) return true;
       if (isVisibleInProductionQueue(c)) return true;
       const returned = movements.some(m =>
         m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() &&
@@ -2086,7 +2097,7 @@ Please adjust the quantity or request additional raw material issue.`);
     const totalMovedFromProd = movements
       .filter(mov => mov.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && mov.fromDepartment === 'Production')
       .reduce((sum, mov) => sum + mov.quantity, 0);
-    const pendingProdQty = job.orderQty - totalMovedFromProd;
+    const pendingProdQty = unproducedOrderQty(job, movements);
     const isRoutedDownstream = job.currentDepartment !== 'Production';
 
     // 1. Heat Treatment variables
@@ -5838,7 +5849,7 @@ Please adjust the quantity or request additional raw material issue.`);
                     const totalMovedFromProd = movements
                       .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
                       .reduce((sum, m) => sum + m.quantity, 0);
-                    const pendingProdQty = job.orderQty - totalMovedFromProd;
+                    const pendingProdQty = unproducedOrderQty(job, movements);
                     const isRoutedDownstream = job.currentDepartment !== 'Production';
 
                     // 1. Heat Treatment variables

@@ -19,12 +19,13 @@ import {
   purchaseNotificationDepartment,
   nextStatusOnPurchaseAccept
 } from "./src/hardening/process1Purchase";
+import { createPurchaseJobInwardTx } from "./src/hardening/purchaseJobCardCreate";
 import { mountLedgerRoutes } from "./src/hardening/ledgerHttp";
+import { runKeyedSerialized, runWithExclusiveLock } from "./src/hardening/movementSerialize";
 import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
 import { verifyBatchManifestTx } from "./src/hardening/batchManifestScanner";
 import { createSubcontractChallanTx } from "./src/hardening/subcontractChallan";
-
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
 
@@ -462,6 +463,7 @@ async function startServer() {
   // Authoritative in-memory maps for sub-millisecond consistency and zero read-after-write lag
   const inMemoryJobCards = new Map<string, any>();
   const inMemoryMovements = new Map<string, any>();
+  const inMemoryLedgerDocs = new Map<string, any>();
   const inMemoryDeletedJobCards = new Set<string>();
   // PERSISTENT DELETED-USER TOMBSTONES (ANTI-RESURRECTION)
   // ----------------------------------------------------
@@ -2011,6 +2013,7 @@ async function startServer() {
       "mfr_process_transfers",
       "mfr_audit_logs",
       "mfr_idempotency_keys",
+      "mfr_serialize_locks",
       "mfr_notifications",
       "mfr_items",
       "mfr_outsource_orders",
@@ -2467,6 +2470,45 @@ async function startServer() {
         return res.status(403).json({
           success: false,
           error: `Forbidden: User '${requester.name || requester.userId}' (${requester.department}) is not authorized to create ${isPurchase ? 'Purchase Inward' : 'Dispatch'} Job Cards.`
+        });
+      }
+
+      if (isPurchase) {
+        const purchaseActor = {
+          userId: authUid,
+          userName: requester.name || requester.userId || "Authorized User",
+          role: requester.role || "staff",
+          department: requester.department || "Purchase",
+          allowedDepartments: Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : [],
+          accessList: Array.isArray(requester.accessList) ? requester.accessList : []
+        };
+        const purchaseResult = await createPurchaseJobInwardTx(createServerStore(), {
+          jobCard,
+          actor: purchaseActor,
+          operationId: String(req.body?.operationId || customInitialMovement?.operationId || "").trim() || undefined
+        });
+        if (!purchaseResult.success) {
+          return res.status(purchaseResult.statusCode || 400).json({ success: false, error: purchaseResult.error });
+        }
+        if (purchaseResult.jobCard?.jobCardNo) {
+          inMemoryJobCards.set(String(purchaseResult.jobCard.jobCardNo).toUpperCase(), purchaseResult.jobCard);
+        }
+        if (purchaseResult.movement?.movementId) {
+          inMemoryMovements.set(purchaseResult.movement.movementId, purchaseResult.movement);
+        }
+        broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: purchaseResult.jobCard?.jobCardNo });
+        if (purchaseResult.movement?.movementId) {
+          broadcastRealtimeEvent("MOVEMENT_UPDATED", {
+            movementId: purchaseResult.movement.movementId,
+            jobCardNo: purchaseResult.jobCard?.jobCardNo
+          });
+        }
+        broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
+        return res.json({
+          success: true,
+          cached: Boolean(purchaseResult.cached),
+          jobCard: purchaseResult.jobCard,
+          movement: purchaseResult.movement || null
         });
       }
 
@@ -2943,7 +2985,8 @@ async function startServer() {
         "mfr_notifications",
         "mfr_deleted_job_cards",
         "mfr_deleted_movements",
-        "mfr_idempotency_keys"
+        "mfr_idempotency_keys",
+        "mfr_serialize_locks"
       ];
 
       const deletedCollections: Record<string, number> = {};
@@ -3238,7 +3281,8 @@ async function startServer() {
     }
   });
 
-  const createServerStore = () => ({
+  function createServerStore() {
+    return {
     async get(collection: string, id: string): Promise<any | null> {
       if (collection === "mfr_job_cards") {
         const mem = inMemoryJobCards.get(String(id).toUpperCase()) || inMemoryJobCards.get(id);
@@ -3248,6 +3292,8 @@ async function startServer() {
         const mem = inMemoryMovements.get(id);
         if (mem) return mem;
       }
+      const ledgerKey = `${collection}:${id}`;
+      if (inMemoryLedgerDocs.has(ledgerKey)) return inMemoryLedgerDocs.get(ledgerKey);
       try {
         const dbAdmin = getFirestoreAdmin();
         if (dbAdmin) {
@@ -3263,6 +3309,7 @@ async function startServer() {
         if (dbAdmin) await dbAdmin.collection(collection).doc(id).set(data);
       } catch (_) {}
       await firestoreRestSetDoc(collection, id, data).catch(() => {});
+      inMemoryLedgerDocs.set(`${collection}:${id}`, data);
       if (collection === "mfr_job_cards") {
         inMemoryJobCards.set(String(id).toUpperCase(), data);
         if (data?.jobCardNo) {
@@ -3288,8 +3335,17 @@ async function startServer() {
       if (collection === "mfr_job_cards") return Array.from(inMemoryJobCards.values());
       if (collection === "mfr_movements") return Array.from(inMemoryMovements.values());
       return [];
+    },
+    runSerialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
+      return runWithExclusiveLock({
+        key,
+        fn,
+        db: getFirestoreAdmin() || null,
+        fallback: runKeyedSerialized
+      });
     }
-  });
+    };
+  }
 
   const actorFromRequester = (authUid: string, requester: any) => ({
     userId: authUid,

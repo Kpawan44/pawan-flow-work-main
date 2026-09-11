@@ -31,7 +31,7 @@ class AppStateProvider extends ChangeNotifier {
     isActive: true,
   );
 
-  List<JobCard> _jobCards = [
+  final List<JobCard> _jobCards = [
     JobCard(
       jobCardNo: 'JC-1001',
       partyName: 'Tata Motors Assembly Unit',
@@ -58,7 +58,7 @@ class AppStateProvider extends ChangeNotifier {
     ),
   ];
 
-  List<MaterialMovement> _movements = [
+  final List<MaterialMovement> _movements = [
     MaterialMovement(
       movementId: 'm-1',
       jobCardNo: 'JC-1001',
@@ -477,10 +477,10 @@ class ProfileSettingsScreen extends StatelessWidget {
             onChanged: (_) => state.toggleOnlineStatus(),
           ),
         ),
-        ListTile(
-          leading: const Icon(Icons.phone_android),
-          title: const Text('Android Mobile Build'),
-          subtitle: const Text('Flutter 3.x Material 3 APK Edition'),
+        const ListTile(
+          leading: Icon(Icons.phone_android),
+          title: Text('Android Mobile Build'),
+          subtitle: Text('Flutter 3.x Material 3 APK Edition'),
         ),
         const SizedBox(height: 20),
         ElevatedButton.icon(

@@ -123,6 +123,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Cross-instance movement serialize locks (Admin SDK only)
+    match /mfr_serialize_locks/{lockId} {
+      allow read, write: if false;
+    }
+
     // Collection: Audit Logs (Immutable write-once audit trails)
     // Strictly append-only: Updates and Deletions are forbidden; Authoritative actor must match request.auth.uid
     match /mfr_audit_logs/{logId} {

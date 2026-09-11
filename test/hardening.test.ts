@@ -57,7 +57,7 @@ async function run() {
     actor: a
   });
   assert("1 concurrent first movement succeeds", r1.success === true && r1.movement?.accepted === false);
-  assert("job pending acceptance at destination", r1.updatedJobCard?.status === "Pending Acceptance" && r1.updatedJobCard?.currentDepartment === "Heat Treatment");
+  assert("job remains at Production while unproduced quantity is still pending", r1.updatedJobCard?.status === "In Process" && r1.updatedJobCard?.currentDepartment === "Production");
   assert("does not decrement currentQty on send", r1.updatedJobCard?.currentQty === 100);
 
   const r1b = await commitMaterialMovementTx(store, {
@@ -80,7 +80,7 @@ async function run() {
     requireRawMaterialForProduction: false,
     actor: a
   });
-  assert("duplicate pending same route rejected", rDupPending.success === false);
+  assert("second partial production on same route is allowed", rDupPending.success === true, rDupPending.error);
 
   const store2 = new MemoryStore();
   await store2.set("mfr_job_cards", "JC-1001", {
@@ -126,6 +126,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 80,
+    processDetails: { billNo: "INV-HARD-RM", supplierName: "Purchase Co", itemCode: "RM-80" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"], userId: "u-pur" })
   });
   assert("4 Purchase → Raw Material Store dest authoritative", rRm.updatedJobCard?.currentDepartment === "Raw Material Store");
@@ -146,6 +147,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Store",
     quantity: 10,
+    processDetails: { billNo: "INV-HARD-FG", supplierName: "Purchase Co", itemCode: "FG-40" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"], userId: "u-pur" })
   });
   assert("5 Purchase → Store dest authoritative", rStore.success && rStore.updatedJobCard?.currentDepartment === "Store");
@@ -167,6 +169,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 50,
+    processDetails: { billNo: "INV-STOCK-EN8", supplierName: "Steel Co", rawMaterialCode: "EN8-R" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
   });
   assert("7 STOCK-IN without job card", rStock.success === true && !rStock.updatedJobCard);
@@ -331,6 +334,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 1,
+    processDetails: { billNo: "INV-STOCK-X", supplierName: "Steel Co", rawMaterialCode: "X" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
   });
   const p2 = commitMaterialMovementTx(new MemoryStore(), {
@@ -339,6 +343,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 1,
+    processDetails: { billNo: "INV-STOCK-Y", supplierName: "Steel Co", rawMaterialCode: "Y" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
   });
   const conc = await Promise.all([p1, p2]);
@@ -370,8 +375,9 @@ async function run() {
     (m) => !m.accepted && m.fromDepartment === "Production" && m.toDepartment === "Heat Treatment"
   );
   assert(
-    "1c concurrent same-route handovers do not duplicate",
-    pendingHandovers.length === 1 && ((cA.success && !cB.success) || (!cA.success && cB.success) || (cA.cached || cB.cached))
+    "1c concurrent distinct partial handovers both record remaining quantity",
+    cA.success === true && cB.success === true && pendingHandovers.length === 2,
+    `a:${cA.success} b:${cB.success} pending:${pendingHandovers.length} aErr:${cA.error} bErr:${cB.error}`
   );
 
   const collide = new MemoryStore();
@@ -404,6 +410,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 8,
+    processDetails: { billNo: "INV-NEW-ALLOY", supplierName: "Steel Co", rawMaterialCode: "NEW-ALLOY" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
   });
   const createdSku = unknownSku.writes?.find((w) => w.collection === "mfr_rm_sku_master");

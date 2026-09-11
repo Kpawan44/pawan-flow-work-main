@@ -29,7 +29,7 @@ import {
   logActionToSheets 
 } from './googleSheets';
 import { nextStatusOnPurchaseAccept, displayUnitLabel } from '../hardening/process1Purchase';
-import { attachProcess2MovementContract, isPendingAcceptanceMovement, isRawMaterialStoreIssuingToProduction, shouldUpdateJobOnAccept } from '../hardening/process2Manufacturing';
+import { attachProcess2MovementContract, isPendingAcceptanceMovement, isRawMaterialStoreIssuingToProduction, shouldBlockPendingDuplicateRoute, shouldUpdateJobOnAccept } from '../hardening/process2Manufacturing';
 import {
   denyDirectMovementDelete,
   denyDirectMovementUpdate,
@@ -1570,17 +1570,18 @@ export class DBService {
     }
 
     const movements = await this.getMovements();
-
-    // Check for duplicate pending transfer request for same job card between same departments
-    if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
-      const pendingDup = movements.find(m =>
-        isPendingAcceptanceMovement(m) &&
-        m.jobCardNo.toLowerCase() === movement.jobCardNo.toLowerCase() &&
-        m.fromDepartment === movement.fromDepartment &&
-        m.toDepartment === movement.toDepartment
-      );
-      if (pendingDup) {
-        throw new Error(`A transfer request for Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment} is already pending acceptance.`);
+    if (!movement.isIssueRequest && !String(movement.jobCardNo || "").startsWith("STOCK-IN-")) {
+      if (
+        shouldBlockPendingDuplicateRoute(movements, {
+          jobCardNo: movement.jobCardNo,
+          fromDepartment: String(movement.fromDepartment || ""),
+          toDepartment: String(movement.toDepartment || ""),
+          isIssueRequest: movement.isIssueRequest
+        })
+      ) {
+        throw new Error(
+          `A transfer request for Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment} is already pending acceptance.`
+        );
       }
     }
 

@@ -8,14 +8,20 @@ import {
   SimpleStore
 } from "./commitMaterialMovement";
 import {
+  activeStatusWhileRemaining,
   creditedInboundQty,
   deriveCachedCurrentQty,
   isFullyRejectedMovement,
   isPendingAcceptanceMovement,
   isRejectionReturnMovement,
   isUndoneMovement,
+  remainingAtSourceDepartment,
+  shouldRelocateJobOnQuantityMove,
+  unproducedOrderQty,
   unresolvedPendingQty
 } from "./process2Manufacturing";
+import { runKeyedSerialized } from "./movementSerialize";
+import { normalizeDeptName } from "./process1Purchase";
 
 export type MovementActor = MovementCommitInput["actor"];
 
@@ -60,6 +66,18 @@ function isReceiverAuthorized(actor: MovementActor, toDepartment: string): boole
   return isDeptAuthorized(actor, toDepartment);
 }
 
+function isAcceptAuthorized(actor: MovementActor, movement: any, input: AcceptMovementInput): boolean {
+  const isRmStoreConfirmingIssue =
+    Boolean(movement?.isIssueRequest) &&
+    String(movement.fromDepartment || "") === "Raw Material Store" &&
+    String(input.issueStatus || "") === "Issued" &&
+    String(movement.issueStatus || "") !== "Issued";
+  if (isRmStoreConfirmingIssue) {
+    return isDeptAuthorized(actor, "Raw Material Store");
+  }
+  return isDeptAuthorized(actor, String(movement.toDepartment || ""));
+}
+
 function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 }
@@ -85,11 +103,10 @@ export async function acceptMaterialMovementTx(
   store: SimpleStore,
   input: AcceptMovementInput
 ): Promise<ResolveMovementResult> {
-  const serializeKey = String(input.movementId || input.operationId || "accept").toUpperCase();
-  if (store.runSerialized) {
-    return store.runSerialized(`acc:${serializeKey}`, () => acceptMaterialMovementTxInner(store, input));
-  }
-  return acceptMaterialMovementTxInner(store, input);
+  const serializeKey = `acc:${String(input.movementId || input.operationId || "accept").toUpperCase()}`;
+  const run = () => acceptMaterialMovementTxInner(store, input);
+  if (store.runSerialized) return store.runSerialized(serializeKey, run);
+  return runKeyedSerialized(serializeKey, run);
 }
 
 async function acceptMaterialMovementTxInner(
@@ -109,7 +126,7 @@ async function acceptMaterialMovementTxInner(
     return { success: false, statusCode: 400, error: `Movement ${input.movementId} has been cancelled or deleted.` };
   }
 
-  if (!isReceiverAuthorized(input.actor, String(movement.toDepartment || ""))) {
+  if (!isAcceptAuthorized(input.actor, movement, input)) {
     return {
       success: false,
       statusCode: 403,
@@ -123,6 +140,15 @@ async function acceptMaterialMovementTxInner(
   const pending = Math.max(0, originalQty - alreadyAccepted - alreadyRejected);
   const requestedAccept = input.acceptQty === undefined || input.acceptQty === null ? pending : Number(input.acceptQty);
 
+  const isRmIssueToProduction =
+    Boolean(movement.isIssueRequest) &&
+    String(movement.fromDepartment || "") === "Raw Material Store" &&
+    String(movement.toDepartment || "") === "Production";
+  const isRawMaterialStoreIssuing =
+    isRmIssueToProduction &&
+    String(input.issueStatus || "") === "Issued" &&
+    String(movement.issueStatus || "") !== "Issued";
+
   if (movement.accepted && movement.issueStatus !== "Rejected" && pending <= 0) {
     const payload = { success: true, cached: true, movement, updatedJobCard: null };
     return payload;
@@ -130,6 +156,34 @@ async function acceptMaterialMovementTxInner(
 
   if (isFullyRejectedMovement(movement) && pending <= 0) {
     return { success: false, statusCode: 400, error: "This movement has already been fully rejected." };
+  }
+
+  if (isRawMaterialStoreIssuing) {
+    const issuedMov: any = {
+      ...movement,
+      quantity: originalQty,
+      accepted: false,
+      acceptedQty: alreadyAccepted,
+      rejectedQty: alreadyRejected,
+      issueStatus: "Issued",
+      resolutionStatus: "ISSUED",
+      remarks: input.remarks || movement.remarks,
+      allottedLocation: input.allottedLocation !== undefined ? input.allottedLocation : movement.allottedLocation,
+      rackNo: input.rackNo !== undefined ? input.rackNo : movement.rackNo,
+      modifiedByUserId: input.actor.userId,
+      modifiedByUserName: input.actor.userName,
+      modifiedDate: now,
+      modifiedAction: "ISSUE"
+    };
+    await store.set("mfr_movements", input.movementId, issuedMov);
+    const resultPayload = { success: true, cached: false, movement: issuedMov, updatedJobCard: null };
+    await store.set("mfr_idempotency_keys", opKey, {
+      operationId: opKey,
+      createdAt: now,
+      userId: input.actor.userId,
+      result: resultPayload
+    });
+    return { ...resultPayload, writes: [{ collection: "mfr_movements", id: input.movementId, data: issuedMov }] };
   }
 
   if (!Number.isFinite(requestedAccept) || requestedAccept <= 0) {
@@ -142,12 +196,6 @@ async function acceptMaterialMovementTxInner(
       error: `Cannot accept ${requestedAccept}; only ${pending} remains unresolved on this movement.`
     };
   }
-
-  const isRawMaterialStoreIssuing =
-    movement.isIssueRequest &&
-    movement.fromDepartment === "Raw Material Store" &&
-    movement.toDepartment === "Production" &&
-    (input.issueStatus === "Issued" || movement.issueStatus === "Issued");
 
   const nextAcceptedQty = alreadyAccepted + requestedAccept;
   const remainingAfter = Math.max(0, originalQty - nextAcceptedQty - alreadyRejected);
@@ -195,25 +243,41 @@ async function acceptMaterialMovementTxInner(
 
   let updatedJobCard: any = null;
   const jobCardNo = String(movement.jobCardNo || "");
-  if (jobCardNo && !isStockInJob(jobCardNo) && !isRawMaterialStoreIssuing) {
+  const skipJobUpdateForRmIssue =
+    Boolean(movement.isIssueRequest) &&
+    String(movement.fromDepartment || "") === "Raw Material Store" &&
+    String(movement.toDepartment || "") === "Production";
+  if (jobCardNo && !isStockInJob(jobCardNo) && !isRawMaterialStoreIssuing && !skipJobUpdateForRmIssue) {
     const jobId = jobCardNo.toUpperCase();
     const job = (await store.get("mfr_job_cards", jobId)) || (await store.get("mfr_job_cards", jobCardNo));
     if (job) {
       const allMovements = await store.list("mfr_movements");
       const nextMovements = allMovements.map((m) => (m.movementId === input.movementId ? updatedMov : m));
       const dest = applyAcceptanceDepartment(updatedMov) || updatedMov.toDepartment;
+      const fromDept = String(updatedMov.fromDepartment || job.currentDepartment || dest);
+      const relocate = shouldRelocateJobOnQuantityMove(job, nextMovements, fromDept, {
+        compulsory: input.requireRawMaterialForProduction
+      });
+      const custodyDept = relocate ? dest : fromDept;
       const cachedQty = deriveCachedCurrentQty(
-        { ...job, currentDepartment: dest },
+        { ...job, currentDepartment: custodyDept },
         nextMovements,
-        dest,
+        custodyDept,
         { compulsory: input.requireRawMaterialForProduction }
       );
+      const remainingAtSource = remainingAtSourceDepartment(job, nextMovements, fromDept, {
+        compulsory: input.requireRawMaterialForProduction
+      });
+      const pendingOrder =
+        normalizeDeptName(fromDept) === "production" ? unproducedOrderQty(job, nextMovements) : remainingAtSource;
       updatedJobCard = {
         ...job,
-        currentDepartment: dest,
-        status: nextStatusOnAccept(String(dest)),
-        currentQty: cachedQty,
-        pendingOutbound: clearPendingOutbound(job, updatedMov),
+        currentDepartment: custodyDept,
+        status: relocate
+          ? nextStatusOnAccept(String(dest))
+          : activeStatusWhileRemaining(job, fromDept),
+        currentQty: relocate ? cachedQty : pendingOrder,
+        pendingOutbound: remainingAfter <= 1e-9 ? clearPendingOutbound(job, updatedMov) : job.pendingOutbound,
         version: (job.version || 1) + 1,
         updatedAt: now,
         updatedBy: input.actor.userName,
@@ -256,11 +320,10 @@ export async function rejectMaterialMovementTx(
   store: SimpleStore,
   input: RejectMovementInput
 ): Promise<ResolveMovementResult> {
-  const serializeKey = String(input.movementId || input.operationId || "reject").toUpperCase();
-  if (store.runSerialized) {
-    return store.runSerialized(`rej:${serializeKey}`, () => rejectMaterialMovementTxInner(store, input));
-  }
-  return rejectMaterialMovementTxInner(store, input);
+  const serializeKey = `rej:${String(input.movementId || input.operationId || "reject").toUpperCase()}`;
+  const run = () => rejectMaterialMovementTxInner(store, input);
+  if (store.runSerialized) return store.runSerialized(serializeKey, run);
+  return runKeyedSerialized(serializeKey, run);
 }
 
 async function rejectMaterialMovementTxInner(
@@ -489,11 +552,10 @@ export async function undoMaterialMovementTx(
   store: SimpleStore,
   input: { operationId: string; movementId: string; actor: MovementActor; nowIso?: string; remarks?: string; requireRawMaterialForProduction?: boolean }
 ): Promise<ResolveMovementResult> {
-  const serializeKey = String(input.movementId || input.operationId || "undo").toUpperCase();
-  if (store.runSerialized) {
-    return store.runSerialized(`undo:${serializeKey}`, () => undoMaterialMovementTxInner(store, input));
-  }
-  return undoMaterialMovementTxInner(store, input);
+  const serializeKey = `undo:${String(input.movementId || input.operationId || "undo").toUpperCase()}`;
+  const run = () => undoMaterialMovementTxInner(store, input);
+  if (store.runSerialized) return store.runSerialized(serializeKey, run);
+  return runKeyedSerialized(serializeKey, run);
 }
 
 async function undoMaterialMovementTxInner(

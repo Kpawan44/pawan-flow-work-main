@@ -106,7 +106,7 @@ async function run() {
       requireRawMaterialForProduction: true,
       actor: actor("Production")
     });
-    assert("2 duplicate pending blocked", dup.success === false && String(dup.error || "").includes("already pending"));
+    assert("2 additional partial production while first batch is pending is allowed", dup.success === true, dup.error);
   }
 
   // 3 Full acceptance
@@ -433,9 +433,12 @@ async function run() {
       actor: actor("Heat Treatment")
     });
     const job = await store.get("mfr_job_cards", "JC-P24-21");
-    const rem = remainingAtDepartment(job, await store.list("mfr_movements"), "Heat Treatment");
-    assert("21 currentQty cache equals ledger remaining", acc.updatedJobCard?.currentQty === rem, `cache ${acc.updatedJobCard?.currentQty} ledger ${rem}`);
-    assert("21 currentQty is not blindly the movement qty if more inbound exists", rem === 40);
+    const movs = await store.list("mfr_movements");
+    const htRem = remainingAtDepartment(job, movs, "Heat Treatment");
+    const prodRem = remainingAtProduction(job, movs, { compulsory: true });
+    assert("21 HT ledger remaining is accepted 40", htRem === 40, `got ${htRem}`);
+    assert("21 production remaining 60 is preserved (not wiped to 40)", prodRem === 60 && acc.updatedJobCard?.currentQty === 60, `prod ${prodRem} cache ${acc.updatedJobCard?.currentQty}`);
+    assert("21 job stays in Production while 60 KG is still unproduced", acc.updatedJobCard?.currentDepartment === "Production");
   }
 
   // 22 QuickTransfer ceiling helper
