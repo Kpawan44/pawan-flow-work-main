@@ -62,7 +62,9 @@ async function run() {
     quantity: 1000,
     toDepartment: r1.destination,
     isWire: true,
-    rawMaterialKind: "Wire"
+    rawMaterialKind: "Wire",
+    supplierName: "Wire Mills",
+    billNo: "INV-WIRE-1000"
   });
   assert("TEST 1 Wire unit forced KG/KGS", wireContract.unit === "KGS" && wireContract.toDepartment === RAW_MATERIAL_STORE);
   assert("TEST 1 Wire metadata on root and processDetails", wireContract.isWire === true && wireContract.processDetails.isWire === true && wireContract.itemCode === "RM-WIRE-8MM");
@@ -75,6 +77,7 @@ async function run() {
     toDepartment: RAW_MATERIAL_STORE,
     quantity: 1000,
     processDetails: wireContract.processDetails,
+    extra: { itemCode: wireContract.itemCode, itemName: wireContract.itemName, materialType: "Raw Material", isWire: true, unit: "KGS" },
     extra: { itemCode: wireContract.itemCode, itemName: wireContract.itemName, materialType: "Raw Material", isWire: true, unit: "KGS" },
     actor: actor()
   });
@@ -121,7 +124,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: INCOMING_STORE,
     quantity: 500,
-    processDetails: { isWire: false, rawMaterialKind: "Other", materialType: "Raw Material" },
+    processDetails: { isWire: false, rawMaterialKind: "Other", materialType: "Raw Material", billNo: "INV-BAR-500", supplierName: "Bar Supplier", rawMaterialCode: "RM-BAR-12" },
     extra: { itemCode: "RM-BAR-12", itemName: "MS Bar", materialType: "Raw Material", isWire: false, unit: "KGS" },
     actor: actor()
   });
@@ -238,7 +241,9 @@ async function run() {
     materialType: "Raw Material",
     quantity: 1000.5,
     toDepartment: RAW_MATERIAL_STORE,
-    isWire: true
+    isWire: true,
+    supplierName: "Wire Mills",
+    billNo: "INV-DEC-1000"
   });
   assert("TEST 13 quantity preserved 1000.5", decContract.quantity === 1000.5);
 
@@ -249,6 +254,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: RAW_MATERIAL_STORE,
     quantity: 1000.5,
+    processDetails: { billNo: "INV-DEC-1000", supplierName: "Wire Mills", rawMaterialCode: "W1", isWire: true },
     actor: actor()
   });
   assert("TEST 13 movement quantity 1000.5", decSend.success === true && decSend.movement?.quantity === 1000.5);

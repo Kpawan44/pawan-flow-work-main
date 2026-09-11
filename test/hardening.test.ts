@@ -126,6 +126,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 80,
+    processDetails: { billNo: "INV-HARD-RM", supplierName: "Purchase Co", itemCode: "RM-80" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"], userId: "u-pur" })
   });
   assert("4 Purchase → Raw Material Store dest authoritative", rRm.updatedJobCard?.currentDepartment === "Raw Material Store");
@@ -146,6 +147,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Store",
     quantity: 10,
+    processDetails: { billNo: "INV-HARD-FG", supplierName: "Purchase Co", itemCode: "FG-40" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"], userId: "u-pur" })
   });
   assert("5 Purchase → Store dest authoritative", rStore.success && rStore.updatedJobCard?.currentDepartment === "Store");
@@ -167,6 +169,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 50,
+    processDetails: { billNo: "INV-STOCK-EN8", supplierName: "Steel Co", rawMaterialCode: "EN8-R" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
   });
   assert("7 STOCK-IN without job card", rStock.success === true && !rStock.updatedJobCard);
@@ -331,6 +334,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 1,
+    processDetails: { billNo: "INV-STOCK-X", supplierName: "Steel Co", rawMaterialCode: "X" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
   });
   const p2 = commitMaterialMovementTx(new MemoryStore(), {
@@ -339,6 +343,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 1,
+    processDetails: { billNo: "INV-STOCK-Y", supplierName: "Steel Co", rawMaterialCode: "Y" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
   });
   const conc = await Promise.all([p1, p2]);
@@ -405,6 +410,7 @@ async function run() {
     fromDepartment: "Purchase",
     toDepartment: "Raw Material Store",
     quantity: 8,
+    processDetails: { billNo: "INV-NEW-ALLOY", supplierName: "Steel Co", rawMaterialCode: "NEW-ALLOY" },
     actor: actor({ department: "Purchase", allowedDepartments: ["Purchase"] })
   });
   const createdSku = unknownSku.writes?.find((w) => w.collection === "mfr_rm_sku_master");

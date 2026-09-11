@@ -168,6 +168,11 @@ async function run() {
       currentQty: 80,
       currentDepartment: "Purchase",
       processType: "Purchase",
+      purchaseDetails: { billNo: "INV-P28", supplierName: "P28 Supplier", receivedQty: 80, rejectionQty: 0 },
+      partyName: "P28 Supplier",
+      itemName: "Bar",
+      itemCode: "BAR-P28",
+      materialType: "Raw Material",
       version: 1
     });
     const over = await commitMaterialMovementTx(store, {
@@ -176,6 +181,7 @@ async function run() {
       fromDepartment: "Purchase",
       toDepartment: "Raw Material Store",
       quantity: 81,
+      processDetails: { billNo: "INV-P28", supplierName: "P28 Supplier", itemCode: "BAR-P28" },
       actor: actor("Purchase")
     });
     assert("6 Purchase cannot invent qty beyond currentQty with no history", over.success === false);
@@ -185,6 +191,7 @@ async function run() {
       fromDepartment: "Purchase",
       toDepartment: "Raw Material Store",
       quantity: 80,
+      processDetails: { billNo: "INV-P28", supplierName: "P28 Supplier", itemCode: "BAR-P28" },
       actor: actor("Purchase")
     });
     assert("6 Purchase first receipt of currentQty still works", ok.success === true);
@@ -199,6 +206,7 @@ async function run() {
       fromDepartment: "Purchase",
       toDepartment: "Store",
       quantity: 1,
+      processDetails: { billNo: "INV-P28", supplierName: "P28 Supplier", itemCode: "BAR-P28" },
       actor: actor("Purchase")
     });
     assert("6 Purchase cannot send again from inflated snapshot", extra.success === false);

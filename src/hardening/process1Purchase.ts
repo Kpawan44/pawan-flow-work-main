@@ -369,3 +369,192 @@ export function resolveJobCurrentQtyOnCreate(sentQty: unknown, orderQty: unknown
   const order = parseDecimalQuantity(orderQty);
   return isNaN(order) ? 0 : order;
 }
+
+export const PURCHASE_INVOICE_CLAIM_COLLECTION = "mfr_purchase_invoice_claims";
+
+export interface PurchaseReceiptValidationResult {
+  ok: boolean;
+  receivedQty?: number;
+  rejectionQty?: number;
+  creditedQty?: number;
+  sentQty?: number;
+  error?: string;
+}
+
+export function validatePurchaseReceiptInput(job: {
+  partyName?: unknown;
+  itemName?: unknown;
+  materialType?: unknown;
+  currentQty?: unknown;
+  purchaseDetails?: {
+    supplierName?: unknown;
+    receivedQty?: unknown;
+    rejectionQty?: unknown;
+    billNo?: unknown;
+  } | null;
+}): PurchaseReceiptValidationResult {
+  const details = job?.purchaseDetails;
+  if (!details) return { ok: false, error: "Purchase receipt details are required." };
+  if (!String(job.partyName || details.supplierName || "").trim()) {
+    return { ok: false, error: "Supplier metadata is required for a purchase receipt." };
+  }
+  if (!String(job.itemName || "").trim() || !String(job.materialType || "").trim()) {
+    return { ok: false, error: "Purchase item metadata is required for a purchase receipt." };
+  }
+  if (!String(details.billNo || "").trim()) {
+    return { ok: false, error: "billNo is required for a purchase receipt so the same invoice cannot be credited twice." };
+  }
+
+  const receivedQty = parseDecimalQuantity(details.receivedQty);
+  const rejectionQty =
+    details.rejectionQty === undefined || details.rejectionQty === null || details.rejectionQty === ""
+      ? 0
+      : parseDecimalQuantity(details.rejectionQty);
+  const sentQty = parseDecimalQuantity(job.currentQty);
+  if (!Number.isFinite(receivedQty) || receivedQty <= 0) {
+    return { ok: false, error: "receivedQty must be a positive finite quantity." };
+  }
+  if (!Number.isFinite(rejectionQty) || rejectionQty < 0) {
+    return { ok: false, error: "rejectionQty must be a non-negative finite quantity." };
+  }
+  if (rejectionQty > receivedQty) {
+    return { ok: false, error: "rejectionQty cannot exceed receivedQty." };
+  }
+  const creditedQty = receivedQty - rejectionQty;
+  if (!(creditedQty > 0)) {
+    return { ok: false, error: "Purchase receipt must credit a positive quantity." };
+  }
+  if (!Number.isFinite(sentQty) || sentQty <= 0 || sentQty > creditedQty) {
+    return { ok: false, error: "Purchase transfer quantity must be positive and no greater than credited quantity." };
+  }
+  return { ok: true, receivedQty, rejectionQty, creditedQty, sentQty };
+}
+
+export function createPurchaseCreationFingerprint(job: {
+  jobCardNo?: unknown;
+  partyName?: unknown;
+  itemName?: unknown;
+  itemCode?: unknown;
+  materialType?: unknown;
+  isWire?: unknown;
+  rawMaterialKind?: unknown;
+  unit?: unknown;
+  currentDepartment?: unknown;
+  orderQty?: unknown;
+  currentQty?: unknown;
+  purchaseDetails?: {
+    supplierName?: unknown;
+    billNo?: unknown;
+    receivedQty?: unknown;
+    rejectionQty?: unknown;
+  } | null;
+}): string {
+  const details = job.purchaseDetails || {};
+  return JSON.stringify([
+    String(job.jobCardNo || "").trim().toUpperCase(),
+    String(job.partyName || "").trim().toLowerCase(),
+    String(details.supplierName || job.partyName || "").trim().toLowerCase(),
+    normalizeItemCode(String(job.itemCode || "")),
+    String(job.itemName || "").trim().toLowerCase(),
+    String(job.materialType || "").trim().toLowerCase(),
+    Boolean(job.isWire),
+    String(job.rawMaterialKind || "").trim().toLowerCase(),
+    String(job.unit || "").trim().toUpperCase(),
+    String(job.currentDepartment || "").trim().toLowerCase(),
+    parseDecimalQuantity(job.orderQty),
+    parseDecimalQuantity(job.currentQty),
+    parseDecimalQuantity(details.receivedQty),
+    details.rejectionQty === undefined || details.rejectionQty === null || details.rejectionQty === ""
+      ? 0
+      : parseDecimalQuantity(details.rejectionQty),
+    String(details.billNo || "").trim().toLowerCase()
+  ]);
+}
+
+/** Invoice identity only — not operationId and not quantity. Same bill + supplier + item is one physical receipt. */
+export function createPurchaseInvoiceFingerprint(input: {
+  billNo?: unknown;
+  supplierName?: unknown;
+  itemCode?: unknown;
+  jobCardNo?: unknown;
+  materialType?: unknown;
+  isWire?: unknown;
+}): { ok: true; fingerprint: string; claimId: string } | { ok: false; error: string } {
+  const billNo = String(input.billNo || "").trim().toLowerCase();
+  if (!billNo) {
+    return { ok: false, error: "billNo is required for purchase receipts so the same invoice cannot be credited twice." };
+  }
+  const supplier = String(input.supplierName || "").trim().toLowerCase();
+  if (!supplier) {
+    return { ok: false, error: "supplierName is required for purchase receipts so the same invoice cannot be credited twice." };
+  }
+  let item = normalizeItemCode(String(input.itemCode || ""));
+  if (!item || item === "-") {
+    const jc = String(input.jobCardNo || "").trim().toUpperCase();
+    item = jc.replace(/^STOCK-IN-/i, "").trim() || jc;
+  }
+  if (!item || item === "-") {
+    return { ok: false, error: "itemCode is required for purchase receipts so the same invoice cannot be credited twice." };
+  }
+  const fingerprint = JSON.stringify([
+    supplier,
+    billNo,
+    item,
+    String(input.materialType || "").trim().toLowerCase(),
+    Boolean(input.isWire)
+  ]);
+  const claimId = `PINV-${fingerprint.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 180)}`;
+  return { ok: true, fingerprint, claimId };
+}
+
+export function isPurchaseInwardRoute(fromDepartment: string, toDepartment: string, isIssueRequest?: unknown): boolean {
+  if (isIssueRequest) return false;
+  if (normalizeDeptName(fromDepartment) !== "purchase") return false;
+  const to = normalizeDeptName(toDepartment);
+  return Boolean(to) && to !== "purchase";
+}
+
+export function extractPurchaseInvoiceFields(input: {
+  jobCardNo?: unknown;
+  processDetails?: any;
+  extra?: Record<string, any>;
+  job?: any;
+}): {
+  billNo: string;
+  supplierName: string;
+  itemCode: string;
+  materialType: string;
+  isWire: boolean;
+} {
+  const details = input.processDetails || {};
+  const extra = input.extra || {};
+  const extraDetails = extra.processDetails || {};
+  const job = input.job || {};
+  const purchaseDetails = job.purchaseDetails || extra.purchaseDetails || {};
+  const billNo = String(
+    details.billNo || extraDetails.billNo || extra.billNo || purchaseDetails.billNo || ""
+  ).trim();
+  const supplierName = String(
+    details.supplierName ||
+      extraDetails.supplierName ||
+      extra.supplierName ||
+      purchaseDetails.supplierName ||
+      job.partyName ||
+      ""
+  ).trim();
+  const itemCode = String(
+    details.rawMaterialCode ||
+      details.itemCode ||
+      extra.itemCode ||
+      extraDetails.itemCode ||
+      job.itemCode ||
+      ""
+  ).trim();
+  const materialType = String(details.materialType || extra.materialType || job.materialType || "").trim();
+  const isWire = isWireRawMaterial({
+    isWire: details.isWire ?? extra.isWire ?? job.isWire,
+    rawMaterialKind: details.rawMaterialKind ?? extra.rawMaterialKind ?? job.rawMaterialKind,
+    processDetails: details
+  });
+  return { billNo, supplierName, itemCode, materialType, isWire };
+}

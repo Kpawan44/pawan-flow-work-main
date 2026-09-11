@@ -36,6 +36,12 @@ export function mountLedgerRoutes(app: Express, ctx: LedgerHttpContext): void {
         return res.status(401).json({ success: false, error: "Unauthorized: Missing authoritative user profile." });
       }
       const bodyData = req.body?.movement ? req.body.movement : req.body || {};
+      if (bodyData.isSupplierReceipt || req.body?.isSupplierReceipt) {
+        return res.status(400).json({
+          success: false,
+          error: "Supplier receipts cannot be created from the client movement API."
+        });
+      }
       const opResolved = resolveCreateMovementOperationId({
         ...bodyData,
         operationId: bodyData.operationId || req.body?.operationId

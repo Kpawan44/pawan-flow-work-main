@@ -32,6 +32,7 @@ export const OPERATIONAL_RESET_COLLECTIONS = [
   "mfr_items",
   "mfr_outsource_orders",
   "mfr_idempotency_keys",
+  "mfr_purchase_invoice_claims",
   "mfr_deleted_job_cards",
   "mfr_deleted_movements"
 ] as const;

@@ -861,6 +861,10 @@ export default function DepartmentOperations({
       alert("Please specify Supplier / Vendor Name.");
       return;
     }
+    if (!String(purchaseBill || "").trim()) {
+      alert("Please specify Bill / Invoice / Challan No. Duplicate invoices are rejected.");
+      return;
+    }
 
     const recNum = parseDecimalQuantity(purchaseRecQty);
     const rejNum = parseDecimalQuantity(purchaseRejQty) || 0;
@@ -1121,6 +1125,10 @@ export default function DepartmentOperations({
     const recNum = parseDecimalQuantity(purchaseRecQty);
     const rejNum = parseDecimalQuantity(purchaseRejQty) || 0;
     if (!(purchaseSentQty > 0) || !purchaseSupplier) return;
+    if (!String(purchaseBill || "").trim()) {
+      alert("Please specify Bill / Invoice / Challan No. Duplicate invoices are rejected.");
+      return;
+    }
     if (!(recNum > 0) || purchaseSentQty > recNum) {
       alert(`Error: Sent quantity (${purchaseSentQty}) cannot exceed the received quantity (${recNum}).`);
       return;

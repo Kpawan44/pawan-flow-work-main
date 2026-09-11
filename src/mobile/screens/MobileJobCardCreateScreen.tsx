@@ -86,6 +86,10 @@ export const MobileJobCardCreateScreen: React.FC<MobileJobCardCreateScreenProps>
         setErrorMessage("Classify Raw Material as Wire or Other.");
         return false;
       }
+      if (!poNumber.trim()) {
+        setErrorMessage("Enter Bill / Invoice / Challan No. Duplicate invoices are rejected.");
+        return false;
+      }
       return true;
     }
     return true;
@@ -140,6 +144,7 @@ export const MobileJobCardCreateScreen: React.FC<MobileJobCardCreateScreenProps>
           status: 'Pending Acceptance',
           purchaseDetails: {
             supplierName: partyName.trim(),
+            billNo: poNumber.trim(),
             receivedQty: Number(orderQty),
             sentToStore: Number(orderQty),
             materialType: purchaseMaterialType,

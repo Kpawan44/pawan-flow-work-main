@@ -123,6 +123,7 @@ async function run() {
   assert("sync queue blocks mfr_movements", isLedgerCollectionBlockedFromClientSync("mfr_movements"));
   assert("sync queue blocks mfr_job_cards", isLedgerCollectionBlockedFromClientSync("mfr_job_cards"));
   assert("sync queue blocks idempotency keys", isLedgerCollectionBlockedFromClientSync("mfr_idempotency_keys"));
+  assert("sync queue blocks purchase invoice claims", isLedgerCollectionBlockedFromClientSync("mfr_purchase_invoice_claims"));
   assert("sync queue allows notifications", isLedgerCollectionBlockedFromClientSync("mfr_notifications") === false);
 
   {

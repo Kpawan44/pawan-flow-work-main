@@ -66,6 +66,18 @@ function isReceiverAuthorized(actor: MovementActor, toDepartment: string): boole
   return isDeptAuthorized(actor, toDepartment);
 }
 
+function isAcceptAuthorized(actor: MovementActor, movement: any, input: AcceptMovementInput): boolean {
+  const isRmStoreConfirmingIssue =
+    Boolean(movement?.isIssueRequest) &&
+    String(movement.fromDepartment || "") === "Raw Material Store" &&
+    String(input.issueStatus || "") === "Issued" &&
+    String(movement.issueStatus || "") !== "Issued";
+  if (isRmStoreConfirmingIssue) {
+    return isDeptAuthorized(actor, "Raw Material Store");
+  }
+  return isDeptAuthorized(actor, String(movement.toDepartment || ""));
+}
+
 function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 }
@@ -114,7 +126,7 @@ async function acceptMaterialMovementTxInner(
     return { success: false, statusCode: 400, error: `Movement ${input.movementId} has been cancelled or deleted.` };
   }
 
-  if (!isReceiverAuthorized(input.actor, String(movement.toDepartment || ""))) {
+  if (!isAcceptAuthorized(input.actor, movement, input)) {
     return {
       success: false,
       statusCode: 403,
@@ -128,6 +140,15 @@ async function acceptMaterialMovementTxInner(
   const pending = Math.max(0, originalQty - alreadyAccepted - alreadyRejected);
   const requestedAccept = input.acceptQty === undefined || input.acceptQty === null ? pending : Number(input.acceptQty);
 
+  const isRmIssueToProduction =
+    Boolean(movement.isIssueRequest) &&
+    String(movement.fromDepartment || "") === "Raw Material Store" &&
+    String(movement.toDepartment || "") === "Production";
+  const isRawMaterialStoreIssuing =
+    isRmIssueToProduction &&
+    String(input.issueStatus || "") === "Issued" &&
+    String(movement.issueStatus || "") !== "Issued";
+
   if (movement.accepted && movement.issueStatus !== "Rejected" && pending <= 0) {
     const payload = { success: true, cached: true, movement, updatedJobCard: null };
     return payload;
@@ -135,6 +156,34 @@ async function acceptMaterialMovementTxInner(
 
   if (isFullyRejectedMovement(movement) && pending <= 0) {
     return { success: false, statusCode: 400, error: "This movement has already been fully rejected." };
+  }
+
+  if (isRawMaterialStoreIssuing) {
+    const issuedMov: any = {
+      ...movement,
+      quantity: originalQty,
+      accepted: false,
+      acceptedQty: alreadyAccepted,
+      rejectedQty: alreadyRejected,
+      issueStatus: "Issued",
+      resolutionStatus: "ISSUED",
+      remarks: input.remarks || movement.remarks,
+      allottedLocation: input.allottedLocation !== undefined ? input.allottedLocation : movement.allottedLocation,
+      rackNo: input.rackNo !== undefined ? input.rackNo : movement.rackNo,
+      modifiedByUserId: input.actor.userId,
+      modifiedByUserName: input.actor.userName,
+      modifiedDate: now,
+      modifiedAction: "ISSUE"
+    };
+    await store.set("mfr_movements", input.movementId, issuedMov);
+    const resultPayload = { success: true, cached: false, movement: issuedMov, updatedJobCard: null };
+    await store.set("mfr_idempotency_keys", opKey, {
+      operationId: opKey,
+      createdAt: now,
+      userId: input.actor.userId,
+      result: resultPayload
+    });
+    return { ...resultPayload, writes: [{ collection: "mfr_movements", id: input.movementId, data: issuedMov }] };
   }
 
   if (!Number.isFinite(requestedAccept) || requestedAccept <= 0) {
@@ -147,12 +196,6 @@ async function acceptMaterialMovementTxInner(
       error: `Cannot accept ${requestedAccept}; only ${pending} remains unresolved on this movement.`
     };
   }
-
-  const isRawMaterialStoreIssuing =
-    movement.isIssueRequest &&
-    movement.fromDepartment === "Raw Material Store" &&
-    movement.toDepartment === "Production" &&
-    (input.issueStatus === "Issued" || movement.issueStatus === "Issued");
 
   const nextAcceptedQty = alreadyAccepted + requestedAccept;
   const remainingAfter = Math.max(0, originalQty - nextAcceptedQty - alreadyRejected);
@@ -200,7 +243,11 @@ async function acceptMaterialMovementTxInner(
 
   let updatedJobCard: any = null;
   const jobCardNo = String(movement.jobCardNo || "");
-  if (jobCardNo && !isStockInJob(jobCardNo) && !isRawMaterialStoreIssuing) {
+  const skipJobUpdateForRmIssue =
+    Boolean(movement.isIssueRequest) &&
+    String(movement.fromDepartment || "") === "Raw Material Store" &&
+    String(movement.toDepartment || "") === "Production";
+  if (jobCardNo && !isStockInJob(jobCardNo) && !isRawMaterialStoreIssuing && !skipJobUpdateForRmIssue) {
     const jobId = jobCardNo.toUpperCase();
     const job = (await store.get("mfr_job_cards", jobId)) || (await store.get("mfr_job_cards", jobCardNo));
     if (job) {

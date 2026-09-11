@@ -19,6 +19,7 @@ import {
   purchaseNotificationDepartment,
   nextStatusOnPurchaseAccept
 } from "./src/hardening/process1Purchase";
+import { createPurchaseJobInwardTx } from "./src/hardening/purchaseJobCardCreate";
 import { mountLedgerRoutes } from "./src/hardening/ledgerHttp";
 import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
@@ -463,6 +464,7 @@ async function startServer() {
   // Authoritative in-memory maps for sub-millisecond consistency and zero read-after-write lag
   const inMemoryJobCards = new Map<string, any>();
   const inMemoryMovements = new Map<string, any>();
+  const inMemoryLedgerDocs = new Map<string, any>();
   const inMemoryDeletedJobCards = new Set<string>();
   // PERSISTENT DELETED-USER TOMBSTONES (ANTI-RESURRECTION)
   // ----------------------------------------------------
@@ -2471,6 +2473,45 @@ async function startServer() {
         });
       }
 
+      if (isPurchase) {
+        const purchaseActor = {
+          userId: authUid,
+          userName: requester.name || requester.userId || "Authorized User",
+          role: requester.role || "staff",
+          department: requester.department || "Purchase",
+          allowedDepartments: Array.isArray(requester.allowedDepartments) ? requester.allowedDepartments : [],
+          accessList: Array.isArray(requester.accessList) ? requester.accessList : []
+        };
+        const purchaseResult = await createPurchaseJobInwardTx(createServerStore(), {
+          jobCard,
+          actor: purchaseActor,
+          operationId: String(req.body?.operationId || customInitialMovement?.operationId || "").trim() || undefined
+        });
+        if (!purchaseResult.success) {
+          return res.status(purchaseResult.statusCode || 400).json({ success: false, error: purchaseResult.error });
+        }
+        if (purchaseResult.jobCard?.jobCardNo) {
+          inMemoryJobCards.set(String(purchaseResult.jobCard.jobCardNo).toUpperCase(), purchaseResult.jobCard);
+        }
+        if (purchaseResult.movement?.movementId) {
+          inMemoryMovements.set(purchaseResult.movement.movementId, purchaseResult.movement);
+        }
+        broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: purchaseResult.jobCard?.jobCardNo });
+        if (purchaseResult.movement?.movementId) {
+          broadcastRealtimeEvent("MOVEMENT_UPDATED", {
+            movementId: purchaseResult.movement.movementId,
+            jobCardNo: purchaseResult.jobCard?.jobCardNo
+          });
+        }
+        broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
+        return res.json({
+          success: true,
+          cached: Boolean(purchaseResult.cached),
+          jobCard: purchaseResult.jobCard,
+          movement: purchaseResult.movement || null
+        });
+      }
+
       const authoritativeUserId = authUid;
       const authoritativeUserName = requester.name || requester.userId || "Authorized User";
       const now = new Date().toISOString();
@@ -3239,7 +3280,8 @@ async function startServer() {
     }
   });
 
-  const createServerStore = () => ({
+  function createServerStore() {
+    return {
     async get(collection: string, id: string): Promise<any | null> {
       if (collection === "mfr_job_cards") {
         const mem = inMemoryJobCards.get(String(id).toUpperCase()) || inMemoryJobCards.get(id);
@@ -3249,6 +3291,8 @@ async function startServer() {
         const mem = inMemoryMovements.get(id);
         if (mem) return mem;
       }
+      const ledgerKey = `${collection}:${id}`;
+      if (inMemoryLedgerDocs.has(ledgerKey)) return inMemoryLedgerDocs.get(ledgerKey);
       try {
         const dbAdmin = getFirestoreAdmin();
         if (dbAdmin) {
@@ -3264,6 +3308,7 @@ async function startServer() {
         if (dbAdmin) await dbAdmin.collection(collection).doc(id).set(data);
       } catch (_) {}
       await firestoreRestSetDoc(collection, id, data).catch(() => {});
+      inMemoryLedgerDocs.set(`${collection}:${id}`, data);
       if (collection === "mfr_job_cards") {
         inMemoryJobCards.set(String(id).toUpperCase(), data);
         if (data?.jobCardNo) {
@@ -3293,7 +3338,8 @@ async function startServer() {
     runSerialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
       return runKeyedSerialized(key, fn);
     }
-  });
+    };
+  }
 
   const actorFromRequester = (authUid: string, requester: any) => ({
     userId: authUid,
