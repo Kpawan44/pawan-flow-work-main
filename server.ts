@@ -21,12 +21,11 @@ import {
 } from "./src/hardening/process1Purchase";
 import { createPurchaseJobInwardTx } from "./src/hardening/purchaseJobCardCreate";
 import { mountLedgerRoutes } from "./src/hardening/ledgerHttp";
+import { runKeyedSerialized, runWithExclusiveLock } from "./src/hardening/movementSerialize";
 import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
 import { verifyBatchManifestTx } from "./src/hardening/batchManifestScanner";
 import { createSubcontractChallanTx } from "./src/hardening/subcontractChallan";
-import { runKeyedSerialized } from "./src/hardening/movementSerialize";
-
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
 
@@ -2014,6 +2013,7 @@ async function startServer() {
       "mfr_process_transfers",
       "mfr_audit_logs",
       "mfr_idempotency_keys",
+      "mfr_serialize_locks",
       "mfr_notifications",
       "mfr_items",
       "mfr_outsource_orders",
@@ -2985,7 +2985,8 @@ async function startServer() {
         "mfr_notifications",
         "mfr_deleted_job_cards",
         "mfr_deleted_movements",
-        "mfr_idempotency_keys"
+        "mfr_idempotency_keys",
+        "mfr_serialize_locks"
       ];
 
       const deletedCollections: Record<string, number> = {};
@@ -3336,7 +3337,12 @@ async function startServer() {
       return [];
     },
     runSerialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
-      return runKeyedSerialized(key, fn);
+      return runWithExclusiveLock({
+        key,
+        fn,
+        db: getFirestoreAdmin() || null,
+        fallback: runKeyedSerialized
+      });
     }
     };
   }
