@@ -57,7 +57,7 @@ async function run() {
     actor: a
   });
   assert("1 concurrent first movement succeeds", r1.success === true && r1.movement?.accepted === false);
-  assert("job pending acceptance at destination", r1.updatedJobCard?.status === "Pending Acceptance" && r1.updatedJobCard?.currentDepartment === "Heat Treatment");
+  assert("job remains at Production while unproduced quantity is still pending", r1.updatedJobCard?.status === "In Process" && r1.updatedJobCard?.currentDepartment === "Production");
   assert("does not decrement currentQty on send", r1.updatedJobCard?.currentQty === 100);
 
   const r1b = await commitMaterialMovementTx(store, {
@@ -80,7 +80,7 @@ async function run() {
     requireRawMaterialForProduction: false,
     actor: a
   });
-  assert("duplicate pending same route rejected", rDupPending.success === false);
+  assert("second partial production on same route is allowed", rDupPending.success === true, rDupPending.error);
 
   const store2 = new MemoryStore();
   await store2.set("mfr_job_cards", "JC-1001", {
@@ -370,8 +370,9 @@ async function run() {
     (m) => !m.accepted && m.fromDepartment === "Production" && m.toDepartment === "Heat Treatment"
   );
   assert(
-    "1c concurrent same-route handovers do not duplicate",
-    pendingHandovers.length === 1 && ((cA.success && !cB.success) || (!cA.success && cB.success) || (cA.cached || cB.cached))
+    "1c concurrent distinct partial handovers both record remaining quantity",
+    cA.success === true && cB.success === true && pendingHandovers.length === 2,
+    `a:${cA.success} b:${cB.success} pending:${pendingHandovers.length} aErr:${cA.error} bErr:${cB.error}`
   );
 
   const collide = new MemoryStore();

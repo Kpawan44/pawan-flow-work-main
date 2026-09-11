@@ -8,14 +8,19 @@ import {
   SimpleStore
 } from "./commitMaterialMovement";
 import {
+  activeStatusWhileRemaining,
   creditedInboundQty,
   deriveCachedCurrentQty,
   isFullyRejectedMovement,
   isPendingAcceptanceMovement,
   isRejectionReturnMovement,
   isUndoneMovement,
+  remainingAtSourceDepartment,
+  shouldRelocateJobOnQuantityMove,
+  unproducedOrderQty,
   unresolvedPendingQty
 } from "./process2Manufacturing";
+import { normalizeDeptName } from "./process1Purchase";
 
 export type MovementActor = MovementCommitInput["actor"];
 
@@ -202,18 +207,30 @@ async function acceptMaterialMovementTxInner(
       const allMovements = await store.list("mfr_movements");
       const nextMovements = allMovements.map((m) => (m.movementId === input.movementId ? updatedMov : m));
       const dest = applyAcceptanceDepartment(updatedMov) || updatedMov.toDepartment;
+      const fromDept = String(updatedMov.fromDepartment || job.currentDepartment || dest);
+      const relocate = shouldRelocateJobOnQuantityMove(job, nextMovements, fromDept, {
+        compulsory: input.requireRawMaterialForProduction
+      });
+      const custodyDept = relocate ? dest : fromDept;
       const cachedQty = deriveCachedCurrentQty(
-        { ...job, currentDepartment: dest },
+        { ...job, currentDepartment: custodyDept },
         nextMovements,
-        dest,
+        custodyDept,
         { compulsory: input.requireRawMaterialForProduction }
       );
+      const remainingAtSource = remainingAtSourceDepartment(job, nextMovements, fromDept, {
+        compulsory: input.requireRawMaterialForProduction
+      });
+      const pendingOrder =
+        normalizeDeptName(fromDept) === "production" ? unproducedOrderQty(job, nextMovements) : remainingAtSource;
       updatedJobCard = {
         ...job,
-        currentDepartment: dest,
-        status: nextStatusOnAccept(String(dest)),
-        currentQty: cachedQty,
-        pendingOutbound: clearPendingOutbound(job, updatedMov),
+        currentDepartment: custodyDept,
+        status: relocate
+          ? nextStatusOnAccept(String(dest))
+          : activeStatusWhileRemaining(job, fromDept),
+        currentQty: relocate ? cachedQty : pendingOrder,
+        pendingOutbound: remainingAfter <= 1e-9 ? clearPendingOutbound(job, updatedMov) : job.pendingOutbound,
         version: (job.version || 1) + 1,
         updatedAt: now,
         updatedBy: input.actor.userName,

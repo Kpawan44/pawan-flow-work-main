@@ -346,7 +346,7 @@ async function runProcess3Tests() {
       actor: actor("Production")
     });
 
-    assert("TEST 13 Second pending movement on same route rejected", r2.success === false && r2.error?.includes("already pending"), r2.error);
+    assert("TEST 13 Second partial production on same route is allowed", r2.success === true, r2.error);
   }
 
   // TEST 14 — Same Department Blocked

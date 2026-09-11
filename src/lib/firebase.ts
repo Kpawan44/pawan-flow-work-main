@@ -1569,21 +1569,6 @@ export class DBService {
       throw new Error(`Source and target departments cannot be identical.`);
     }
 
-    const movements = await this.getMovements();
-
-    // Check for duplicate pending transfer request for same job card between same departments
-    if (!movement.isIssueRequest && !movement.jobCardNo.startsWith('STOCK-IN-')) {
-      const pendingDup = movements.find(m =>
-        isPendingAcceptanceMovement(m) &&
-        m.jobCardNo.toLowerCase() === movement.jobCardNo.toLowerCase() &&
-        m.fromDepartment === movement.fromDepartment &&
-        m.toDepartment === movement.toDepartment
-      );
-      if (pendingDup) {
-        throw new Error(`A transfer request for Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment} is already pending acceptance.`);
-      }
-    }
-
     const cards = await this.getJobCards();
     const linkedJob = cards.find(c => c.jobCardNo.toLowerCase() === String(movement.jobCardNo).toLowerCase());
     const contracted = attachProcess2MovementContract(movement as any, linkedJob || null);

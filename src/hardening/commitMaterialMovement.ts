@@ -2,12 +2,13 @@ import { VALID_MANUFACTURING_DEPARTMENTS } from "./constants";
 import { canPurchaseUserOperateIncomingStore, isIncomingStoreDept } from "./process1Purchase";
 import { computeRmRuntimeStock } from "./rmSkuMaster";
 import {
+  activeStatusWhileRemaining,
   assertHeatTreatmentRouting,
   attachProcess2MovementContract,
-  findPendingDuplicateMovement,
   process2SendAvailableQty,
   remainingAtDepartment,
   rmIssueAvailableQty,
+  shouldRelocateJobOnQuantityMove,
   storeAuthoritativeOnHand
 } from "./process2Manufacturing";
 import { createMovementRequestFingerprint } from "./movementOperationId";
@@ -102,7 +103,8 @@ export function isWireRejection(input: MovementCommitInput): boolean {
 
 /**
  * Authoritative movement commit. Does NOT decrement currentQty on send.
- * Sets job status Pending Acceptance and currentDepartment = toDepartment for normal transfers.
+ * Partial quantity keeps the job pending at the source department until the
+ * order is fully produced/sent. Only a remaining-zero send relocates the card.
  */
 export async function commitMaterialMovementTx(
   store: SimpleStore,
@@ -179,24 +181,14 @@ async function commitMaterialMovementTxInner(
 
   let jobCardData: any = null;
   const activeJobId = jobCardNo.toUpperCase();
+  let movementsForQty: any[] = input.preloadedMovements || [];
   if (!stockIn) {
     jobCardData = (await store.get("mfr_job_cards", activeJobId)) || (await store.get("mfr_job_cards", jobCardNo));
     if (!jobCardData) {
       return { success: false, statusCode: 404, error: `Job Card '${jobCardNo}' not found.` };
     }
 
-    if (!isIssue && !stockIn) {
-      const movements = input.preloadedMovements || (await store.list("mfr_movements"));
-      if (findPendingDuplicateMovement(movements, { jobCardNo, fromDepartment: normFrom, toDepartment: normTo, isIssueRequest: isIssue })) {
-        return {
-          success: false,
-          statusCode: 400,
-          error: `A transfer request for Job Card ${jobCardNo} from ${normFrom} to ${normTo} is already pending acceptance.`
-        };
-      }
-    }
-
-    const movementsForQty = input.preloadedMovements || (await store.list("mfr_movements"));
+    movementsForQty = input.preloadedMovements || (await store.list("mfr_movements"));
     if (isIssue) {
       let issueAvail = 0;
       if (normFrom === "Raw Material Store") {
@@ -304,16 +296,32 @@ async function commitMaterialMovementTxInner(
     const nextVersion = (jobCardData.version || 1) + 1;
     const pendingOutbound = Array.isArray(jobCardData.pendingOutbound) ? [...jobCardData.pendingOutbound] : [];
     pendingOutbound.push({ from: normFrom, to: normTo, movementId: movId });
-    updatedJobCard = {
-      ...jobCardData,
-      currentDepartment: normTo,
-      status: "Pending Acceptance",
-      version: nextVersion,
-      pendingOutbound,
-      updatedAt: now,
-      updatedBy: input.actor.userName,
-      updatedByUserId: input.actor.userId
-    };
+    const projectedMoves = [...movementsForQty, movement];
+    const relocate = shouldRelocateJobOnQuantityMove(jobCardData, projectedMoves, normFrom, {
+      compulsory: input.requireRawMaterialForProduction
+    });
+    // Do not decrement currentQty on send. Partial qty keeps the job pending at source.
+    updatedJobCard = relocate
+      ? {
+          ...jobCardData,
+          currentDepartment: normTo,
+          status: "Pending Acceptance",
+          version: nextVersion,
+          pendingOutbound,
+          updatedAt: now,
+          updatedBy: input.actor.userName,
+          updatedByUserId: input.actor.userId
+        }
+      : {
+          ...jobCardData,
+          currentDepartment: jobCardData.currentDepartment || normFrom,
+          status: activeStatusWhileRemaining(jobCardData, normFrom),
+          version: nextVersion,
+          pendingOutbound,
+          updatedAt: now,
+          updatedBy: input.actor.userName,
+          updatedByUserId: input.actor.userId
+        };
   }
 
   const auditId = `AL-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;

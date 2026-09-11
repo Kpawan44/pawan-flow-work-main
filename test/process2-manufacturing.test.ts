@@ -15,7 +15,8 @@ import {
   findPendingDuplicateMovement,
   shouldUpdateJobOnAccept,
   isRawMaterialStoreIssuingToProduction,
-  sameDepartmentTransferBlocked
+  sameDepartmentTransferBlocked,
+  unproducedOrderQty
 } from "../src/hardening/process2Manufacturing";
 
 let passed = 0;
@@ -170,6 +171,62 @@ async function run() {
 
   const incomingToProd = { jobCardNo: "PUR-IN", processType: "Purchase", currentDepartment: "Production", status: "In Process", completed: false };
   assert("Incoming Store → Production accepted visible", isVisibleInProductionQueue(incomingToProd) === true);
+
+  {
+    const store = new MemoryStore();
+    const job = {
+      jobCardNo: "JC-PARTIAL-1000",
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: "Production",
+      status: "Pending",
+      processType: "Manufacturing",
+      version: 1
+    };
+    await store.set("mfr_job_cards", "JC-PARTIAL-1000", job);
+    await store.set("mfr_movements", "rm-1000", {
+      movementId: "rm-1000",
+      jobCardNo: "JC-PARTIAL-1000",
+      fromDepartment: "Raw Material Store",
+      toDepartment: "Production",
+      isIssueRequest: true,
+      issueStatus: "Issued",
+      accepted: true,
+      quantity: 1000
+    });
+
+    const first = await commitMaterialMovementTx(store, {
+      operationId: "prod-200",
+      jobCardNo: "JC-PARTIAL-1000",
+      fromDepartment: "Production",
+      toDepartment: "Heat Treatment",
+      quantity: 200,
+      requireRawMaterialForProduction: true,
+      actor: actor("Production")
+    });
+    const afterFirst = await store.get("mfr_job_cards", "JC-PARTIAL-1000");
+    const movsAfterFirst = await store.list("mfr_movements");
+    assert("PARTIAL 200 of 1000 succeeds", first.success === true, first.error);
+    assert("PARTIAL remaining 800 after first entry", remainingAtProduction(afterFirst, movsAfterFirst, { compulsory: true }) === 800);
+    assert("PARTIAL unproduced 800 after first entry", unproducedOrderQty(afterFirst, movsAfterFirst) === 800);
+    assert("PARTIAL job stays pending at Production", afterFirst.currentDepartment === "Production" && afterFirst.status !== "Completed" && String(afterFirst.status).toLowerCase() !== "pending acceptance");
+
+    const second = await commitMaterialMovementTx(store, {
+      operationId: "prod-800",
+      jobCardNo: "JC-PARTIAL-1000",
+      fromDepartment: "Production",
+      toDepartment: "Heat Treatment",
+      quantity: 800,
+      requireRawMaterialForProduction: true,
+      actor: actor("Production")
+    });
+    const afterSecond = await store.get("mfr_job_cards", "JC-PARTIAL-1000");
+    const movsAfterSecond = await store.list("mfr_movements");
+    assert("PARTIAL remaining 800 then 800 completes the order", second.success === true, second.error);
+    assert("PARTIAL unproduced 0 after 200+800", unproducedOrderQty(afterSecond, movsAfterSecond) === 0);
+    assert("PARTIAL remaining at production 0 after full 1000", remainingAtProduction(afterSecond, movsAfterSecond, { compulsory: true }) === 0);
+    assert("PARTIAL relocates only after last quantity", afterSecond.currentDepartment === "Heat Treatment" && afterSecond.status === "Pending Acceptance");
+  }
 
   console.log(`\nProcess 2 tests: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
