@@ -8,10 +8,12 @@ import {
   process2SendAvailableQty,
   remainingAtDepartment,
   rmIssueAvailableQty,
+  shouldBlockPendingDuplicateRoute,
   shouldRelocateJobOnQuantityMove,
   storeAuthoritativeOnHand
 } from "./process2Manufacturing";
 import { createMovementRequestFingerprint } from "./movementOperationId";
+import { runKeyedSerialized } from "./movementSerialize";
 
 export interface MovementCommitInput {
   operationId: string;
@@ -110,11 +112,12 @@ export async function commitMaterialMovementTx(
   store: SimpleStore,
   input: MovementCommitInput
 ): Promise<MovementCommitResult> {
-  const serializeKey = String(input.jobCardNo || input.operationId || "movement").toUpperCase();
+  const serializeKey = `mov:${String(input.jobCardNo || input.operationId || "movement").toUpperCase()}`;
+  const run = () => commitMaterialMovementTxInner(store, input);
   if (store.runSerialized) {
-    return store.runSerialized(`mov:${serializeKey}`, () => commitMaterialMovementTxInner(store, input));
+    return store.runSerialized(serializeKey, run);
   }
-  return commitMaterialMovementTxInner(store, input);
+  return runKeyedSerialized(serializeKey, run);
 }
 
 async function commitMaterialMovementTxInner(
@@ -189,6 +192,13 @@ async function commitMaterialMovementTxInner(
     }
 
     movementsForQty = input.preloadedMovements || (await store.list("mfr_movements"));
+    if (!isIssue && shouldBlockPendingDuplicateRoute(movementsForQty, { jobCardNo, fromDepartment: normFrom, toDepartment: normTo, isIssueRequest: isIssue })) {
+      return {
+        success: false,
+        statusCode: 400,
+        error: `A transfer request for Job Card ${jobCardNo} from ${normFrom} to ${normTo} is already pending acceptance.`
+      };
+    }
     if (isIssue) {
       let issueAvail = 0;
       if (normFrom === "Raw Material Store") {

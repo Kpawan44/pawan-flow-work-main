@@ -24,6 +24,7 @@ import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
 import { verifyBatchManifestTx } from "./src/hardening/batchManifestScanner";
 import { createSubcontractChallanTx } from "./src/hardening/subcontractChallan";
+import { runKeyedSerialized } from "./src/hardening/movementSerialize";
 
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
@@ -3288,6 +3289,9 @@ async function startServer() {
       if (collection === "mfr_job_cards") return Array.from(inMemoryJobCards.values());
       if (collection === "mfr_movements") return Array.from(inMemoryMovements.values());
       return [];
+    },
+    runSerialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
+      return runKeyedSerialized(key, fn);
     }
   });
 

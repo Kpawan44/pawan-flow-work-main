@@ -549,6 +549,30 @@ export function findPendingDuplicateMovement(
   );
 }
 
+/**
+ * Same-route pending lock: one in-flight handover per job + from + to.
+ *
+ * Exception (narrow): Production shop-floor transfers may enqueue additional
+ * partial batches while a prior Production outbound is still pending acceptance.
+ * Quantity is enforced by process2SendAvailableQty under serialized commit.
+ * Store → Dispatch and all other routes keep the original duplicate-pending reject.
+ */
+export function shouldBlockPendingDuplicateRoute(
+  movements: Array<{
+    accepted?: boolean;
+    deletedDate?: string;
+    jobCardNo?: string;
+    fromDepartment?: string;
+    toDepartment?: string;
+    isIssueRequest?: unknown;
+  }>,
+  input: { jobCardNo: string; fromDepartment: string; toDepartment: string; isIssueRequest?: unknown }
+): boolean {
+  if (!findPendingDuplicateMovement(movements, input)) return false;
+  if (normalizeDeptName(input.fromDepartment) === "production") return false;
+  return true;
+}
+
 export function attachProcess2MovementContract(
   movement: Record<string, any>,
   job?: {

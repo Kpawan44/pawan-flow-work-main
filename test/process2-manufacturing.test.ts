@@ -16,7 +16,8 @@ import {
   shouldUpdateJobOnAccept,
   isRawMaterialStoreIssuingToProduction,
   sameDepartmentTransferBlocked,
-  unproducedOrderQty
+  unproducedOrderQty,
+  shouldBlockPendingDuplicateRoute
 } from "../src/hardening/process2Manufacturing";
 
 let passed = 0;
@@ -226,6 +227,184 @@ async function run() {
     assert("PARTIAL unproduced 0 after 200+800", unproducedOrderQty(afterSecond, movsAfterSecond) === 0);
     assert("PARTIAL remaining at production 0 after full 1000", remainingAtProduction(afterSecond, movsAfterSecond, { compulsory: true }) === 0);
     assert("PARTIAL relocates only after last quantity", afterSecond.currentDepartment === "Heat Treatment" && afterSecond.status === "Pending Acceptance");
+  }
+
+  function liveShapedStore() {
+    const s = new MemoryStore();
+    (s as any).runSerialized = undefined;
+    return s;
+  }
+
+  async function seedProd1000(store: MemoryStore, jobCardNo: string, rmQty = 1000) {
+    await store.set("mfr_job_cards", jobCardNo, {
+      jobCardNo,
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: "Production",
+      status: "Pending",
+      processType: "Manufacturing",
+      version: 1
+    });
+    await store.set("mfr_movements", `rm-${jobCardNo}`, {
+      movementId: `rm-${jobCardNo}`,
+      jobCardNo,
+      fromDepartment: "Raw Material Store",
+      toDepartment: "Production",
+      isIssueRequest: true,
+      issueStatus: "Issued",
+      accepted: true,
+      quantity: rmQty
+    });
+  }
+
+  function prodActor() {
+    return actor("Production");
+  }
+
+  async function prodSend(store: MemoryStore, jobCardNo: string, qty: number, op: string) {
+    return commitMaterialMovementTx(store, {
+      operationId: op,
+      jobCardNo,
+      fromDepartment: "Production",
+      toDepartment: "Heat Treatment",
+      quantity: qty,
+      requireRawMaterialForProduction: true,
+      actor: prodActor()
+    });
+  }
+
+  {
+    const pendingProd = [
+      { jobCardNo: "JC-P", fromDepartment: "Production", toDepartment: "Heat Treatment", accepted: false, quantity: 200 }
+    ];
+    assert(
+      "TEST C helper: Production pending does not block additional batch",
+      shouldBlockPendingDuplicateRoute(pendingProd, { jobCardNo: "JC-P", fromDepartment: "Production", toDepartment: "Heat Treatment" }) === false
+    );
+    const pendingStore = [
+      { jobCardNo: "JC-LOCK", fromDepartment: "Store", toDepartment: "Dispatch", accepted: false, quantity: 500 }
+    ];
+    assert(
+      "TEST D helper: Store pending still blocks same route",
+      shouldBlockPendingDuplicateRoute(pendingStore, { jobCardNo: "JC-LOCK", fromDepartment: "Store", toDepartment: "Dispatch" }) === true
+    );
+  }
+
+  {
+    const store = new MemoryStore();
+    await store.set("mfr_job_cards", "JC-LOCK", {
+      jobCardNo: "JC-LOCK",
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: "Store",
+      version: 1
+    });
+    await store.set("mfr_movements", "M-LOCK-IN", {
+      movementId: "M-LOCK-IN",
+      jobCardNo: "JC-LOCK",
+      fromDepartment: "Packing",
+      toDepartment: "Store",
+      quantity: 1000,
+      accepted: true
+    });
+    const first = await commitMaterialMovementTx(store, {
+      operationId: "OP-IDEM-001",
+      jobCardNo: "JC-LOCK",
+      fromDepartment: "Store",
+      toDepartment: "Dispatch",
+      quantity: 500,
+      actor: actor("Store")
+    });
+    const second = await commitMaterialMovementTx(store, {
+      operationId: "OP-IDEM-002",
+      jobCardNo: "JC-LOCK",
+      fromDepartment: "Store",
+      toDepartment: "Dispatch",
+      quantity: 200,
+      actor: actor("Store")
+    });
+    assert("TEST D Store 500 pending then 200 same route rejected", first.success === true && second.success === false && (second.statusCode === 400 || second.statusCode === 409), second.error);
+  }
+
+  {
+    const store = liveShapedStore();
+    await seedProd1000(store, "JC-CONC-600");
+    const [a, b] = await Promise.all([
+      prodSend(store, "JC-CONC-600", 600, "conc-600-a"),
+      prodSend(store, "JC-CONC-600", 600, "conc-600-b")
+    ]);
+    const outbound = (await store.list("mfr_movements")).filter((m: any) => m.fromDepartment === "Production");
+    const total = outbound.reduce((sum: number, m: any) => sum + Number(m.quantity || 0), 0);
+    const oneFail = (a.success && !b.success) || (!a.success && b.success);
+    assert("TEST E concurrent 600+600 does not exceed 1000", total <= 1000 && oneFail && total === 600, `total=${total} a=${a.success} b=${b.success}`);
+  }
+
+  {
+    const store = liveShapedStore();
+    await seedProd1000(store, "JC-CONC-433");
+    const results = await Promise.all([
+      prodSend(store, "JC-CONC-433", 400, "c433-400"),
+      prodSend(store, "JC-CONC-433", 300, "c433-300a"),
+      prodSend(store, "JC-CONC-433", 300, "c433-300b")
+    ]);
+    const outbound = (await store.list("mfr_movements")).filter((m: any) => m.fromDepartment === "Production");
+    const total = outbound.reduce((sum: number, m: any) => sum + Number(m.quantity || 0), 0);
+    const successes = results.filter((r) => r.success).length;
+    assert(
+      "TEST F concurrent 400+300+300 total <= 1000",
+      total <= 1000 && total === results.filter((r) => r.success).reduce((s, r) => s + Number(r.movement?.quantity || 0), 0),
+      `total=${total} ok=${successes}`
+    );
+  }
+
+  {
+    const store = liveShapedStore();
+    await seedProd1000(store, "JC-IDEM-200");
+    const r1 = await prodSend(store, "JC-IDEM-200", 200, "same-op-200");
+    const r2 = await prodSend(store, "JC-IDEM-200", 200, "same-op-200");
+    const outbound = (await store.list("mfr_movements")).filter((m: any) => m.fromDepartment === "Production");
+    const job = await store.get("mfr_job_cards", "JC-IDEM-200");
+    assert("TEST G same operationId retry is cached", r1.success && r2.success && r2.cached === true);
+    assert("TEST G no duplicate movement", outbound.length === 1 && outbound[0].quantity === 200);
+    assert("TEST G remaining 800", unproducedOrderQty(job, await store.list("mfr_movements")) === 800);
+  }
+
+  {
+    const store = liveShapedStore();
+    await seedProd1000(store, "JC-H-PARTIAL");
+    const r1 = await prodSend(store, "JC-H-PARTIAL", 200, "h-200");
+    const over = await prodSend(store, "JC-H-PARTIAL", 801, "h-801");
+    const ok = await prodSend(store, "JC-H-PARTIAL", 800, "h-800");
+    const job = await store.get("mfr_job_cards", "JC-H-PARTIAL");
+    assert("TEST H first 200 ok", r1.success === true, r1.error);
+    assert("TEST H 801 against remaining 800 rejected", over.success === false, over.error);
+    assert("TEST H legitimate 800 with different operationId allowed", ok.success === true, ok.error);
+    assert("TEST H remaining 0 after 200+800", unproducedOrderQty(job, await store.list("mfr_movements")) === 0);
+  }
+
+  {
+    const store = new MemoryStore();
+    await seedProd1000(store, "JC-I-EXACT");
+    const r1 = await prodSend(store, "JC-I-EXACT", 200, "i-200");
+    const r2 = await prodSend(store, "JC-I-EXACT", 300, "i-300");
+    const r3 = await prodSend(store, "JC-I-EXACT", 500, "i-500");
+    const job = await store.get("mfr_job_cards", "JC-I-EXACT");
+    const movs = await store.list("mfr_movements");
+    assert("TEST I 200+300+500 all succeed", r1.success && r2.success && r3.success, `${r1.error}|${r2.error}|${r3.error}`);
+    assert("TEST I remaining 0 at exactly 1000", unproducedOrderQty(job, movs) === 0 && remainingAtProduction(job, movs, { compulsory: true }) === 0);
+    assert("TEST I relocates after exact complete", job.currentDepartment === "Heat Treatment");
+  }
+
+  {
+    const store = new MemoryStore();
+    await seedProd1000(store, "JC-J-OVER");
+    await prodSend(store, "JC-J-OVER", 200, "j-200");
+    await prodSend(store, "JC-J-OVER", 300, "j-300");
+    const over = await prodSend(store, "JC-J-OVER", 501, "j-501");
+    const job = await store.get("mfr_job_cards", "JC-J-OVER");
+    const movs = await store.list("mfr_movements");
+    assert("TEST J 200+300+501 rejects excess", over.success === false && String(over.error || "").toLowerCase().includes("insufficient"), over.error);
+    assert("TEST J remaining stays 500", unproducedOrderQty(job, movs) === 500);
   }
 
   console.log(`\nProcess 2 tests: ${passed} passed, ${failed} failed`);

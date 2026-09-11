@@ -29,7 +29,7 @@ import {
   logActionToSheets 
 } from './googleSheets';
 import { nextStatusOnPurchaseAccept, displayUnitLabel } from '../hardening/process1Purchase';
-import { attachProcess2MovementContract, isPendingAcceptanceMovement, isRawMaterialStoreIssuingToProduction, shouldUpdateJobOnAccept } from '../hardening/process2Manufacturing';
+import { attachProcess2MovementContract, isPendingAcceptanceMovement, isRawMaterialStoreIssuingToProduction, shouldBlockPendingDuplicateRoute, shouldUpdateJobOnAccept } from '../hardening/process2Manufacturing';
 import {
   denyDirectMovementDelete,
   denyDirectMovementUpdate,
@@ -1567,6 +1567,22 @@ export class DBService {
       !movement.processDetails?.isWireRejection
     ) {
       throw new Error(`Source and target departments cannot be identical.`);
+    }
+
+    const movements = await this.getMovements();
+    if (!movement.isIssueRequest && !String(movement.jobCardNo || "").startsWith("STOCK-IN-")) {
+      if (
+        shouldBlockPendingDuplicateRoute(movements, {
+          jobCardNo: movement.jobCardNo,
+          fromDepartment: String(movement.fromDepartment || ""),
+          toDepartment: String(movement.toDepartment || ""),
+          isIssueRequest: movement.isIssueRequest
+        })
+      ) {
+        throw new Error(
+          `A transfer request for Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment} is already pending acceptance.`
+        );
+      }
     }
 
     const cards = await this.getJobCards();

@@ -20,6 +20,7 @@ import {
   unproducedOrderQty,
   unresolvedPendingQty
 } from "./process2Manufacturing";
+import { runKeyedSerialized } from "./movementSerialize";
 import { normalizeDeptName } from "./process1Purchase";
 
 export type MovementActor = MovementCommitInput["actor"];
@@ -90,11 +91,10 @@ export async function acceptMaterialMovementTx(
   store: SimpleStore,
   input: AcceptMovementInput
 ): Promise<ResolveMovementResult> {
-  const serializeKey = String(input.movementId || input.operationId || "accept").toUpperCase();
-  if (store.runSerialized) {
-    return store.runSerialized(`acc:${serializeKey}`, () => acceptMaterialMovementTxInner(store, input));
-  }
-  return acceptMaterialMovementTxInner(store, input);
+  const serializeKey = `acc:${String(input.movementId || input.operationId || "accept").toUpperCase()}`;
+  const run = () => acceptMaterialMovementTxInner(store, input);
+  if (store.runSerialized) return store.runSerialized(serializeKey, run);
+  return runKeyedSerialized(serializeKey, run);
 }
 
 async function acceptMaterialMovementTxInner(
@@ -273,11 +273,10 @@ export async function rejectMaterialMovementTx(
   store: SimpleStore,
   input: RejectMovementInput
 ): Promise<ResolveMovementResult> {
-  const serializeKey = String(input.movementId || input.operationId || "reject").toUpperCase();
-  if (store.runSerialized) {
-    return store.runSerialized(`rej:${serializeKey}`, () => rejectMaterialMovementTxInner(store, input));
-  }
-  return rejectMaterialMovementTxInner(store, input);
+  const serializeKey = `rej:${String(input.movementId || input.operationId || "reject").toUpperCase()}`;
+  const run = () => rejectMaterialMovementTxInner(store, input);
+  if (store.runSerialized) return store.runSerialized(serializeKey, run);
+  return runKeyedSerialized(serializeKey, run);
 }
 
 async function rejectMaterialMovementTxInner(
@@ -506,11 +505,10 @@ export async function undoMaterialMovementTx(
   store: SimpleStore,
   input: { operationId: string; movementId: string; actor: MovementActor; nowIso?: string; remarks?: string; requireRawMaterialForProduction?: boolean }
 ): Promise<ResolveMovementResult> {
-  const serializeKey = String(input.movementId || input.operationId || "undo").toUpperCase();
-  if (store.runSerialized) {
-    return store.runSerialized(`undo:${serializeKey}`, () => undoMaterialMovementTxInner(store, input));
-  }
-  return undoMaterialMovementTxInner(store, input);
+  const serializeKey = `undo:${String(input.movementId || input.operationId || "undo").toUpperCase()}`;
+  const run = () => undoMaterialMovementTxInner(store, input);
+  if (store.runSerialized) return store.runSerialized(serializeKey, run);
+  return runKeyedSerialized(serializeKey, run);
 }
 
 async function undoMaterialMovementTxInner(
