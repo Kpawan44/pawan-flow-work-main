@@ -2079,7 +2079,13 @@ Please adjust the quantity or request additional raw material issue.`);
 
   // Computed unique option lists for Department workbench
   const uniqueParties = useMemo(() => {
-    return Array.from(new Set(jobCards.map(j => j.partyName).filter(Boolean))).sort();
+    return Array.from(
+      new Set(
+        jobCards
+          .map(j => (j.partyName ?? '').toString().trim())
+          .filter(Boolean)
+      )
+    ).sort();
   }, [jobCards]);
 
   const uniquePersons = useMemo(() => {
@@ -2112,10 +2118,14 @@ Please adjust the quantity or request additional raw material issue.`);
   }, [jobCards]);
 
   const filterJobCard = (j: JobCard) => {
-    const q = deptSearchQuery.trim().toLowerCase();
-    const personQ = deptPersonFilter.trim().toLowerCase();
-    const partyQ = deptPartyFilter.trim().toLowerCase();
-    const orderQ = deptOrderNoFilter.trim().toLowerCase();
+    const q = (deptSearchQuery ?? '').toString().trim().toLowerCase();
+    const personQ = (deptPersonFilter ?? '').toString().trim().toLowerCase();
+    const partyQ = (deptPartyFilter ?? '').toString().trim().toLowerCase();
+    const orderQ = (deptOrderNoFilter ?? '').toString().trim().toLowerCase();
+    const partyName = (j.partyName ?? '').toString().toLowerCase();
+    const jobCardNo = (j.jobCardNo ?? '').toString().toLowerCase();
+    const itemName = (j.itemName ?? '').toString().toLowerCase();
+    const itemCode = (j.itemCode ?? '').toString().toLowerCase();
 
     // 1. Person
     if (personQ && personQ !== 'all') {
@@ -2130,7 +2140,7 @@ Please adjust the quantity or request additional raw material issue.`);
       ].filter((v): v is string => Boolean(v)).map(s => s.toLowerCase());
 
       const movementPersons = movements
-        .filter(m => m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase())
+        .filter(m => (m.jobCardNo ?? '').toString().toLowerCase() === jobCardNo)
         .flatMap(m => [m.transferBy, m.acceptedBy])
         .filter((v): v is string => Boolean(v))
         .map(s => s.toLowerCase());
@@ -2141,7 +2151,7 @@ Please adjust the quantity or request additional raw material issue.`);
 
     // 2. Party / Customer
     if (partyQ && partyQ !== 'all') {
-      if (!j.partyName.toLowerCase().includes(partyQ)) return false;
+      if (!partyName.includes(partyQ)) return false;
     }
 
     // 3. Order No
@@ -2153,17 +2163,17 @@ Please adjust the quantity or request additional raw material issue.`);
     // 4. Global query
     if (q) {
       const matchesBasic = 
-        j.jobCardNo.toLowerCase().includes(q) ||
-        j.partyName.toLowerCase().includes(q) ||
-        j.itemName.toLowerCase().includes(q) ||
-        j.itemCode.toLowerCase().includes(q) ||
+        jobCardNo.includes(q) ||
+        partyName.includes(q) ||
+        itemName.includes(q) ||
+        itemCode.includes(q) ||
         (j.orderNo && j.orderNo.toLowerCase().includes(q)) ||
         (j.createdBy && j.createdBy.toLowerCase().includes(q)) ||
         (j.operatorName && j.operatorName.toLowerCase().includes(q)) ||
         (j.productionDetails?.operatorName && j.productionDetails.operatorName.toLowerCase().includes(q));
 
       const matchesMovements = movements.some(m => 
-        m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase() && (
+        (m.jobCardNo ?? '').toString().toLowerCase() === jobCardNo && (
           (m.transferBy && m.transferBy.toLowerCase().includes(q)) ||
           (m.acceptedBy && m.acceptedBy.toLowerCase().includes(q)) ||
           (m.remarks && m.remarks.toLowerCase().includes(q))
@@ -8287,10 +8297,13 @@ Please adjust the quantity or request additional raw material issue.`);
             <div className="space-y-2 max-h-96 overflow-y-auto">
               {(() => {
                 const list = savedItems.filter(item => {
-                  const cust = (item.partyName || item.customerName || '').trim();
-                  const matchesCust = masterCustomerFilter === 'All' || cust.toLowerCase() === masterCustomerFilter.toLowerCase();
-                  const q = masterSearchQuery.trim().toLowerCase();
-                  const matchesQ = !q || item.itemName.toLowerCase().includes(q) || (item.itemCode && item.itemCode.toLowerCase().includes(q)) || cust.toLowerCase().includes(q);
+                  const cust = (item.partyName ?? item.customerName ?? '').toString().trim();
+                  const selectedCust = (masterCustomerFilter ?? '').toString();
+                  const matchesCust = selectedCust === 'All' || cust.toLowerCase() === selectedCust.toLowerCase();
+                  const q = (masterSearchQuery ?? '').toString().trim().toLowerCase();
+                  const itemName = (item.itemName ?? '').toString().toLowerCase();
+                  const itemCode = (item.itemCode ?? '').toString().toLowerCase();
+                  const matchesQ = !q || itemName.includes(q) || itemCode.includes(q) || cust.toLowerCase().includes(q);
                   return matchesCust && matchesQ;
                 });
 
