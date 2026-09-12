@@ -17,6 +17,7 @@ interface QuickTransferModalProps {
     quantity: number;
     remarks?: string;
     operationId?: string;
+    unit?: 'KGS' | 'PCS' | 'KG';
   }) => Promise<void>;
 }
 
@@ -136,7 +137,11 @@ export default function QuickTransferModal({
     setError('');
 
     if (quantity <= 0) {
-      setError('Please specify a positive material transfer weight quantity (KG).');
+      setError(
+        fromDept === 'Store' && String(toDept) === 'Plating'
+          ? 'Please specify a positive material transfer quantity in KG. PCS is not allowed for Store → Plating Unit.'
+          : 'Please specify a positive material transfer weight quantity (KG).'
+      );
       return;
     }
 
@@ -171,7 +176,8 @@ export default function QuickTransferModal({
         toDepartment: toDept,
         quantity,
         remarks: remarks.trim() || `Quick transfer initiated from All Orders database view.`,
-        operationId: retryOperationIdRef.current
+        operationId: retryOperationIdRef.current,
+        ...(fromDept === 'Store' && String(toDept) === 'Plating' ? { unit: 'KGS' as const } : {})
       });
       setIsSubmitting(false);
       onClose();
@@ -287,7 +293,11 @@ export default function QuickTransferModal({
           {/* Quantity and Availability Box */}
           <div className="space-y-1.5">
             <div className="flex justify-between items-center">
-              <label className="text-slate-500 font-bold uppercase tracking-wider">Transfer Weight (KG)</label>
+              <label className="text-slate-500 font-bold uppercase tracking-wider">
+                {fromDept === 'Store' && String(toDept) === 'Plating'
+                  ? 'Transfer Quantity (KG only)'
+                  : 'Transfer Weight (KG)'}
+              </label>
               <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${
                 availableWeightInDept > 0 
                   ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/20 dark:text-amber-400' 

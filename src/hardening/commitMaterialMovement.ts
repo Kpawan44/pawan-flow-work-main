@@ -21,6 +21,7 @@ import {
 } from "./process2Manufacturing";
 import { createMovementRequestFingerprint } from "./movementOperationId";
 import { runKeyedSerialized } from "./movementSerialize";
+import { assertStoreToPlatingKgOnly, isStoreToPlatingUnitRoute } from "./storePlatingKgOnly";
 
 export interface MovementCommitInput {
   operationId: string;
@@ -38,6 +39,7 @@ export interface MovementCommitInput {
   dispatchGroupNo?: string;
   manifestId?: string;
   extra?: Record<string, any>;
+  unit?: string;
   /** Optional preloaded movements to avoid collection list inside a Firestore transaction. */
   preloadedMovements?: any[];
   requireRawMaterialForProduction?: boolean;
@@ -217,6 +219,18 @@ async function commitMaterialMovementTxInner(
     };
   }
 
+  const storePlatingUnit = assertStoreToPlatingKgOnly({
+    fromDepartment: normFrom,
+    toDepartment: normTo,
+    unit: input.unit,
+    requestedUnit: input.requestedUnit,
+    extraUnit: input.extra?.unit ?? input.extra?.requestedUnit,
+    processDetailsUnit: input.processDetails?.unit
+  });
+  if (storePlatingUnit.ok === false) {
+    return { success: false, statusCode: 400, error: storePlatingUnit.error };
+  }
+
   const stockIn = isStockInJob(jobCardNo);
   const isIssue = Boolean(input.isIssueRequest);
 
@@ -361,7 +375,9 @@ async function commitMaterialMovementTxInner(
     accepted: isSupplierReceipt,
     acceptedQty: isSupplierReceipt ? reqQty : 0,
     rejectedQty: 0,
-    unit: contracted.unit || jobCardData?.unit || input.requestedUnit || "KGS",
+    unit: isStoreToPlatingUnitRoute(normFrom, normTo)
+      ? storePlatingUnit.unit
+      : contracted.unit || jobCardData?.unit || input.requestedUnit || "KGS",
     transactionType: input.transactionType || (isSupplierReceipt ? "PURCHASE_RECEIPT" : isIssue ? "ISSUE_REQUEST" : "TRANSFER"),
     operationId: opKey,
     isIssueRequest: isIssue,

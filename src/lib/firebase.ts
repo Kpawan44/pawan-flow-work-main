@@ -44,6 +44,7 @@ import {
   RESTORE_LEDGER_CLIENT_BLOCKED_MESSAGE
 } from '../hardening/restoreDatabaseDumpPolicy';
 import { JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE } from '../hardening/jobCardTombstone';
+import { assertStoreProcessTransferUnit } from '../hardening/storePlatingKgOnly';
 import { applyTargetedLedgerPatch } from '../hardening/targetedLedgerPatch';
 
 // Directly use configuration from firebase-applet-config.json
@@ -3363,6 +3364,11 @@ export class DBService {
     if (!transfer.toProcess || (transfer.toProcess !== 'Repacking' && transfer.toProcess !== 'Replating')) {
       throw new Error("Process destination is mandatory. Must select either 'Repacking' or 'Replating'.");
     }
+    const processUnit = assertStoreProcessTransferUnit({ toProcess: transfer.toProcess, unit: transfer.unit });
+    if (processUnit.ok === false) {
+      throw new Error(processUnit.error);
+    }
+    const transferUnit: 'KGS' | 'PCS' = transfer.toProcess === 'Replating' ? 'KGS' : (transfer.unit || 'PCS');
 
     const now = new Date();
     const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
@@ -3397,6 +3403,7 @@ export class DBService {
 
     const newRecord: ProcessTransfer = {
       ...transfer,
+      unit: transferUnit,
       transferId,
       transferNo: newTransferNo,
       status: initialStatus,
