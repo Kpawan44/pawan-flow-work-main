@@ -22,6 +22,7 @@ import {
 } from "./process2Manufacturing";
 import { runKeyedSerialized } from "./movementSerialize";
 import { normalizeDeptName } from "./process1Purchase";
+import { isOtherRawMaterialIssueMovement } from "./process248OtherRawMaterial";
 
 export type MovementActor = MovementCommitInput["actor"];
 
@@ -74,6 +75,13 @@ function isAcceptAuthorized(actor: MovementActor, movement: any, input: AcceptMo
     String(movement.issueStatus || "") !== "Issued";
   if (isRmStoreConfirmingIssue) {
     return isDeptAuthorized(actor, "Raw Material Store");
+  }
+  const isIncomingStoreConfirmingOtherRm =
+    isOtherRawMaterialIssueMovement(movement) &&
+    String(input.issueStatus || "") === "Issued" &&
+    String(movement.issueStatus || "") !== "Issued";
+  if (isIncomingStoreConfirmingOtherRm) {
+    return isDeptAuthorized(actor, "Incoming Store") || isDeptAuthorized(actor, "Purchase");
   }
   return isDeptAuthorized(actor, String(movement.toDepartment || ""));
 }
@@ -144,10 +152,16 @@ async function acceptMaterialMovementTxInner(
     Boolean(movement.isIssueRequest) &&
     String(movement.fromDepartment || "") === "Raw Material Store" &&
     String(movement.toDepartment || "") === "Production";
+  const isOtherRmIssueToProduction = isOtherRawMaterialIssueMovement(movement);
   const isRawMaterialStoreIssuing =
     isRmIssueToProduction &&
     String(input.issueStatus || "") === "Issued" &&
     String(movement.issueStatus || "") !== "Issued";
+  const isIncomingStoreIssuingOtherRm =
+    isOtherRmIssueToProduction &&
+    String(input.issueStatus || "") === "Issued" &&
+    String(movement.issueStatus || "") !== "Issued";
+  const isSourceConfirmingIssue = isRawMaterialStoreIssuing || isIncomingStoreIssuingOtherRm;
 
   if (movement.accepted && movement.issueStatus !== "Rejected" && pending <= 0) {
     const payload = { success: true, cached: true, movement, updatedJobCard: null };
@@ -158,7 +172,7 @@ async function acceptMaterialMovementTxInner(
     return { success: false, statusCode: 400, error: "This movement has already been fully rejected." };
   }
 
-  if (isRawMaterialStoreIssuing) {
+  if (isSourceConfirmingIssue) {
     const issuedMov: any = {
       ...movement,
       quantity: originalQty,
@@ -206,12 +220,12 @@ async function acceptMaterialMovementTxInner(
     quantity: originalQty,
     acceptedQty: nextAcceptedQty,
     rejectedQty: alreadyRejected,
-    accepted: isRawMaterialStoreIssuing ? false : remainingAfter <= 1e-9 && alreadyRejected <= 1e-9 ? true : nextAcceptedQty > 0 && remainingAfter <= 1e-9,
-    acceptedBy: isRawMaterialStoreIssuing ? movement.acceptedBy : input.actor.userName,
-    acceptedByUserId: isRawMaterialStoreIssuing ? movement.acceptedByUserId : input.actor.userId,
-    acceptedDate: isRawMaterialStoreIssuing ? movement.acceptedDate : now,
+    accepted: isSourceConfirmingIssue ? false : remainingAfter <= 1e-9 && alreadyRejected <= 1e-9 ? true : nextAcceptedQty > 0 && remainingAfter <= 1e-9,
+    acceptedBy: isSourceConfirmingIssue ? movement.acceptedBy : input.actor.userName,
+    acceptedByUserId: isSourceConfirmingIssue ? movement.acceptedByUserId : input.actor.userId,
+    acceptedDate: isSourceConfirmingIssue ? movement.acceptedDate : now,
     resolutionStatus: remainingAfter > 1e-9 ? "PARTIAL" : alreadyRejected > 0 ? "SPLIT" : "ACCEPTED",
-    issueStatus: isRawMaterialStoreIssuing
+    issueStatus: isSourceConfirmingIssue
       ? input.issueStatus || movement.issueStatus || "Issued"
       : remainingAfter > 1e-9
         ? movement.issueStatus
@@ -229,11 +243,11 @@ async function acceptMaterialMovementTxInner(
     modifiedAction: "ACCEPT"
   };
 
-  if (!isRawMaterialStoreIssuing && remainingAfter <= 1e-9 && alreadyRejected <= 1e-9) {
+  if (!isSourceConfirmingIssue && remainingAfter <= 1e-9 && alreadyRejected <= 1e-9) {
     updatedMov.accepted = true;
-  } else if (!isRawMaterialStoreIssuing && nextAcceptedQty > 0 && remainingAfter <= 1e-9) {
+  } else if (!isSourceConfirmingIssue && nextAcceptedQty > 0 && remainingAfter <= 1e-9) {
     updatedMov.accepted = true;
-  } else if (!isRawMaterialStoreIssuing) {
+  } else if (!isSourceConfirmingIssue) {
     updatedMov.accepted = false;
   }
 
@@ -244,10 +258,11 @@ async function acceptMaterialMovementTxInner(
   let updatedJobCard: any = null;
   const jobCardNo = String(movement.jobCardNo || "");
   const skipJobUpdateForRmIssue =
-    Boolean(movement.isIssueRequest) &&
-    String(movement.fromDepartment || "") === "Raw Material Store" &&
-    String(movement.toDepartment || "") === "Production";
-  if (jobCardNo && !isStockInJob(jobCardNo) && !isRawMaterialStoreIssuing && !skipJobUpdateForRmIssue) {
+    (Boolean(movement.isIssueRequest) &&
+      String(movement.fromDepartment || "") === "Raw Material Store" &&
+      String(movement.toDepartment || "") === "Production") ||
+    isOtherRawMaterialIssueMovement(movement);
+  if (jobCardNo && !isStockInJob(jobCardNo) && !isSourceConfirmingIssue && !skipJobUpdateForRmIssue) {
     const jobId = jobCardNo.toUpperCase();
     const job = (await store.get("mfr_job_cards", jobId)) || (await store.get("mfr_job_cards", jobCardNo));
     if (job) {
