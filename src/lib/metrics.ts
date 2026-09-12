@@ -8,6 +8,7 @@ import {
   process2SendAvailableQty,
   getCumulativeDispatchedQty
 } from '../hardening/process2Manufacturing';
+import { getAcceptedOtherRawMaterialIssuedQty, isOtherRawMaterialIssueMovement } from '../hardening/process248OtherRawMaterial';
 
 function isLiveMovement(m: MaterialMovement | any): boolean {
   if (!m) return false;
@@ -163,12 +164,13 @@ export function getAcceptedRawMaterialIssuedQty(job: JobCard, movements: Materia
   if (job.processType === 'Purchase') return 0;
 
   const targetJc = String(job.jobCardNo || '').toLowerCase();
-  return (Array.isArray(movements) ? movements : [])
+  const wireAccepted = (Array.isArray(movements) ? movements : [])
     .filter(m => m && String(m.jobCardNo || '').toLowerCase() === targetJc &&
                  m.fromDepartment === 'Raw Material Store' &&
                  m.isIssueRequest &&
                  m.accepted === true)
     .reduce((sum, m) => sum + creditedInboundQty(m), 0);
+  return wireAccepted + getAcceptedOtherRawMaterialIssuedQty(job, movements);
 }
 
 export function getRawMaterialIssuedQty(job: JobCard, movements: MaterialMovement[] = []): number {
@@ -178,8 +180,7 @@ export function getRawMaterialIssuedQty(job: JobCard, movements: MaterialMovemen
   const targetJc = String(job.jobCardNo || '').toLowerCase();
   const issuedMovementsQty = (Array.isArray(movements) ? movements : [])
     .filter(m => m && String(m.jobCardNo || '').toLowerCase() === targetJc && 
-                 m.fromDepartment === 'Raw Material Store' && 
-                 m.isIssueRequest && 
+                 ((m.fromDepartment === 'Raw Material Store' && m.isIssueRequest) || isOtherRawMaterialIssueMovement(m)) &&
                  (m.issueStatus === 'Issued' || m.accepted))
     .reduce((sum, m) => sum + creditedInboundQty(m), 0);
 

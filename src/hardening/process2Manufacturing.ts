@@ -11,6 +11,7 @@ import {
   parseDecimalQuantity
 } from "./process1Purchase";
 import { computeRmRuntimeStock } from "./rmSkuMaster";
+import { getAcceptedOtherRawMaterialIssuedQty } from "./process248OtherRawMaterial";
 
 export { displayUnitLabel, isVisibleInProductionQueue, parseDecimalQuantity };
 
@@ -67,6 +68,14 @@ export function canStartProductionWithRm(
     return { ok: false, error: "Production cannot start until issued raw material is accepted by Production." };
   }
   return { ok: true };
+}
+
+/** Wire (RM Store) + optional Other RM (Incoming Store). Wire-only jobs are unchanged. */
+export function getTotalAcceptedProductionRawMaterialQty(
+  job: { jobCardNo?: string; processType?: string; orderQty?: number },
+  movements: Array<any> = []
+): number {
+  return getAcceptedRawMaterialIssuedQty(job, movements) + getAcceptedOtherRawMaterialIssuedQty(job, movements);
 }
 
 export function isRejectionReturnMovement(m: { processDetails?: any; transactionType?: string } | null | undefined): boolean {
@@ -191,7 +200,7 @@ export function productionSendAvailable(
   if (job.processType === "Purchase") return null;
 
   const targetMoves = jobMovements(String(job.jobCardNo || ""), movements).filter((m) => !isDeletedMovement(m));
-  const rm = getAcceptedRawMaterialIssuedQty(job, targetMoves);
+  const rm = getTotalAcceptedProductionRawMaterialQty(job, targetMoves);
   const outbound = targetMoves
     .filter(
       (m) =>
@@ -613,8 +622,15 @@ export function shouldUpdateJobOnAccept(mov: {
   fromDepartment?: string;
   toDepartment?: string;
   issueStatus?: string;
+  processDetails?: any;
 }): boolean {
-  return !isRawMaterialStoreIssuingToProduction(mov);
+  if (isRawMaterialStoreIssuingToProduction(mov)) return false;
+  const fromIncoming =
+    Boolean(mov.isIssueRequest) &&
+    normalizeDeptName(mov.fromDepartment) === "incoming store" &&
+    normalizeDeptName(mov.toDepartment) === "production" &&
+    Boolean((mov as { processDetails?: any }).processDetails?.isOtherRawMaterialIssue);
+  return !fromIncoming;
 }
 
 export function isVisibleInDispatchQueue(

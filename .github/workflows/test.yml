@@ -58,7 +58,8 @@ jobs:
             test/process182-wire-purchase-production.test.ts \
             test/process191-multi-instance-concurrency.test.ts \
             test/process205-tally-rapid-entry.test.ts \
-            test/process210-store-plating-kg-only.test.ts
+            test/process210-store-plating-kg-only.test.ts \
+            test/process248-multi-raw-material.test.ts
 
       - name: Run Staging Manufacturing Resilience Suite (Process 147/148)
         run: npm run test:staging:process147

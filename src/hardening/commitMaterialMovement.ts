@@ -22,6 +22,13 @@ import {
 import { createMovementRequestFingerprint } from "./movementOperationId";
 import { runKeyedSerialized } from "./movementSerialize";
 import { assertStoreToPlatingKgOnly, isStoreToPlatingUnitRoute } from "./storePlatingKgOnly";
+import {
+  assertOtherRawMaterialIssueInput,
+  canIssueOtherRawMaterialQty,
+  computeIncomingStoreOtherRmStock,
+  isOtherRawMaterialIssueMovement,
+  otherRawMaterialSerializeKey
+} from "./process248OtherRawMaterial";
 
 export interface MovementCommitInput {
   operationId: string;
@@ -139,7 +146,13 @@ export async function commitMaterialMovementTx(
   input: MovementCommitInput
 ): Promise<MovementCommitResult> {
   const claim = purchaseInvoiceClaimFromInput(input);
-  const serializeKey = claim && claim.ok
+  const otherRmKey =
+    input.isIssueRequest && input.processDetails?.isOtherRawMaterialIssue
+      ? otherRawMaterialSerializeKey(input.processDetails?.rawMaterialCode)
+      : null;
+  const serializeKey = otherRmKey
+    ? otherRmKey
+    : claim && claim.ok
     ? `pinv:${claim.claimId}`
     : `mov:${String(input.jobCardNo || input.operationId || "movement").toUpperCase()}`;
   const run = () => commitMaterialMovementTxInner(store, input);
@@ -256,6 +269,18 @@ async function commitMaterialMovementTxInner(
         return { success: false, statusCode: 400, error: "Supplier receipts require a Purchase job card." };
       }
     } else if (isIssue) {
+      const otherRmGate = assertOtherRawMaterialIssueInput({
+        fromDepartment: normFrom,
+        toDepartment: normTo,
+        isIssueRequest: isIssue,
+        quantity: reqQty,
+        unit: input.unit,
+        requestedUnit: input.requestedUnit,
+        processDetails: input.processDetails
+      });
+      if (otherRmGate.ok === false) {
+        return { success: false, statusCode: 400, error: otherRmGate.error };
+      }
       let issueAvail = 0;
       if (normFrom === "Raw Material Store") {
         const skuCode = String(
@@ -272,6 +297,20 @@ async function commitMaterialMovementTxInner(
           opening = Number(sku?.openingQty || 0);
         }
         issueAvail = rmIssueAvailableQty(jobCardData, movementsForQty, skuCode, opening);
+      } else if (isOtherRawMaterialIssueMovement({ ...input, fromDepartment: normFrom, toDepartment: normTo })) {
+        const skuCode = String(input.processDetails?.rawMaterialCode || "").trim();
+        let opening = 0;
+        if (skuCode) {
+          const sku =
+            (await store.get("mfr_rm_sku_master", skuCode.toUpperCase())) ||
+            (await store.get("mfr_rm_sku_master", skuCode));
+          opening = Number(sku?.openingQty || 0);
+        }
+        issueAvail = computeIncomingStoreOtherRmStock(opening, movementsForQty, skuCode);
+        const stockGate = canIssueOtherRawMaterialQty(issueAvail, reqQty, input.unit || input.requestedUnit || input.processDetails?.unit);
+        if (!stockGate.ok) {
+          return { success: false, statusCode: 400, error: stockGate.error };
+        }
       } else if (normFrom === "Store") {
         issueAvail = storeAuthoritativeOnHand(jobCardData, movementsForQty);
       } else {
