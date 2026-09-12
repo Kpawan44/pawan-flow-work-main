@@ -145,7 +145,8 @@ export async function runWithExclusiveLock<T>(options: {
         await sleep(15 + Math.floor(Math.random() * 40));
         continue;
       }
-      throw err;
+      // Non-busy error (e.g. gRPC/Admin SDK permission failure on staging/local) -> fallback to in-process FIFO mutex
+      return fallback(key, options.fn);
     }
     try {
       return await options.fn();
