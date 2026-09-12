@@ -56,7 +56,8 @@ jobs:
             test/process27-ledger-truth.test.ts \
             test/process28-ledger-security.test.ts \
             test/process182-wire-purchase-production.test.ts \
-            test/process191-multi-instance-concurrency.test.ts
+            test/process191-multi-instance-concurrency.test.ts \
+            test/process205-tally-rapid-entry.test.ts
 
       - name: Run Staging Manufacturing Resilience Suite (Process 147/148)
         run: npm run test:staging:process147

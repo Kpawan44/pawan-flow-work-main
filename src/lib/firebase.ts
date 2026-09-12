@@ -29,7 +29,7 @@ import {
   logActionToSheets 
 } from './googleSheets';
 import { nextStatusOnPurchaseAccept, displayUnitLabel } from '../hardening/process1Purchase';
-import { attachProcess2MovementContract, isPendingAcceptanceMovement, isRawMaterialStoreIssuingToProduction, shouldBlockPendingDuplicateRoute, shouldUpdateJobOnAccept } from '../hardening/process2Manufacturing';
+import { attachProcess2MovementContract, isPendingAcceptanceMovement, isRawMaterialStoreIssuingToProduction, shouldBlockPendingDuplicateRoute } from '../hardening/process2Manufacturing';
 import {
   denyDirectMovementDelete,
   denyDirectMovementUpdate,
@@ -44,6 +44,7 @@ import {
   RESTORE_LEDGER_CLIENT_BLOCKED_MESSAGE
 } from '../hardening/restoreDatabaseDumpPolicy';
 import { JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE } from '../hardening/jobCardTombstone';
+import { applyTargetedLedgerPatch } from '../hardening/targetedLedgerPatch';
 
 // Directly use configuration from firebase-applet-config.json
 export { firebaseConfig };
@@ -429,7 +430,7 @@ export class DBService {
   }
 
   // --- USERS ---
-  static async getAuthHeaders(): Promise<Record<string, string>> {
+  static async getAuthHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json'
     };
@@ -451,7 +452,24 @@ export class DBService {
         }
       } catch (e) {}
     }
+    if (extra) {
+      for (const [k, v] of Object.entries(extra)) {
+        if (v) headers[k] = v;
+      }
+    }
     return headers;
+  }
+
+  /** Merge authoritative POST/PUT bodies into mem + localStorage without extra list GETs. */
+  static patchLedgerCaches(patch: { movement?: MaterialMovement | null; jobCard?: JobCard | null; extraMovements?: MaterialMovement[] | null }): void {
+    const movements = this.getFromMemCache<MaterialMovement[]>('mfr_movements') || getLocalStorageItem<MaterialMovement[]>('mfr_movements', []);
+    const jobCards = this.getFromMemCache<JobCard[]>('mfr_job_cards') || getLocalStorageItem<JobCard[]>('mfr_job_cards', []);
+    const next = applyTargetedLedgerPatch({ movements, jobCards }, patch);
+    if (!next.applied) return;
+    setLocalStorageItem('mfr_movements', next.movements);
+    setLocalStorageItem('mfr_job_cards', next.jobCards);
+    this.setMemCache('mfr_movements', next.movements);
+    this.setMemCache('mfr_job_cards', next.jobCards);
   }
 
   static async getUsers(forceFresh = false): Promise<UserProfile[]> {
@@ -1153,32 +1171,9 @@ export class DBService {
     const finalJob = authoritativeJob || newJob;
     const finalMovement = authoritativeMovement || initialMovement;
 
-    // 2. Reconcile Local Cache & Memory with Authoritative Server Result
-    const freshCards = await this.getJobCards();
-    const cardIdx = freshCards.findIndex(c => c.jobCardNo.toLowerCase() === finalJob.jobCardNo.toLowerCase());
-    if (cardIdx >= 0) {
-      freshCards[cardIdx] = finalJob;
-    } else {
-      freshCards.unshift(finalJob);
-    }
-    setLocalStorageItem('mfr_job_cards', freshCards);
-    this.setMemCache('mfr_job_cards', freshCards);
-
-    const freshMovements = await this.getMovements();
-    const movIdx = freshMovements.findIndex(m => m.movementId === finalMovement.movementId);
-    if (movIdx >= 0) {
-      freshMovements[movIdx] = finalMovement;
-    } else {
-      freshMovements.unshift(finalMovement);
-    }
-    setLocalStorageItem('mfr_movements', freshMovements);
-    this.setMemCache('mfr_movements', freshMovements);
+    this.patchLedgerCaches({ movement: finalMovement, jobCard: finalJob });
 
     await this.logAction(creatorId, creatorName, 'CREATE_JOB_CARD', `Generated job card ${finalJob.jobCardNo} for ${job.partyName} (${job.orderQty} ${unitLabel})`);
-    
-    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
-    await this.broadcastEvent('JOB_UPDATED', { jobCardNo: finalJob.jobCardNo }).catch(() => {});
-    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: finalMovement.movementId, jobCardNo: finalJob.jobCardNo }).catch(() => {});
 
     // Automatically save item name and code to master list
     try {
@@ -1238,19 +1233,9 @@ export class DBService {
       throw new Error("Server connection unavailable. Job card was not updated. Direct Firestore fallback is disabled.");
     }
 
-    // 3. Reconcile Local Cache & Memory with Authoritative Result
-    const freshCards = await this.getJobCards();
-    const freshIdx = freshCards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
-    if (freshIdx >= 0) {
-      freshCards[freshIdx] = authoritativeJob || ({ ...freshCards[freshIdx], ...finalPayload } as JobCard);
-      setLocalStorageItem('mfr_job_cards', freshCards);
-      this.setMemCache('mfr_job_cards', freshCards);
-    }
+    this.patchLedgerCaches({ jobCard: authoritativeJob });
 
     await this.logAction(userId, userName, 'UPDATE_JOB_CARD', `Updated Job Card ${jobCardNo}. Status: ${updates.status || cards[idx].status}`);
-    
-    // Broadcast real-time SSE event to all connected devices (< 50ms sync)
-    await this.broadcastEvent('JOB_UPDATED', { jobCardNo }).catch(() => {});
 
     // Check if total rejection quantity for the job card exceeds 10% of total order quantity
     try {
@@ -1610,20 +1595,22 @@ export class DBService {
 
     // 1. Authoritative Backend API Execution FIRST
     const apiBase = getApiBaseUrl();
-    const headers = await this.getAuthHeaders();
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': opKey });
     let authoritativeMov: MaterialMovement | null = null;
+    let authoritativeJob: JobCard | null = null;
 
     try {
       const res = await fetch(`${apiBase}/api/movements`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ movement: newMov })
+        body: JSON.stringify({ movement: newMov, operationId: opKey })
       });
       const resData = await res.json().catch(() => ({}));
       if (!res.ok || !resData.success || !resData.movement) {
         throw new Error(resData.error || `Failed to create movement (status ${res.status}).`);
       }
       authoritativeMov = resData.movement;
+      if (resData.updatedJobCard) authoritativeJob = resData.updatedJobCard;
     } catch (apiErr: any) {
       throw new Error(apiErr?.message || 'Server connection unavailable. Movement was not saved.');
     }
@@ -1633,17 +1620,7 @@ export class DBService {
     }
 
     const finalMov = authoritativeMov;
-
-    // 2. Reconcile Local Cache & Memory with Authoritative Server Result
-    const freshMovements = await this.getMovements();
-    const movIdx = freshMovements.findIndex(m => m.movementId === finalMov.movementId);
-    if (movIdx >= 0) {
-      freshMovements[movIdx] = finalMov;
-    } else {
-      freshMovements.unshift(finalMov);
-    }
-    setLocalStorageItem('mfr_movements', freshMovements);
-    this.setMemCache('mfr_movements', freshMovements);
+    this.patchLedgerCaches({ movement: finalMov, jobCard: authoritativeJob });
     
     // Custody department is derived by the movement engine on accept; do not PUT currentDepartment.
 
@@ -1667,11 +1644,7 @@ export class DBService {
       `Dispatched ${movement.quantity} KG of Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment}.`
     );
 
-    // Broadcast SSE Events AFTER COMMIT
-    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId: finalMov.movementId, jobCardNo: movement.jobCardNo }).catch(() => {});
-    if (!movement.jobCardNo.startsWith('STOCK-IN-')) {
-      await this.broadcastEvent('JOB_UPDATED', { jobCardNo: movement.jobCardNo }).catch(() => {});
-    }
+    // Server onWrite already SSE-broadcasts the authoritative movement/job.
 
     // Log to Google Sheets
     logMaterialMovementToSheets(finalMov).catch(err => console.warn('Google Sheets movement log failed:', err));
@@ -1693,11 +1666,13 @@ export class DBService {
     let targetJobCardNo = localMov?.jobCardNo || '';
     let finalMovement: MaterialMovement | null = null;
     let finalJobCardUpdates: Partial<JobCard> | null = null;
-    const nowIso = new Date().toISOString();
 
     // 1. Authoritative Backend API Call (Primary Protected Mutation Path)
     const apiBase = getApiBaseUrl();
-    const headers = await this.getAuthHeaders();
+    const acceptOpId = extraFields?.quantity !== undefined
+      ? `op-accept-${movementId}-${extraFields.quantity}`
+      : `op-accept-${movementId}`;
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': acceptOpId });
     let apiSucceeded = false;
 
     try {
@@ -1711,9 +1686,7 @@ export class DBService {
           quantity: extraFields?.quantity,
           acceptQty: extraFields?.quantity,
           issueStatus: extraFields?.issueStatus,
-          operationId: extraFields?.quantity !== undefined
-            ? `op-accept-${movementId}-${extraFields.quantity}`
-            : `op-accept-${movementId}`
+          operationId: acceptOpId
         })
       });
 
@@ -1748,42 +1721,12 @@ export class DBService {
       throw new Error("Server connection unavailable. Data was not saved.");
     }
 
-    // 2. Update Local Cache & Memory
-    const currentMovements = await this.getMovements();
-    const updatedMov = finalMovement || {
-      ...localMov!,
-      accepted: true,
-      acceptedBy: acceptedByName || acceptedByUserId,
-      acceptedDate: nowIso,
-      modifiedByUserId: acceptedByUserId,
-      modifiedByUserName: acceptedByName,
-      modifiedDate: nowIso,
-      modifiedAction: 'ACCEPT'
-    };
-
-    const movListIdx = currentMovements.findIndex(m => m.movementId === movementId);
-    if (movListIdx >= 0) {
-      currentMovements[movListIdx] = updatedMov;
-    } else {
-      currentMovements.unshift(updatedMov);
-    }
-    setLocalStorageItem('mfr_movements', currentMovements);
-    this.setMemCache('mfr_movements', currentMovements);
-
-    if (targetJobCardNo && !targetJobCardNo.startsWith('STOCK-IN-') && shouldUpdateJobOnAccept(updatedMov) && finalJobCardUpdates) {
-      const cards = await this.getJobCards();
-      const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === targetJobCardNo.toLowerCase());
-      if (cardIdx >= 0) {
-        const existingCard = cards[cardIdx];
-        const updatedCard = {
-          ...existingCard,
-          ...finalJobCardUpdates
-        } as JobCard;
-        cards[cardIdx] = updatedCard;
-        setLocalStorageItem('mfr_job_cards', cards);
-        this.setMemCache('mfr_job_cards', cards);
-      }
-    }
+    const updatedMov = finalMovement;
+    const jobForPatch =
+      finalJobCardUpdates && (finalJobCardUpdates as JobCard).jobCardNo
+        ? (finalJobCardUpdates as JobCard)
+        : null;
+    this.patchLedgerCaches({ movement: updatedMov, jobCard: jobForPatch });
 
     // Audit Logging
     await this.logAction(
@@ -1803,11 +1746,7 @@ export class DBService {
       }).catch(() => {});
     }
 
-    // Broadcast SSE Events AFTER COMMIT
-    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId, jobCardNo: updatedMov.jobCardNo }).catch(() => {});
-    if (targetJobCardNo) {
-      await this.broadcastEvent('JOB_UPDATED', { jobCardNo: targetJobCardNo }).catch(() => {});
-    }
+    // Server onWrite already SSE-broadcasts.
 
     // Log to Google Sheets
     logMaterialMovementToSheets(updatedMov).catch(err => console.warn('Google Sheets movement log failed:', err));
@@ -1826,12 +1765,14 @@ export class DBService {
 
     let targetJobCardNo = localMov?.jobCardNo || '';
     let finalMovement: MaterialMovement | null = null;
-    const nowIso = new Date().toISOString();
 
     // 1. Authoritative Backend API Call
     const apiBase = getApiBaseUrl();
-    const headers = await this.getAuthHeaders();
+    const rejectOpId = extra?.operationId || `op-reject-${movementId}-${extra?.rejectedQty ?? "full"}-${extra?.acceptedQty || 0}`;
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': rejectOpId });
     let apiSucceeded = false;
+    let returnMovement: MaterialMovement | null = null;
+    let rejectJobCard: JobCard | null = null;
 
     try {
       const res = await fetch(`${apiBase}/api/movements/${encodeURIComponent(movementId)}/reject`, {
@@ -1841,7 +1782,7 @@ export class DBService {
           remarks,
           rejectedQty: extra?.rejectedQty,
           acceptedQty: extra?.acceptedQty,
-          operationId: extra?.operationId || `op-reject-${movementId}-${extra?.rejectedQty ?? "full"}-${extra?.acceptedQty || 0}`
+          operationId: rejectOpId
         })
       });
 
@@ -1850,24 +1791,10 @@ export class DBService {
         if (apiData && apiData.success) {
           apiSucceeded = true;
           finalMovement = apiData.movement;
-          if (apiData.returnMovement) {
-            const currentMovements = await this.getMovements();
-            const ret = apiData.returnMovement as MaterialMovement;
-            const ridx = currentMovements.findIndex(m => m.movementId === ret.movementId);
-            if (ridx >= 0) currentMovements[ridx] = ret;
-            else currentMovements.unshift(ret);
-            setLocalStorageItem('mfr_movements', currentMovements);
-            this.setMemCache('mfr_movements', currentMovements);
-          }
+          if (apiData.returnMovement) returnMovement = apiData.returnMovement as MaterialMovement;
           if (apiData.jobCard?.jobCardNo) {
             targetJobCardNo = apiData.jobCard.jobCardNo;
-            const cards = await this.getJobCards();
-            const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === String(apiData.jobCard.jobCardNo).toLowerCase());
-            if (cardIdx >= 0) {
-              cards[cardIdx] = { ...cards[cardIdx], ...apiData.jobCard };
-              setLocalStorageItem('mfr_job_cards', cards);
-              this.setMemCache('mfr_job_cards', cards);
-            }
+            rejectJobCard = apiData.jobCard;
           }
         }
       } else {
@@ -1884,30 +1811,11 @@ export class DBService {
       throw new Error("Server connection unavailable. Data was not saved.");
     }
 
-    // 2. Update Local Cache & Memory
-    const currentMovements = await this.getMovements();
-    const updatedMov = finalMovement || {
-      ...localMov!,
-      accepted: false,
-      issueStatus: 'Rejected',
-      remarks: remarks ? `REJECTED: ${remarks}` : (localMov?.remarks || 'Rejected'),
-      rejectedBy: rejectedByName || rejectedByUserId,
-      rejectedByUserId,
-      rejectedDate: nowIso,
-      modifiedByUserId: rejectedByUserId,
-      modifiedByUserName: rejectedByName,
-      modifiedDate: nowIso,
-      modifiedAction: 'REJECT'
-    };
-
-    const movListIdx = currentMovements.findIndex(m => m.movementId === movementId);
-    if (movListIdx >= 0) {
-      currentMovements[movListIdx] = updatedMov;
-    } else {
-      currentMovements.unshift(updatedMov);
-    }
-    setLocalStorageItem('mfr_movements', currentMovements);
-    this.setMemCache('mfr_movements', currentMovements);
+    this.patchLedgerCaches({
+      movement: finalMovement,
+      extraMovements: returnMovement ? [returnMovement] : undefined,
+      jobCard: rejectJobCard
+    });
 
     await this.logAction(
       rejectedByUserId, 
@@ -1916,11 +1824,7 @@ export class DBService {
       `User ${rejectedByName} (ID: ${rejectedByUserId}) rejected/deleted material movement ${movementId}: Sent ${localMov?.quantity || 0} KG of Job Card ${targetJobCardNo} back to ${localMov?.fromDepartment || 'origin'} from ${localMov?.toDepartment || 'destination'}. Reason: "${remarks}"`
     );
 
-    // Broadcast SSE Events
-    await this.broadcastEvent('MOVEMENT_UPDATED', { movementId, jobCardNo: targetJobCardNo }).catch(() => {});
-    if (targetJobCardNo) {
-      await this.broadcastEvent('JOB_UPDATED', { jobCardNo: targetJobCardNo }).catch(() => {});
-    }
+    // Server onWrite already SSE-broadcasts.
 
     // Log to Google Sheets
     if (localMov) {
@@ -1942,12 +1846,13 @@ export class DBService {
 
   static async revertMovement(movementId: string, userId: string, userName: string): Promise<void> {
     const apiBase = getApiBaseUrl();
-    const headers = await this.getAuthHeaders();
+    const undoOpId = `op-undo-${movementId}`;
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': undoOpId });
     const res = await fetch(`${apiBase}/api/movements/${encodeURIComponent(movementId)}/undo`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        operationId: `op-undo-${movementId}`,
+        operationId: undoOpId,
         remarks: `Undo requested by ${userName}`
       })
     });
@@ -1955,28 +1860,11 @@ export class DBService {
     if (!res.ok || !apiData.success) {
       throw new Error(apiData.error || `Failed to undo movement (status ${res.status}).`);
     }
-    const list = await this.getMovements();
-    if (apiData.movement) {
-      const idx = list.findIndex(m => m.movementId === movementId);
-      if (idx >= 0) list[idx] = apiData.movement;
-      else list.unshift(apiData.movement);
-    }
-    if (apiData.returnMovement) {
-      const ridx = list.findIndex(m => m.movementId === apiData.returnMovement.movementId);
-      if (ridx >= 0) list[ridx] = apiData.returnMovement;
-      else list.unshift(apiData.returnMovement);
-    }
-    setLocalStorageItem('mfr_movements', list);
-    this.setMemCache('mfr_movements', list);
-    if (apiData.jobCard?.jobCardNo) {
-      const cards = await this.getJobCards();
-      const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === String(apiData.jobCard.jobCardNo).toLowerCase());
-      if (cardIdx >= 0) {
-        cards[cardIdx] = { ...cards[cardIdx], ...apiData.jobCard };
-        setLocalStorageItem('mfr_job_cards', cards);
-        this.setMemCache('mfr_job_cards', cards);
-      }
-    }
+    this.patchLedgerCaches({
+      movement: apiData.movement,
+      extraMovements: apiData.returnMovement ? [apiData.returnMovement] : undefined,
+      jobCard: apiData.jobCard
+    });
     await this.logAction(
       userId,
       userName,

@@ -62,6 +62,8 @@ import {
   process2SendAvailableQty,
   unproducedOrderQty
 } from '../hardening/process2Manufacturing';
+import { finalizePackingBagLines, packingDetailsFromBagLines, lineTotalBagsTimesPcs } from '../hardening/packingBagLines';
+import { enterAdvancesField, shouldIgnoreDuplicateSubmit } from '../hardening/tallyEntry';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
 import StoreProcessTransferModal from './StoreProcessTransferModal';
@@ -73,8 +75,8 @@ interface DepartmentOperationsProps {
   movements: MaterialMovement[];
   processTransfers?: ProcessTransfer[];
   companyConfig?: CompanyConfig | null;
-  onCreateJobCard: (job: any, initialMovementOverride?: any) => void;
-  onUpdateJobCard: (jobCardNo: string, updates: Partial<JobCard>) => void;
+  onCreateJobCard: (job: any, initialMovementOverride?: any) => void | Promise<void>;
+  onUpdateJobCard: (jobCardNo: string, updates: Partial<JobCard>) => void | Promise<void>;
   onCreateMovement: (mov: {
     jobCardNo: string;
     itemCode?: string;
@@ -101,7 +103,7 @@ interface DepartmentOperationsProps {
     requestedUnit?: 'PCS' | 'KGS';
     requestedQty?: number;
     processDetails?: any;
-  }[]) => void;
+  }[]) => void | Promise<void>;
   onAcceptMovement: (
     movementId: string, 
     remarks?: string, 
@@ -417,6 +419,15 @@ export default function DepartmentOperations({
   const [packBoxCount, setPackBoxCount] = useState<number>(5);
   const [packPcsPerBagOrBox, setPackPcsPerBagOrBox] = useState<number>(100);
   const [packTotalPcs, setPackTotalPcs] = useState<number>(500);
+  const [packBagLines, setPackBagLines] = useState<Array<{ bags: string; pcsPerBag: string }>>([{ bags: '5', pcsPerBag: '100' }]);
+  const [isSavingPurchase, setIsSavingPurchase] = useState(false);
+  const [isSavingPacking, setIsSavingPacking] = useState(false);
+  const purchaseSaveLock = useRef(false);
+  const packingSaveLock = useRef(false);
+  const acceptLockRef = useRef<Record<string, boolean>>({});
+  const lastPurchaseSubmitAt = useRef(0);
+  const purchaseSupplierRef = useRef<HTMLInputElement>(null);
+  const purchaseBillRef = useRef<HTMLInputElement>(null);
   const [packStyle, setPackStyle] = useState('Corrugated Boxes with wooden pallet support');
   const [packRejectionQty, setPackRejectionQty] = useState<number>(0);
   const [packQtyReceived, setPackQtyReceived] = useState<number>(0);
@@ -543,6 +554,31 @@ export default function DepartmentOperations({
       alert("Failed to submit wire rejection. Please try again.");
     } finally {
       setIsSubmittingWireRejection(false);
+    }
+  };
+
+  const packingGrandTotal = packBagLines.reduce((sum, row) => {
+    const bags = Number(row.bags) || 0;
+    const pcs = Number(row.pcsPerBag) || 0;
+    return sum + (Number.isFinite(bags * pcs) ? bags * pcs : 0);
+  }, 0);
+
+  const onTallyFormKeyDown = (e: React.KeyboardEvent<HTMLFormElement>) => {
+    if (e.key !== 'Enter') return;
+    const target = e.target as HTMLElement;
+    if (target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON') return;
+    const fields = Array.from(
+      e.currentTarget.querySelectorAll('input:not([type=hidden]):not([disabled]), select:not([disabled])')
+    ) as HTMLElement[];
+    const idx = fields.indexOf(target);
+    const action = enterAdvancesField({
+      lastField: idx < 0 || idx >= fields.length - 1,
+      shiftKey: e.shiftKey,
+      isComposing: Boolean(e.nativeEvent.isComposing)
+    });
+    if (action === 'advance') {
+      e.preventDefault();
+      fields[idx + 1]?.focus();
     }
   };
 
@@ -857,15 +893,28 @@ export default function DepartmentOperations({
 
   const handleDirectPurchaseEntry = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (shouldIgnoreDuplicateSubmit({
+      inFlight: purchaseSaveLock.current || isSavingPurchase,
+      lastSubmitAtMs: lastPurchaseSubmitAt.current,
+      nowMs: Date.now()
+    })) {
+      return;
+    }
     if (!purchaseSupplier.trim()) {
       alert("Please specify Supplier / Vendor Name.");
+      purchaseSupplierRef.current?.focus();
       return;
     }
     if (!String(purchaseBill || "").trim()) {
       alert("Please specify Bill / Invoice / Challan No. Duplicate invoices are rejected.");
+      purchaseBillRef.current?.focus();
       return;
     }
 
+    purchaseSaveLock.current = true;
+    setIsSavingPurchase(true);
+    lastPurchaseSubmitAt.current = Date.now();
+    try {
     const recNum = parseDecimalQuantity(purchaseRecQty);
     const rejNum = parseDecimalQuantity(purchaseRejQty) || 0;
 
@@ -1050,9 +1099,9 @@ export default function DepartmentOperations({
         existingJob: existingJob || null
       });
       if (result.kind === 'wire' && result.movement) {
-        onCreateMovement(result.movement);
+        await onCreateMovement(result.movement);
       } else if (result.kind === 'job' && result.job) {
-        onCreateJobCard(result.job);
+        await onCreateJobCard(result.job);
       }
 
       setSelectedOutsourceOrderId('');
@@ -1068,6 +1117,7 @@ export default function DepartmentOperations({
       setPurchaseMaterialType('Raw Material');
       setPurchaseRawKind('Wire');
       setPurchaseTargetDept('Raw Material Store');
+      setTimeout(() => purchaseSupplierRef.current?.focus(), 0);
     } else {
       const movements: any[] = [];
       const newJobCards: any[] = [];
@@ -1094,10 +1144,10 @@ export default function DepartmentOperations({
       }
 
       if (movements.length > 0) {
-        onCreateMovement(movements);
+        await onCreateMovement(movements);
       }
       if (newJobCards.length > 0) {
-        onCreateJobCard(newJobCards);
+        await onCreateJobCard(newJobCards);
       }
 
       setPurchaseMultiItems([]);
@@ -1113,6 +1163,13 @@ export default function DepartmentOperations({
       setPurchaseMaterialType('Raw Material');
       setPurchaseRawKind('Wire');
       setPurchaseTargetDept('Raw Material Store');
+      setTimeout(() => purchaseSupplierRef.current?.focus(), 0);
+    }
+    } catch (err) {
+      console.error("Purchase save failed; entry fields preserved.", err);
+    } finally {
+      purchaseSaveLock.current = false;
+      setIsSavingPurchase(false);
     }
   };
 
@@ -1441,7 +1498,14 @@ Please adjust the quantity or request additional raw material issue.`);
     setActivePlatingJob(null);
   };
 
-  const handleCompletePacking = (jCard: JobCard) => {
+  const handleCompletePacking = async (jCard: JobCard) => {
+    if (shouldIgnoreDuplicateSubmit({
+      inFlight: packingSaveLock.current || isSavingPacking,
+      lastSubmitAtMs: 0,
+      nowMs: Date.now()
+    })) {
+      return;
+    }
     const receivedFromPlating = packQtyReceived;
     const sentToStore = packQtySentToStore;
     const unitLabel = displayUnitLabel(jCard.unit);
@@ -1460,6 +1524,18 @@ Please adjust the quantity or request additional raw material issue.`);
       return;
     }
 
+    const availableJobQty = Number(jCard.orderQty || jCard.currentQty || remainingAvailable || 0);
+    const bagResult = finalizePackingBagLines(
+      packBagLines.map((row) => ({ bags: row.bags, pcsPerBag: row.pcsPerBag })),
+      availableJobQty
+    );
+    if (bagResult.ok === false) {
+      alert(bagResult.error);
+      return;
+    }
+    const packingRollup = packingDetailsFromBagLines(bagResult);
+    const packingLines = bagResult.lines;
+
     const remainingQty = Math.max(0, remainingAvailable - sentToStore - packRejectionQty);
 
     const prevPacking = jCard.packingDetails;
@@ -1470,33 +1546,49 @@ Please adjust the quantity or request additional raw material issue.`);
       .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.toDepartment === 'Packing' && m.accepted)
       .reduce((sum, m) => sum + m.quantity, 0);
 
-    onUpdateJobCard(jCard.jobCardNo, {
-      customRoutedToStore: (jCard.customRoutedToStore || 0) + sentToStore,
-      packingDetails: {
-        packedQty: totalPackedIncludingCurrent,
-        boxCount: (prevPacking?.boxCount || 0) + packBoxCount,
-        packingType: packStyle,
-        rejectionQty: packingRejectionTotal,
-        qtyReceivedFromPlating: acceptedInbound || prevPacking?.qtyReceivedFromPlating || receivedFromPlating,
-        qtySentToStore: totalPackedIncludingCurrent,
-        qtyRemaining: remainingQty,
-        pcsPerBagOrBox: packPcsPerBagOrBox,
-        totalPcs: (prevPacking?.totalPcs || 0) + packTotalPcs,
-      }
-    });
+    packingSaveLock.current = true;
+    setIsSavingPacking(true);
+    try {
+      await onUpdateJobCard(jCard.jobCardNo, {
+        customRoutedToStore: (jCard.customRoutedToStore || 0) + sentToStore,
+        packingDetails: {
+          packedQty: totalPackedIncludingCurrent,
+          boxCount: (prevPacking?.boxCount || 0) + packingRollup.boxCount,
+          packingType: packStyle,
+          rejectionQty: packingRejectionTotal,
+          qtyReceivedFromPlating: acceptedInbound || prevPacking?.qtyReceivedFromPlating || receivedFromPlating,
+          qtySentToStore: totalPackedIncludingCurrent,
+          qtyRemaining: remainingQty,
+          pcsPerBagOrBox: packingRollup.pcsPerBagOrBox || packingLines[0]?.pcsPerBag || packPcsPerBagOrBox,
+          totalPcs: (prevPacking?.totalPcs || 0) + packingRollup.totalPcs,
+          bagLines: [...(prevPacking?.bagLines || []), ...packingRollup.bagLines],
+        }
+      });
 
-    onCreateMovement(attachProcess2MovementContract({
-      jobCardNo: jCard.jobCardNo,
-      fromDepartment: 'Packing',
-      toDepartment: 'Store',
-      quantity: sentToStore,
-      remarks: `Packed in ${packBoxCount} boxes (${packPcsPerBagOrBox} pcs/box, Total: ${packTotalPcs} pcs). Quality verified. Recv from Plating: ${receivedFromPlating} ${unitLabel}, Sent to Store: ${sentToStore} ${unitLabel}, Rejections: ${packRejectionQty} ${unitLabel}, Remaining: ${remainingQty} ${unitLabel}.`
-    }, jCard));
+      await onCreateMovement(attachProcess2MovementContract({
+        jobCardNo: jCard.jobCardNo,
+        fromDepartment: 'Packing',
+        toDepartment: 'Store',
+        quantity: sentToStore,
+        remarks: packingLines.length === 1
+          ? `Packed ${packingLines[0].bags} × ${packingLines[0].pcsPerBag} = ${packingRollup.totalPcs} PCS. Quality verified. Recv from Plating: ${receivedFromPlating} ${unitLabel}, Sent to Store: ${sentToStore} ${unitLabel}, Rejections: ${packRejectionQty} ${unitLabel}, Remaining: ${remainingQty} ${unitLabel}.`
+          : `Packed mixed bags: ${packingLines.map(l => `${l.bags} × ${l.pcsPerBag} = ${l.lineTotal}`).join('; ')}. Grand Total = ${packingRollup.totalPcs} PCS. Recv from Plating: ${receivedFromPlating} ${unitLabel}, Sent to Store: ${sentToStore} ${unitLabel}.`
+      }, jCard));
 
-    setPackRejectionQty(0);
-    setPackQtyReceived(0);
-    setPackQtySentToStore(0);
-    setActivePackingJob(null);
+      setPackRejectionQty(0);
+      setPackQtyReceived(0);
+      setPackQtySentToStore(0);
+      setPackBagLines([{ bags: '5', pcsPerBag: '100' }]);
+      setPackBoxCount(5);
+      setPackPcsPerBagOrBox(100);
+      setPackTotalPcs(500);
+      setActivePackingJob(null);
+    } catch (err) {
+      console.error("Packing save failed; entry fields preserved.", err);
+    } finally {
+      packingSaveLock.current = false;
+      setIsSavingPacking(false);
+    }
   };
 
   const handleExecuteAssembly = () => {
@@ -1770,21 +1862,19 @@ Please adjust the quantity or request additional raw material issue.`);
   };
 
   const handleLocalAccept = async (mov: MaterialMovement) => {
-    // 1. Mark as animating
+    if (acceptLockRef.current[mov.movementId] || acceptedMovementIds[mov.movementId]) return;
+    acceptLockRef.current[mov.movementId] = true;
     setAcceptedMovementIds(prev => ({ ...prev, [mov.movementId]: 'animating' }));
-    
-    // 2. Play subtle vibration pattern if supported
+
     if (typeof navigator !== 'undefined' && navigator.vibrate) {
       try { navigator.vibrate(55); } catch (_) {}
     }
 
-    // 3. Delay to let acceptance animation play out before database update triggers deletion
-    setTimeout(async () => {
-      try {
+    try {
         if (activeDept === 'Store' || activeDept === 'Raw Material Store') {
           if (mov.fromDepartment === 'Purchase' && purchaseIncomingRouting[mov.movementId] === 'Packing') {
             await onAcceptMovement(mov.movementId);
-            onCreateMovement({
+            await onCreateMovement({
               jobCardNo: mov.jobCardNo,
               fromDepartment: 'Store',
               toDepartment: 'Packing',
@@ -1799,19 +1889,18 @@ Please adjust the quantity or request additional raw material issue.`);
         } else {
           await onAcceptMovement(mov.movementId);
         }
-        
-        // Mark as done
+
         setAcceptedMovementIds(prev => ({ ...prev, [mov.movementId]: 'done' }));
-      } catch (err) {
+    } catch (err) {
         console.error("Failed to accept movement:", err);
-        // Revert UI state on error so user can try again
         setAcceptedMovementIds(prev => {
           const updated = { ...prev };
           delete updated[mov.movementId];
           return updated;
         });
-      }
-    }, 1150); // Beautiful ~1.15 second animation window
+    } finally {
+      delete acceptLockRef.current[mov.movementId];
+    }
   };
 
   // --- FILTERED LISTS ---
@@ -3207,7 +3296,7 @@ Please adjust the quantity or request additional raw material issue.`);
               </h3>
             </div>
 
-            <form onSubmit={handleDirectPurchaseEntry} className="space-y-4 text-xs font-sans">
+            <form onSubmit={handleDirectPurchaseEntry} onKeyDown={onTallyFormKeyDown} className="space-y-4 text-xs font-sans">
               {/* Optional: Link Outsource Order Selector */}
               <div className="bg-purple-50/80 dark:bg-purple-950/40 border border-purple-200 dark:border-purple-800/80 rounded-xl p-3 space-y-2">
                 <div className="flex items-center justify-between">
@@ -3352,9 +3441,11 @@ Please adjust the quantity or request additional raw material issue.`);
                   </button>
                 </div>
                 <input
+                  ref={purchaseSupplierRef}
                   type="text"
                   placeholder="e.g. Jindal Steel Power"
                   required
+                  autoFocus
                   list="purchase-suppliers-list"
                   value={purchaseSupplier}
                   onChange={e => setPurchaseSupplier(e.target.value)}
@@ -3385,6 +3476,20 @@ Please adjust the quantity or request additional raw material issue.`);
                     </span>
                   )}
                 </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-400 font-semibold mb-1">Bill / Invoice / Challan No. *</label>
+                <input
+                  ref={purchaseBillRef}
+                  type="text"
+                  required
+                  placeholder="Supplier bill / invoice / challan number"
+                  value={purchaseBill}
+                  onChange={e => setPurchaseBill(e.target.value)}
+                  className="w-full bg-slate-50 dark:bg-slate-855 border border-slate-200 dark:border-slate-755 rounded-lg px-4 py-3.5 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6] font-mono font-bold"
+                />
+                <p className="mt-1 text-[10px] text-slate-500">Required. Duplicate supplier + bill + item receipts are rejected by the server.</p>
               </div>
 
               {/* Box container for Item details to highlight multi-add capability */}
@@ -3804,9 +3909,10 @@ Please adjust the quantity or request additional raw material issue.`);
 
               <button
                 type="submit"
-                className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 rounded-lg shadow-md transition-all uppercase tracking-wide font-mono text-xs border border-emerald-700 cursor-pointer"
+                disabled={isSavingPurchase}
+                className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white font-semibold py-3 rounded-lg shadow-md transition-all uppercase tracking-wide font-mono text-xs border border-emerald-700 cursor-pointer"
               >
-                {purchaseMultiItems.length > 0 ? `Save Purchase Entry (${purchaseMultiItems.length} Items)` : 'Save Single Purchase Entry'}
+                {isSavingPurchase ? 'Saving…' : (purchaseMultiItems.length > 0 ? `Save Purchase Entry (${purchaseMultiItems.length} Items)` : 'Save Single Purchase Entry')}
               </button>
             </form>
           </div>
@@ -6224,10 +6330,22 @@ Please adjust the quantity or request additional raw material issue.`);
                                       setPackQtyReceived(pendingPackingQty);
                                       setPackQtySentToStore(pendingPackingQty);
                                       setPackQty(pendingPackingQty);
-                                      setPackBoxCount(job.packingDetails?.boxCount || 5);
+                                      const existingLines = job.packingDetails?.bagLines;
+                                      if (existingLines && existingLines.length > 0) {
+                                        setPackBagLines(existingLines.map(l => ({ bags: String(l.bags), pcsPerBag: String(l.pcsPerBag) })));
+                                        setPackBoxCount(existingLines.reduce((s, l) => s + l.bags, 0) || 5);
+                                        setPackPcsPerBagOrBox(existingLines[0].pcsPerBag || 100);
+                                        setPackTotalPcs(existingLines.reduce((s, l) => s + l.lineTotal, 0));
+                                      } else {
+                                        const boxes = job.packingDetails?.boxCount || 5;
+                                        const pcs = job.packingDetails?.pcsPerBagOrBox || 100;
+                                        setPackBagLines([{ bags: String(boxes), pcsPerBag: String(pcs) }]);
+                                        setPackBoxCount(boxes);
+                                        setPackStyle(job.packingDetails?.packingType || 'Corrugated Boxes with wooden pallet support');
+                                        setPackPcsPerBagOrBox(pcs);
+                                        setPackTotalPcs(job.packingDetails?.totalPcs || boxes * pcs);
+                                      }
                                       setPackStyle(job.packingDetails?.packingType || 'Corrugated Boxes with wooden pallet support');
-                                      setPackPcsPerBagOrBox(job.packingDetails?.pcsPerBagOrBox || 100);
-                                      setPackTotalPcs(job.packingDetails?.totalPcs || (job.packingDetails?.boxCount || 5) * (job.packingDetails?.pcsPerBagOrBox || 100));
                                     }
                                   } else if (activeDept === 'Store') {
                                     setActiveStoreJob(isProcessing ? null : job.jobCardNo);
@@ -6571,53 +6689,76 @@ Please adjust the quantity or request additional raw material issue.`);
 
                             {activeDept === 'Packing' && (
                               <div className="space-y-4">
+                                <div className="space-y-2">
+                                  <div className="flex items-center justify-between">
+                                    <label className="block text-slate-500 font-bold uppercase text-[9.5px] tracking-wider">No. of Bags × Quantity per Bag = Total</label>
+                                    <button
+                                      type="button"
+                                      onClick={() => setPackBagLines(prev => [...prev, { bags: '', pcsPerBag: '' }])}
+                                      className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded cursor-pointer"
+                                    >
+                                      + Add Bag Type/Row
+                                    </button>
+                                  </div>
+                                  {packBagLines.map((row, idx) => {
+                                    const bags = Number(row.bags) || 0;
+                                    const pcs = Number(row.pcsPerBag) || 0;
+                                    const lineTotal = lineTotalBagsTimesPcs(bags, pcs) || 0;
+                                    return (
+                                      <div key={idx} className="grid grid-cols-12 gap-2 items-end">
+                                        <div className="col-span-3">
+                                          <label className="block text-slate-400 uppercase text-[8px] mb-0.5">Bags</label>
+                                          <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            autoFocus={idx === 0}
+                                            value={row.bags}
+                                            onChange={e => {
+                                              const clean = e.target.value.replace(/\D/g, '');
+                                              setPackBagLines(prev => prev.map((r, i) => i === idx ? { ...r, bags: clean } : r));
+                                            }}
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 rounded p-1.5 font-semibold text-slate-800 dark:text-slate-100 focus:outline-none"
+                                          />
+                                        </div>
+                                        <div className="col-span-1 text-center text-slate-400 font-bold pb-1.5">×</div>
+                                        <div className="col-span-3">
+                                          <label className="block text-slate-400 uppercase text-[8px] mb-0.5">Qty / Bag</label>
+                                          <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            value={row.pcsPerBag}
+                                            onChange={e => {
+                                              const clean = e.target.value.replace(/\D/g, '');
+                                              setPackBagLines(prev => prev.map((r, i) => i === idx ? { ...r, pcsPerBag: clean } : r));
+                                            }}
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-200 rounded p-1.5 font-mono font-bold text-slate-800 dark:text-slate-100 focus:outline-none"
+                                          />
+                                        </div>
+                                        <div className="col-span-1 text-center text-slate-400 font-bold pb-1.5">=</div>
+                                        <div className="col-span-3">
+                                          <label className="block text-indigo-600 uppercase text-[8px] mb-0.5">Row total</label>
+                                          <div className="p-1.5 font-mono font-bold text-indigo-700">{lineTotal.toLocaleString()} PCS</div>
+                                        </div>
+                                        <div className="col-span-1 pb-1.5">
+                                          {packBagLines.length > 1 && (
+                                            <button
+                                              type="button"
+                                              onClick={() => setPackBagLines(prev => prev.filter((_, i) => i !== idx))}
+                                              className="text-rose-500 text-[10px] font-bold cursor-pointer"
+                                            >
+                                              ×
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                  <div className="flex justify-between items-center bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 rounded px-2 py-1.5">
+                                    <span className="text-[10px] font-bold uppercase text-indigo-700">Grand Total</span>
+                                    <span className="font-mono font-bold text-indigo-800">{packingGrandTotal.toLocaleString()} PCS</span>
+                                  </div>
+                                </div>
                                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                  <div>
-                                    <label className="block text-slate-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Total Boxes count</label>
-                                    <input
-                                      type="text"
-                                      inputMode="numeric"
-                                      pattern="[0-9]*"
-                                      value={packBoxCount}
-                                      onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const count = Math.max(0, parseInt(clean, 10) || 0);
-                                        setPackBoxCount(count);
-                                        setPackTotalPcs(count * packPcsPerBagOrBox);
-                                      }}
-                                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 rounded p-1.5 font-semibold text-slate-800 dark:text-slate-100 focus:outline-none"
-                                    />
-                                  </div>
-                                  <div>
-                                    <label className="block text-slate-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Pcs per Box</label>
-                                    <input
-                                      type="text"
-                                      inputMode="numeric"
-                                      pattern="[0-9]*"
-                                      value={packPcsPerBagOrBox}
-                                      onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        const pcs = Math.max(0, parseInt(clean, 10) || 0);
-                                        setPackPcsPerBagOrBox(pcs);
-                                        setPackTotalPcs(packBoxCount * pcs);
-                                      }}
-                                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 rounded p-1.5 font-mono font-bold text-slate-800 dark:text-slate-100 focus:outline-none"
-                                    />
-                                  </div>
-                                  <div>
-                                    <label className="block text-indigo-600 font-bold uppercase text-[9.5px] tracking-wider mb-1">Total Pieces</label>
-                                    <input
-                                      type="text"
-                                      inputMode="numeric"
-                                      pattern="[0-9]*"
-                                      value={packTotalPcs}
-                                      onChange={e => {
-                                        const clean = e.target.value.replace(/\D/g, '');
-                                        setPackTotalPcs(Math.max(0, parseInt(clean, 10) || 0));
-                                      }}
-                                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 rounded p-1.5 font-mono font-bold text-indigo-700 dark:text-indigo-400 focus:outline-none"
-                                    />
-                                  </div>
                                   <div>
                                     <label className="block text-rose-500 font-bold uppercase text-[9.5px] tracking-wider mb-1">Packing Rejection (KG)</label>
                                     <input
@@ -6693,9 +6834,10 @@ Please adjust the quantity or request additional raw material issue.`);
                                   <button
                                     type="button"
                                     onClick={() => handleCompletePacking(job)}
-                                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded text-xs uppercase cursor-pointer"
+                                    disabled={isSavingPacking}
+                                    className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold py-2 px-4 rounded text-xs uppercase cursor-pointer"
                                   >
-                                    Box completed cargos & Route
+                                    {isSavingPacking ? 'Saving…' : 'Box completed cargos & Route'}
                                   </button>
                                 </div>
                               </div>
@@ -6704,10 +6846,19 @@ Please adjust the quantity or request additional raw material issue.`);
                             {activeDept === 'Store' && (
                               <div className="space-y-4">
                                 {job.packingDetails && (
-                                  <div className="bg-pink-50/20 dark:bg-pink-950/5 p-2.5 rounded border border-pink-100/50 grid grid-cols-3 gap-2 font-mono text-[10.5px]">
+                                  <div className="bg-pink-50/20 dark:bg-pink-950/5 p-2.5 rounded border border-pink-100/50 space-y-2 font-mono text-[10.5px]">
+                                    <div className="grid grid-cols-3 gap-2">
                                     <div><span className="text-pink-500 block text-[9px] uppercase">Boxes:</span> <strong>{job.packingDetails.boxCount || 0} boxes</strong></div>
-                                    <div><span className="text-pink-500 block text-[9px] uppercase">Pcs per Box:</span> <strong>{job.packingDetails.pcsPerBagOrBox || 0} pcs</strong></div>
+                                    <div><span className="text-pink-500 block text-[9px] uppercase">Pcs per Box:</span> <strong>{job.packingDetails.pcsPerBagOrBox || (job.packingDetails.bagLines && job.packingDetails.bagLines.length > 1 ? 'mixed' : 0)}</strong></div>
                                     <div><span className="text-pink-500 block text-[9px] uppercase">Total Pieces:</span> <strong>{(job.packingDetails.totalPcs || 0).toLocaleString()} pcs</strong></div>
+                                    </div>
+                                    {job.packingDetails.bagLines && job.packingDetails.bagLines.length > 0 && (
+                                      <div className="text-[10px] text-slate-600 space-y-0.5">
+                                        {job.packingDetails.bagLines.map((line, i) => (
+                                          <div key={i}>{line.bags.toLocaleString()} × {line.pcsPerBag.toLocaleString()} = {line.lineTotal.toLocaleString()} PCS</div>
+                                        ))}
+                                      </div>
+                                    )}
                                   </div>
                                 )}
 
