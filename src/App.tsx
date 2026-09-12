@@ -1573,6 +1573,9 @@ export default function App() {
     const cap = process2SendAvailableQty(mov.fromDepartment, job, movements, {
       compulsory: companyConfig?.requireRawMaterialForProduction !== false
     });
+    if (mov.isIssueRequest && mov.processDetails?.isOtherRawMaterialIssue) {
+      return;
+    }
     if (cap !== null && Number(mov.quantity) > cap) {
       throw new Error(`Cannot transfer ${mov.quantity}. Only ${cap} is available in ${mov.fromDepartment}.`);
     }
@@ -1660,6 +1663,7 @@ export default function App() {
             }
           }
         );
+        return created;
       }
     } catch (err: any) {
       console.error("Failed to transfer material", err);

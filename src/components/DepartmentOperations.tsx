@@ -37,6 +37,15 @@ import {
 import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer, RawMaterialKind } from '../types';
 import { DBService } from '../lib/firebase';
 import RawMaterialRequestModal, { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
+import IssueOtherRawMaterialModal from './IssueOtherRawMaterialModal';
+import {
+  addOtherRawMaterialRow,
+  getAcceptedOtherRawMaterialIssuedQty,
+  netProductionQty,
+  otherRawMaterialRowsOptionalValid,
+  removeOtherRawMaterialRow,
+  totalRawMaterialWeight
+} from '../hardening/process248OtherRawMaterial';
 import {
   resolveInitialPurchaseRoute,
   buildPurchaseMovementContract,
@@ -103,7 +112,8 @@ interface DepartmentOperationsProps {
     requestedUnit?: 'PCS' | 'KGS';
     requestedQty?: number;
     processDetails?: any;
-  }[]) => void | Promise<void>;
+    unit?: 'KGS' | 'PCS' | 'KG';
+  }[]) => void | Promise<any>;
   onAcceptMovement: (
     movementId: string, 
     remarks?: string, 
@@ -504,6 +514,8 @@ export default function DepartmentOperations({
   const [rawIssueRejectionNotes, setRawIssueRejectionNotes] = useState<string>('');
   const [showRawMaterialRequestModal, setShowRawMaterialRequestModal] = useState<boolean>(false);
   const [selectedJobCardForRMRequest, setSelectedJobCardForRMRequest] = useState<string | null>(null);
+  const [showIssueOtherRmModal, setShowIssueOtherRmModal] = useState(false);
+  const [otherRmRows, setOtherRmRows] = useState<Array<{ id: string; materialCode: string; quantity: number; unit: string }>>([]);
 
   // Direct Wire Rejection in Raw Material Store state
   const [showWireRejectionModal, setShowWireRejectionModal] = useState<boolean>(false);
@@ -677,6 +689,38 @@ export default function DepartmentOperations({
         availableStock: request.availableStock
       } as any
     } as any);
+  };
+
+  const handleIssueOtherRawMaterial = async (request: {
+    jobCardNo: string;
+    rawMaterialCode: string;
+    rawMaterialName: string;
+    quantity: number;
+    unit: string;
+  }) => {
+    const created: any = await onCreateMovement({
+      jobCardNo: request.jobCardNo,
+      fromDepartment: 'Incoming Store',
+      toDepartment: 'Production',
+      quantity: request.quantity,
+      unit: request.unit === 'PCS' ? 'PCS' : 'KGS',
+      remarks: `Other Raw Material issued: ${request.rawMaterialName} (${request.rawMaterialCode}) ${request.quantity} ${request.unit}`,
+      isIssueRequest: true,
+      requestedQty: request.quantity,
+      requestedUnit: request.unit === 'PCS' ? 'PCS' : 'KGS',
+      processDetails: {
+        isOtherRawMaterialIssue: true,
+        isWire: false,
+        rawMaterialKind: 'Other',
+        rawMaterialCode: request.rawMaterialCode,
+        rawMaterialName: request.rawMaterialName,
+        unit: request.unit,
+        requestedBy: currentUser?.name || 'Incoming Store'
+      }
+    } as any);
+    if (created?.movementId) {
+      await onAcceptMovement(created.movementId, 'Issued Other Raw Material from Incoming Store', { issueStatus: 'Issued' });
+    }
   };
 
   // --- ACTIONS ---
@@ -4128,6 +4172,13 @@ Please adjust the quantity or request additional raw material issue.`);
                     </p>
                   </div>
                   <div className="flex items-center gap-2 self-start sm:self-auto shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setShowIssueOtherRmModal(true)}
+                      className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-extrabold uppercase tracking-wider cursor-pointer"
+                    >
+                      Issue Other Raw Material
+                    </button>
                     <span className="text-xs font-bold px-2.5 py-1 rounded-xl bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-800 flex items-center gap-1.5">
                       <Box className="h-3.5 w-3.5" />
                       {jobCards.filter(isHeldInIncomingStore).length} Stored Items
@@ -6312,6 +6363,7 @@ Please adjust the quantity or request additional raw material issue.`);
                                   } else if (activeDept === 'Production') {
                                     setActiveProdJob(isProcessing ? null : job.jobCardNo);
                                     setProdQty(pendingProdQty);
+                                    if (!isProcessing) setOtherRmRows([]);
                                   } else if (activeDept === 'Heat Treatment') {
                                     setActiveHtJob(isProcessing ? null : job.jobCardNo);
                                     if (!isProcessing) {
@@ -6468,6 +6520,87 @@ Please adjust the quantity or request additional raw material issue.`);
                                     <span className="font-mono text-[9.5px] text-amber-600 dark:text-amber-400">Total Scrap Cumulative</span>
                                   </div>
                                 )}
+                                {(() => {
+                                  const wireAccepted = getAcceptedRawMaterialIssuedQty(job, movements) - getAcceptedOtherRawMaterialIssuedQty(job, movements);
+                                  const otherAccepted = getAcceptedOtherRawMaterialIssuedQty(job, movements);
+                                  const totalRm = totalRawMaterialWeight([wireAccepted, otherAccepted]);
+                                  const net = netProductionQty(totalRm, prodWireScrap + getWireScrapQty(job, movements));
+                                  const optionalOk = otherRawMaterialRowsOptionalValid(otherRmRows);
+                                  void optionalOk;
+                                  return (
+                                    <div className="p-3 bg-white dark:bg-slate-950 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 space-y-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">Other Raw Materials</span>
+                                        <span className="text-[10px] text-slate-400">Optional — not compulsory</span>
+                                      </div>
+                                      <p className="text-[10px] text-slate-500">
+                                        Issued to this Job Card: Wire {wireAccepted} KG
+                                        {otherAccepted > 0 ? ` + Other RM ${otherAccepted} KG` : ''}. Total {totalRm} KG. Net after scrap {net} KG.
+                                      </p>
+                                      {otherRmRows.map((row) => (
+                                        <div key={row.id} className="grid grid-cols-12 gap-2 items-end">
+                                          <label className="col-span-5 text-[9px] font-bold uppercase text-slate-400">
+                                            Material
+                                            <input
+                                              type="text"
+                                              value={row.materialCode}
+                                              onChange={(e) =>
+                                                setOtherRmRows((prev) =>
+                                                  prev.map((r) => (r.id === row.id ? { ...r, materialCode: e.target.value } : r))
+                                                )
+                                              }
+                                              placeholder="e.g. Plain Washer"
+                                              className="mt-0.5 w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-1.5 text-xs"
+                                            />
+                                          </label>
+                                          <label className="col-span-3 text-[9px] font-bold uppercase text-slate-400">
+                                            Quantity
+                                            <input
+                                              type="text"
+                                              inputMode="decimal"
+                                              value={row.quantity || ''}
+                                              onChange={(e) =>
+                                                setOtherRmRows((prev) =>
+                                                  prev.map((r) =>
+                                                    r.id === row.id ? { ...r, quantity: Number(e.target.value.replace(/[^\d.]/g, '')) || 0 } : r
+                                                  )
+                                                )
+                                              }
+                                              className="mt-0.5 w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-1.5 font-mono text-xs"
+                                            />
+                                          </label>
+                                          <label className="col-span-2 text-[9px] font-bold uppercase text-slate-400">
+                                            Unit
+                                            <input
+                                              type="text"
+                                              value={row.unit}
+                                              onChange={(e) =>
+                                                setOtherRmRows((prev) =>
+                                                  prev.map((r) => (r.id === row.id ? { ...r, unit: e.target.value } : r))
+                                                )
+                                              }
+                                              className="mt-0.5 w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-1.5 text-xs"
+                                            />
+                                          </label>
+                                          <button
+                                            type="button"
+                                            onClick={() => setOtherRmRows((prev) => removeOtherRawMaterialRow(prev, row.id))}
+                                            className="col-span-2 text-[10px] font-bold text-rose-600 cursor-pointer"
+                                          >
+                                            Remove
+                                          </button>
+                                        </div>
+                                      ))}
+                                      <button
+                                        type="button"
+                                        onClick={() => setOtherRmRows((prev) => addOtherRawMaterialRow(prev, { unit: 'KG' }))}
+                                        className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-[10px] font-extrabold uppercase tracking-wider cursor-pointer"
+                                      >
+                                        + Add Other Raw Material
+                                      </button>
+                                    </div>
+                                  );
+                                })()}
                                 <div className="p-3 bg-indigo-50/40 dark:bg-slate-950/20 rounded-lg text-[10.5px] text-slate-600 dark:text-slate-400 border border-indigo-100/35 leading-relaxed">
                                   <strong>Business Routing Rule:</strong> {job.heatTreatmentRequired 
                                     ? '⚠️ Heat Treatment is Required. Completing this step immediately transfers this job to the Furnace line queue.' 
@@ -7662,6 +7795,15 @@ Please adjust the quantity or request additional raw material issue.`);
         onSubmit={handleRawMaterialModalSubmit}
         movements={movements}
         initialJobCardNo={selectedJobCardForRMRequest || undefined}
+      />
+
+      <IssueOtherRawMaterialModal
+        isOpen={showIssueOtherRmModal}
+        onClose={() => setShowIssueOtherRmModal(false)}
+        jobCards={jobCards}
+        movements={movements}
+        currentUser={currentUser}
+        onIssue={handleIssueOtherRawMaterial}
       />
 
       {/* Multi-Item Assembly Modal for Packing Department */}
