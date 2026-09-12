@@ -124,7 +124,7 @@ async function startServer() {
       res.setHeader("Access-Control-Allow-Origin", "*");
     }
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Operation-Id");
     res.setHeader("Access-Control-Max-Age", "86400");
     if (req.method === "OPTIONS") {
       return res.sendStatus(200);
@@ -3373,14 +3373,16 @@ async function startServer() {
       if (collection === "mfr_movements") {
         inMemoryMovements.set(id, data);
         if (data?.movementId) inMemoryMovements.set(data.movementId, data);
-        broadcastRealtimeEvent("MOVEMENT_UPDATED", { movementId: data?.movementId || id, jobCardNo: data?.jobCardNo });
-        if (data?.jobCardNo) broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: data.jobCardNo });
-        broadcastRealtimeEvent("NOTIFICATION_UPDATED", {});
+        broadcastRealtimeEvent("MOVEMENT_UPDATED", {
+          movementId: data?.movementId || id,
+          jobCardNo: data?.jobCardNo,
+          movement: data
+        });
       }
       if (collection === "mfr_job_cards") {
         inMemoryJobCards.set(String(id).toUpperCase(), data);
         if (data?.jobCardNo) inMemoryJobCards.set(String(data.jobCardNo).toUpperCase(), data);
-        broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: data?.jobCardNo || id });
+        broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: data?.jobCardNo || id, jobCard: data });
       }
     }
   });

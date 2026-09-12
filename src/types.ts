@@ -254,6 +254,8 @@ export interface JobCard {
     qtyRemaining?: number;
     pcsPerBagOrBox?: number;
     totalPcs?: number;
+    /** Mixed bag sizes for the same item/job card. Rollup fields stay for print/QR. */
+    bagLines?: Array<{ bags: number; pcsPerBag: number; lineTotal: number }>;
     isAssemblyProduct?: boolean;
     assemblyComponents?: AssemblyComponent[];
     assemblyHistory?: AssemblyRecord[];

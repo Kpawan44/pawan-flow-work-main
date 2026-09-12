@@ -42,9 +42,10 @@ export function mountLedgerRoutes(app: Express, ctx: LedgerHttpContext): void {
           error: "Supplier receipts cannot be created from the client movement API."
         });
       }
+      const headerOp = String(req.get("x-operation-id") || "").trim();
       const opResolved = resolveCreateMovementOperationId({
         ...bodyData,
-        operationId: bodyData.operationId || req.body?.operationId
+        operationId: bodyData.operationId || req.body?.operationId || headerOp
       });
       if (!opResolved.ok) {
         return res.status(400).json({ success: false, error: opResolved.error });
@@ -104,8 +105,9 @@ export function mountLedgerRoutes(app: Express, ctx: LedgerHttpContext): void {
       if (!movementId) return res.status(400).json({ success: false, error: "Movement ID is required." });
       const qty = acceptQty !== undefined ? Number(acceptQty) : quantity !== undefined ? Number(quantity) : undefined;
       const compulsory = await ctx.getRmCompulsory();
+      const headerOp = String(req.get("x-operation-id") || "").trim();
       const result = await acceptMaterialMovementTx(ctx.getStore(), {
-        operationId: String(operationId || defaultAcceptOperationId(movementId, qty)).trim(),
+        operationId: String(operationId || headerOp || defaultAcceptOperationId(movementId, qty)).trim(),
         movementId,
         acceptQty: qty,
         remarks,
@@ -130,8 +132,9 @@ export function mountLedgerRoutes(app: Express, ctx: LedgerHttpContext): void {
       const { remarks, rejectedQty, acceptedQty, operationId } = req.body || {};
       if (!actor) return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
       const compulsory = await ctx.getRmCompulsory();
+      const headerOp = String(req.get("x-operation-id") || "").trim();
       const result = await rejectMaterialMovementTx(ctx.getStore(), {
-        operationId: String(operationId || defaultRejectOperationId(movementId, rejectedQty, acceptedQty)).trim(),
+        operationId: String(operationId || headerOp || defaultRejectOperationId(movementId, rejectedQty, acceptedQty)).trim(),
         movementId,
         remarks: remarks || "",
         rejectedQty: rejectedQty !== undefined ? Number(rejectedQty) : undefined,
@@ -160,8 +163,9 @@ export function mountLedgerRoutes(app: Express, ctx: LedgerHttpContext): void {
       const { remarks, operationId } = req.body || {};
       if (!actor) return res.status(401).json({ success: false, error: "Unauthorized: Missing user profile." });
       const compulsory = await ctx.getRmCompulsory();
+      const headerOp = String(req.get("x-operation-id") || "").trim();
       const result = await undoMaterialMovementTx(ctx.getStore(), {
-        operationId: String(operationId || `op-undo-${movementId}`).trim(),
+        operationId: String(operationId || headerOp || `op-undo-${movementId}`).trim(),
         movementId,
         remarks,
         requireRawMaterialForProduction: compulsory,

@@ -310,6 +310,8 @@ export default function App() {
   const mainTouchStartY = useRef<number>(0);
   const mainTouchCurrentX = useRef<number>(0);
   const mainIsSwiping = useRef<boolean>(false);
+  const createMovementInFlight = useRef(false);
+  const acceptInFlightIds = useRef<Set<string>>(new Set());
 
   const handleMainTouchStart = (e: React.TouchEvent) => {
     if (window.innerWidth >= 1024) return;
@@ -808,6 +810,45 @@ export default function App() {
     }
   };
 
+  const syncLedgerFromMemCache = () => {
+    const jc = DBService.getFromMemCache<JobCard[]>('mfr_job_cards');
+    const mov = DBService.getFromMemCache<MaterialMovement[]>('mfr_movements');
+    if (Array.isArray(jc)) {
+      setJobCards(jc);
+      setSelectedJob(prev => {
+        if (!prev) return null;
+        return jc.find(j => j.jobCardNo.toLowerCase() === prev.jobCardNo.toLowerCase()) || prev;
+      });
+    }
+    if (Array.isArray(mov)) setMovements(mov);
+  };
+
+  const applySseLedgerPatch = (payload: any): boolean => {
+    const movement = payload?.movement;
+    const jobCard = payload?.jobCard;
+    if (!movement && !jobCard) return false;
+    DBService.patchLedgerCaches({ movement, jobCard });
+    syncLedgerFromMemCache();
+    return true;
+  };
+
+  const refreshLedgerCollections = async () => {
+    try {
+      const [jc, mov] = await Promise.all([
+        DBService.getJobCards(true),
+        DBService.getMovements(true)
+      ]);
+      setJobCards(jc);
+      setMovements(mov);
+      setSelectedJob(prev => {
+        if (!prev) return null;
+        return jc.find(j => j.jobCardNo.toLowerCase() === prev.jobCardNo.toLowerCase()) || prev;
+      });
+    } catch (err) {
+      console.error("Failed to refresh ledger collections", err);
+    }
+  };
+
   // System generation check and cache invalidation
   const checkSystemGeneration = async () => {
     try {
@@ -1001,17 +1042,20 @@ export default function App() {
 
     // Attach live Server-Sent Events stream for instant cross-device updates (< 50ms)
     const unsubSSE = DBService.subscribeToRealtimeEvents((event) => {
+      const payload = event.payload || event.data || {};
       if (event.type === 'USER_UPDATED') {
         DBService.invalidateCache('mfr_users');
         refreshUsers(true, 'sse_event');
       } else if (event.type === 'MOVEMENT_UPDATED' || event.type === 'DATA_SYNCED') {
+        if (applySseLedgerPatch(payload)) return;
         DBService.invalidateCache('mfr_movements');
         DBService.invalidateCache('mfr_job_cards');
-        refreshAllStates();
+        refreshLedgerCollections();
       } else if (event.type === 'JOB_UPDATED') {
+        if (applySseLedgerPatch(payload)) return;
         DBService.invalidateCache('mfr_job_cards');
         DBService.invalidateCache('mfr_movements');
-        refreshAllStates();
+        refreshLedgerCollections();
       } else if (event.type === 'NOTIFICATION_UPDATED') {
         refreshNotifications();
       } else if (event.type === 'ALL_UPDATED') {
@@ -1036,7 +1080,7 @@ export default function App() {
   useEffect(() => {
     if (!autoRefreshEnabled) return;
     const interval = setInterval(() => {
-      refreshAllStates();
+      refreshLedgerCollections();
     }, 60000);
     return () => clearInterval(interval);
   }, [autoRefreshEnabled]);
@@ -1446,10 +1490,11 @@ export default function App() {
         console.log("Job card created:", newCard);
         showToast(`Job Card successfully created!`, "success");
       }
-      refreshAllStates();
+      syncLedgerFromMemCache();
     } catch (err: any) {
       console.error("Failed to create job card(s)", err);
       showToast(`Failed to create Job Card(s): ${err instanceof Error ? err.message : String(err)}`, "error");
+      throw err;
     }
   };
 
@@ -1477,14 +1522,15 @@ export default function App() {
           currentData: result.currentData
         });
         showToast(`⚠️ Conflict Detected: Job Card ${jobCardNo} was modified by another user.`, "error");
-        await refreshAllStates();
+        await refreshLedgerCollections();
         return;
       }
 
-      refreshAllStates();
+      syncLedgerFromMemCache();
     } catch (err: any) {
       console.error("Failed to update job card", err);
       showToast(`Failed to update Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
+      throw err;
     }
   };
 
@@ -1559,6 +1605,8 @@ export default function App() {
 
   const handleCreateMovement = async (movOrMovs: any) => {
     if (!currentUser) return;
+    if (createMovementInFlight.current) return;
+    createMovementInFlight.current = true;
     try {
       if (Array.isArray(movOrMovs)) {
         const createdMovs: MaterialMovement[] = [];
@@ -1568,7 +1616,7 @@ export default function App() {
           const created = await DBService.createMovement(mov, currentUser.userId, currentUser.name);
           createdMovs.push(created);
         }
-        refreshAllStates();
+        syncLedgerFromMemCache();
         dispatchWhatsAppForMovements(createdMovs);
         showToast(
           `Successfully registered ${movOrMovs.length} material movements!`, 
@@ -1580,7 +1628,7 @@ export default function App() {
                 for (const mov of createdMovs) {
                   await DBService.revertMovement(mov.movementId, currentUser.userId, currentUser.name);
                 }
-                refreshAllStates();
+                syncLedgerFromMemCache();
                 showToast(`Undone ${createdMovs.length} material transfers!`, "info");
               } catch (err: any) {
                 console.error("Failed to undo transfers", err);
@@ -1593,7 +1641,7 @@ export default function App() {
         ensureClientMovementOperationId(movOrMovs);
         validateMovementProductionLimit(movOrMovs);
         const created = await DBService.createMovement(movOrMovs, currentUser.userId, currentUser.name);
-        refreshAllStates();
+        syncLedgerFromMemCache();
         dispatchWhatsAppForMovements([created]);
         showToast(
           `Successfully transferred ${movOrMovs.quantity} KG of ${movOrMovs.jobCardNo} from ${movOrMovs.fromDepartment} to ${movOrMovs.toDepartment}!`, 
@@ -1603,7 +1651,7 @@ export default function App() {
             onClick: async () => {
               try {
                 await DBService.revertMovement(created.movementId, currentUser.userId, currentUser.name);
-                refreshAllStates();
+                syncLedgerFromMemCache();
                 showToast(`Material transfer ${created.movementId} for ${created.jobCardNo} was undone!`, "info");
               } catch (err: any) {
                 console.error("Failed to undo transfer", err);
@@ -1617,6 +1665,8 @@ export default function App() {
       console.error("Failed to transfer material", err);
       showToast(`Failed to transfer material: ${err instanceof Error ? err.message : String(err)}`, "error");
       throw err;
+    } finally {
+      createMovementInFlight.current = false;
     }
   };
 
@@ -1739,13 +1789,18 @@ export default function App() {
     extraFields?: { allottedLocation?: string; rackNo?: string; quantity?: number; issueStatus?: 'Issued' | 'Rejected' }
   ) => {
     if (!currentUser) return;
+    if (acceptInFlightIds.current.has(movementId)) return;
+    acceptInFlightIds.current.add(movementId);
     try {
       await DBService.acceptMovement(movementId, currentUser.userId, currentUser.name, remarks, extraFields);
 
-      refreshAllStates();
+      syncLedgerFromMemCache();
     } catch (err: any) {
       console.error("Failed to accept movement", err);
       showToast(`Failed to accept material transfer: ${err instanceof Error ? err.message : String(err)}`, "error");
+      throw err;
+    } finally {
+      acceptInFlightIds.current.delete(movementId);
     }
   };
 
@@ -1757,7 +1812,7 @@ export default function App() {
     if (!currentUser) return;
     try {
       await DBService.rejectMovement(movementId, currentUser.userId, currentUser.name, remarks, extra);
-      refreshAllStates();
+      syncLedgerFromMemCache();
     } catch (err: any) {
       console.error("Failed to reject movement", err);
       showToast(`Failed to reject material transfer: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -2949,6 +3004,7 @@ export default function App() {
                         placeholder="Search across Job Cards, Movement Refs, Party, Item, Operator..."
                         value={allOrdersSearch}
                         onChange={(e) => setAllOrdersSearch(e.target.value)}
+                        autoFocus
                         className="bg-slate-50 dark:bg-slate-850 pl-9 pr-8 py-2 text-xs rounded-xl border border-slate-200 dark:border-slate-750 w-full focus:outline-none focus:border-amber-500 text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
                       />
                       {allOrdersSearch && (

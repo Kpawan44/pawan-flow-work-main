@@ -905,7 +905,15 @@ export default function JobCardDetailsModal({
                        <p>• Packed Weight: {jobCard.packingDetails.packedQty || jobCard.currentQty} KG</p>
                        <p>• Box Count: {jobCard.packingDetails.boxCount || 'N/A'}</p>
                        {jobCard.packingDetails.pcsPerBagOrBox !== undefined && (
-                         <p>• Pcs in Bag/Box: {jobCard.packingDetails.pcsPerBagOrBox} pcs</p>
+                         <p>• Pcs in Bag/Box: {jobCard.packingDetails.pcsPerBagOrBox || (jobCard.packingDetails.bagLines && jobCard.packingDetails.bagLines.length > 1 ? 'mixed sizes' : 'N/A')}</p>
+                       )}
+                       {jobCard.packingDetails.bagLines && jobCard.packingDetails.bagLines.length > 0 && (
+                         <div>
+                           {jobCard.packingDetails.bagLines.map((line, i) => (
+                             <p key={i}>• {line.bags.toLocaleString()} × {line.pcsPerBag.toLocaleString()} = {line.lineTotal.toLocaleString()} PCS</p>
+                           ))}
+                           <p>• Grand Total = {(jobCard.packingDetails.totalPcs || 0).toLocaleString()} PCS</p>
+                         </div>
                        )}
                        {jobCard.packingDetails.totalPcs !== undefined && (
                          <p>• Total Pieces (Pcs): {jobCard.packingDetails.totalPcs.toLocaleString()} pcs</p>
