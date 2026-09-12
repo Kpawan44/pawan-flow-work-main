@@ -26,6 +26,7 @@ import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
 import { verifyBatchManifestTx } from "./src/hardening/batchManifestScanner";
 import { createSubcontractChallanTx } from "./src/hardening/subcontractChallan";
+import { assertStoreProcessTransferUnit } from "./src/hardening/storePlatingKgOnly";
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
 
@@ -3898,6 +3899,10 @@ async function startServer() {
       if (toProcess !== "Repacking" && toProcess !== "Replating") {
         return res.status(400).json({ success: false, error: "Process destination must be either 'Repacking' or 'Replating'." });
       }
+      const processUnit = assertStoreProcessTransferUnit({ toProcess, unit });
+      if (processUnit.ok === false) {
+        return res.status(400).json({ success: false, error: processUnit.error });
+      }
 
       const now = new Date();
       const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
@@ -3925,7 +3930,7 @@ async function startServer() {
             material: material || "",
             currentLocation: currentLocation || "",
             quantity: Number(quantity),
-            unit: unit || "PCS",
+            unit: toProcess === "Replating" ? processUnit.unit : (unit || "PCS"),
             fromLocation: "Store",
             toProcess,
             status: initialStatus,
@@ -3964,7 +3969,7 @@ async function startServer() {
           material: material || "",
           currentLocation: currentLocation || "",
           quantity: Number(quantity),
-          unit: unit || "PCS",
+          unit: toProcess === "Replating" ? processUnit.unit : (unit || "PCS"),
           fromLocation: "Store",
           toProcess,
           status: initialStatus,

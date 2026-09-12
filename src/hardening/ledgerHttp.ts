@@ -74,6 +74,7 @@ export function mountLedgerRoutes(app: Express, ctx: LedgerHttpContext): void {
         dispatchGroupNo: bodyData.dispatchGroupNo,
         manifestId: bodyData.manifestId,
         extra: bodyData,
+        unit: bodyData.unit || bodyData.requestedUnit,
         requireRawMaterialForProduction: compulsory,
         actor
       });

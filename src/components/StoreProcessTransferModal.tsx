@@ -122,6 +122,7 @@ export default function StoreProcessTransferModal({
   const availableQty = activeItem ? activeItem.availableQty : 0;
   const remainingStoreBalance = Math.max(0, availableQty - parsedQty);
   const isOverAllocated = parsedQty > availableQty;
+  const quantityUnit = toProcess === 'Replating' ? 'KG' : (activeItem?.unit || 'PCS');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -132,11 +133,13 @@ export default function StoreProcessTransferModal({
       return;
     }
     if (parsedQty <= 0) {
-      setError('Transfer quantity must be greater than 0.');
+      setError(toProcess === 'Replating'
+        ? 'Transfer quantity must be greater than 0 KG.'
+        : 'Transfer quantity must be greater than 0.');
       return;
     }
     if (isOverAllocated) {
-      setError(`Cannot transfer ${parsedQty.toLocaleString()} ${activeItem.unit}. Available in Store is only ${availableQty.toLocaleString()} ${activeItem.unit}.`);
+      setError(`Cannot transfer ${parsedQty.toLocaleString()} ${quantityUnit}. Available in Store is only ${availableQty.toLocaleString()} ${quantityUnit}.`);
       return;
     }
     if (!toProcess) {
@@ -156,12 +159,12 @@ export default function StoreProcessTransferModal({
         material: activeItem.jobCard.materialType || 'Finished Goods',
         currentLocation: activeItem.location,
         quantity: parsedQty,
-        unit: activeItem.unit,
+        unit: toProcess === 'Replating' ? 'KGS' : activeItem.unit,
         toProcess,
         remarks: remarks.trim()
       });
 
-      setSuccess(`Successfully sent ${parsedQty.toLocaleString()} ${activeItem.unit} to ${toProcess}!`);
+      setSuccess(`Successfully sent ${parsedQty.toLocaleString()} ${toProcess === 'Replating' ? 'KG' : activeItem.unit} to ${toProcess}!`);
       setTimeout(() => {
         onClose();
       }, 900);
@@ -334,7 +337,10 @@ export default function StoreProcessTransferModal({
           {/* 3. Quantity & Live Stock Calculation */}
           <div className="space-y-3 pt-1">
             <label htmlFor="transfer-quantity" className="block text-xs font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">
-              Transfer Quantity ({activeItem?.unit || 'PCS'}) <span className="text-red-500">*</span>
+              Transfer Quantity ({quantityUnit}) <span className="text-red-500">*</span>
+              {toProcess === 'Replating' && (
+                <span className="ml-2 normal-case font-semibold text-[10px] text-purple-600">KG only — PCS is not allowed</span>
+              )}
             </label>
             <div className="relative">
               <input
@@ -368,21 +374,21 @@ export default function StoreProcessTransferModal({
               <div className="p-3 bg-blue-50/70 dark:bg-blue-950/30 border border-blue-100 dark:border-blue-900/40 rounded-xl text-center">
                 <span className="text-[9.5px] font-bold uppercase text-blue-600 dark:text-blue-400 block font-mono">Store Available</span>
                 <span className="text-xs sm:text-sm font-extrabold font-mono text-slate-800 dark:text-white mt-0.5 block">
-                  {availableQty.toLocaleString()} {activeItem?.unit}
+                  {availableQty.toLocaleString()} {quantityUnit}
                 </span>
               </div>
 
               <div className="p-3 bg-purple-50/70 dark:bg-purple-950/30 border border-purple-100 dark:border-purple-900/40 rounded-xl text-center">
                 <span className="text-[9.5px] font-bold uppercase text-purple-600 dark:text-purple-400 block font-mono">Send for {toProcess}</span>
                 <span className={`text-xs sm:text-sm font-extrabold font-mono mt-0.5 block ${isOverAllocated ? 'text-red-600' : 'text-purple-700 dark:text-purple-300'}`}>
-                  {parsedQty.toLocaleString()} {activeItem?.unit}
+                  {parsedQty.toLocaleString()} {quantityUnit}
                 </span>
               </div>
 
               <div className="p-3 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/40 rounded-xl text-center">
                 <span className="text-[9.5px] font-bold uppercase text-emerald-600 dark:text-emerald-400 block font-mono">Store Balance</span>
                 <span className="text-xs sm:text-sm font-extrabold font-mono text-emerald-700 dark:text-emerald-300 mt-0.5 block">
-                  {remainingStoreBalance.toLocaleString()} {activeItem?.unit}
+                  {remainingStoreBalance.toLocaleString()} {quantityUnit}
                 </span>
               </div>
             </div>
