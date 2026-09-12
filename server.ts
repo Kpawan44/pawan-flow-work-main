@@ -40,8 +40,8 @@ try {
   console.warn("Could not read firebase-applet-config.json:", e);
 }
 
-const firebaseProjectId = firebaseConfig?.projectId || process.env.GCP_PROJECT || process.env.FIREBASE_PROJECT_ID || "my-project-9ca72";
-const firestoreDbId = firebaseConfig?.firestoreDatabaseId || "(default)";
+const firebaseProjectId = process.env.GCP_PROJECT || process.env.FIREBASE_PROJECT_ID || firebaseConfig?.projectId || "my-project-9ca72";
+const firestoreDbId = process.env.FIRESTORE_DATABASE_ID || firebaseConfig?.firestoreDatabaseId || "(default)";
 
 // Guard against unhandled background async rejections
 process.on('unhandledRejection', (reason: any) => {
