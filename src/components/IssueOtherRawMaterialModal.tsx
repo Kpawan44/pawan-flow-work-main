@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { JobCard, MaterialMovement, UserProfile } from '../types';
+import { JobCard, MaterialMovement, UserProfile, ItemOtherRawMaterialLink } from '../types';
 import {
   canIssueOtherRawMaterialQty,
   displayUnitLabel,
   listIncomingStoreOtherRmCatalog
 } from '../hardening/process248OtherRawMaterial';
+import { filterLinkedOtherRmCatalog } from '../hardening/itemOtherRawMaterialLink';
+import { DBService } from '../lib/firebase';
 
 interface IssueOtherRawMaterialModalProps {
   isOpen: boolean;
@@ -12,6 +14,7 @@ interface IssueOtherRawMaterialModalProps {
   jobCards: JobCard[];
   movements: MaterialMovement[];
   currentUser: UserProfile | null;
+  links?: ItemOtherRawMaterialLink[];
   onIssue: (payload: {
     jobCardNo: string;
     rawMaterialCode: string;
@@ -27,6 +30,7 @@ export default function IssueOtherRawMaterialModal({
   jobCards,
   movements,
   currentUser,
+  links: propLinks,
   onIssue
 }: IssueOtherRawMaterialModalProps) {
   const [jobCardNo, setJobCardNo] = useState('');
@@ -34,9 +38,14 @@ export default function IssueOtherRawMaterialModal({
   const [quantity, setQuantity] = useState(0);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [links, setLinks] = useState<ItemOtherRawMaterialLink[]>(propLinks || []);
 
-  const catalog = listIncomingStoreOtherRmCatalog(movements);
-  const selected = catalog.find((m) => m.code === materialCode) || null;
+  const fullCatalog = listIncomingStoreOtherRmCatalog(movements);
+  const selectedJob = jobCards.find((j) => j.jobCardNo === jobCardNo) || null;
+  const filteredCatalog = selectedJob
+    ? filterLinkedOtherRmCatalog(fullCatalog, links, selectedJob.itemCode || selectedJob.itemName)
+    : [];
+  const selected = filteredCatalog.find((m) => m.code === materialCode) || null;
   const activeJobs = jobCards.filter((jc) => !jc.completed && jc.status !== 'Rejected' && jc.processType !== 'Purchase');
 
   useEffect(() => {
@@ -46,7 +55,20 @@ export default function IssueOtherRawMaterialModal({
     setQuantity(0);
     setError('');
     setBusy(false);
+
+    // Load active links
+    DBService.getItemOtherRmLinks().then((fetched) => {
+      if (Array.isArray(fetched) && fetched.length > 0) {
+        setLinks(fetched);
+      }
+    }).catch(() => {});
   }, [isOpen]);
+
+  useEffect(() => {
+    if (propLinks && propLinks.length > 0) {
+      setLinks(propLinks);
+    }
+  }, [propLinks]);
 
   if (!isOpen) return null;
 
@@ -125,16 +147,29 @@ export default function IssueOtherRawMaterialModal({
           <select
             value={materialCode}
             onChange={(e) => setMaterialCode(e.target.value)}
-            className="mt-1 w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold"
+            disabled={!jobCardNo || filteredCatalog.length === 0}
+            className="mt-1 w-full bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-700 rounded-lg p-2 text-xs font-semibold disabled:opacity-50"
           >
-            <option value="">Select material (optional catalog)</option>
-            {catalog.map((m) => (
+            <option value="">
+              {!jobCardNo
+                ? 'Select Job Card first'
+                : filteredCatalog.length === 0
+                ? 'No linked Other Raw Materials in stock'
+                : 'Select linked material'}
+            </option>
+            {filteredCatalog.map((m) => (
               <option key={m.code} value={m.code}>
                 {m.name} ({m.code}) — avail {m.availableStock} {m.unit}
               </option>
             ))}
           </select>
         </label>
+
+        {jobCardNo && filteredCatalog.length === 0 && (
+          <p className="text-[11px] text-amber-600 dark:text-amber-400 font-semibold">
+            ⚠️ No linked Other Raw Materials with available stock for this item ({selectedJob?.itemName}).
+          </p>
+        )}
 
         {selected && (
           <p className="text-[11px] font-mono text-indigo-700 dark:text-indigo-300">

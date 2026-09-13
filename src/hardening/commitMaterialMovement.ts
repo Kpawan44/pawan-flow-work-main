@@ -29,6 +29,7 @@ import {
   isOtherRawMaterialIssueMovement,
   otherRawMaterialSerializeKey
 } from "./process248OtherRawMaterial";
+import { assertItemOtherRmLinkActive } from "./itemOtherRawMaterialLink";
 
 export interface MovementCommitInput {
   operationId: string;
@@ -298,6 +299,15 @@ async function commitMaterialMovementTxInner(
         }
         issueAvail = rmIssueAvailableQty(jobCardData, movementsForQty, skuCode, opening);
       } else if (isOtherRawMaterialIssueMovement({ ...input, fromDepartment: normFrom, toDepartment: normTo })) {
+        const itemCodeForLink = jobCardData?.itemCode || jobCardData?.itemName;
+        const linkGate = await assertItemOtherRmLinkActive(
+          store,
+          itemCodeForLink,
+          input.processDetails?.rawMaterialCode
+        );
+        if (linkGate.ok === false) {
+          return { success: false, statusCode: 400, error: linkGate.error };
+        }
         const skuCode = String(input.processDetails?.rawMaterialCode || "").trim();
         let opening = 0;
         if (skuCode) {

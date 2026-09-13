@@ -164,5 +164,12 @@ service cloud.firestore {
       allow update: if isActiveUser();
       allow delete: if isAdmin() || isSuperAdmin();
     }
+
+    // Collection: Item to Other Raw Material Links (mfr_item_other_rm_links)
+    // Client direct reads allowed for active users; client direct writes DENIED (server Admin SDK only).
+    match /mfr_item_other_rm_links/{linkId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
   }
 }

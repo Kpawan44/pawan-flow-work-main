@@ -34,18 +34,20 @@ import {
   Send,
   RotateCcw
 } from 'lucide-react';
-import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer, RawMaterialKind } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer, RawMaterialKind, ItemOtherRawMaterialLink } from '../types';
 import { DBService } from '../lib/firebase';
 import RawMaterialRequestModal, { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 import IssueOtherRawMaterialModal from './IssueOtherRawMaterialModal';
 import {
   addOtherRawMaterialRow,
   getAcceptedOtherRawMaterialIssuedQty,
+  listIncomingStoreOtherRmCatalog,
   netProductionQty,
   otherRawMaterialRowsOptionalValid,
   removeOtherRawMaterialRow,
   totalRawMaterialWeight
 } from '../hardening/process248OtherRawMaterial';
+import { filterLinkedOtherRmCatalog, canManageItemOtherRmLinks } from '../hardening/itemOtherRawMaterialLink';
 import {
   resolveInitialPurchaseRoute,
   buildPurchaseMovementContract,
@@ -351,17 +353,25 @@ export default function DepartmentOperations({
   const [outsourceOrders, setOutsourceOrders] = useState<OutsourceOrder[]>([]);
   const [selectedOutsourceOrderId, setSelectedOutsourceOrderId] = useState<string>('');
 
+  // Item ↔ Other RM Links State (Process 328)
+  const [itemOtherRmLinks, setItemOtherRmLinks] = useState<ItemOtherRawMaterialLink[]>([]);
+  const [editingLinksForItem, setEditingLinksForItem] = useState<SavedItem | null>(null);
+  const [selectedOtherRmsForLink, setSelectedOtherRmsForLink] = useState<string[]>([]);
+  const [isSavingItemLinks, setIsSavingItemLinks] = useState(false);
+
   useEffect(() => {
     const loadItemsAndOutsource = async () => {
       try {
-        const [items, orders] = await Promise.all([
+        const [items, orders, links] = await Promise.all([
           DBService.getSavedItems(),
-          DBService.getOutsourceOrders()
+          DBService.getOutsourceOrders(),
+          DBService.getItemOtherRmLinks()
         ]);
         setSavedItems(items);
         setOutsourceOrders(orders);
+        setItemOtherRmLinks(links);
       } catch (err) {
-        console.error("Failed to load saved items or outsource orders:", err);
+        console.error("Failed to load saved items, outsource orders, or links:", err);
       }
     };
     loadItemsAndOutsource();
@@ -6557,79 +6567,111 @@ Please adjust the quantity or request additional raw material issue.`);
                                   const otherAccepted = getAcceptedOtherRawMaterialIssuedQty(job, movements);
                                   const totalRm = totalRawMaterialWeight([wireAccepted, otherAccepted]);
                                   const net = netProductionQty(totalRm, prodWireScrap + getWireScrapQty(job, movements));
-                                  const optionalOk = otherRawMaterialRowsOptionalValid(otherRmRows);
-                                  void optionalOk;
+                                  const linkedCatalog = filterLinkedOtherRmCatalog(
+                                    listIncomingStoreOtherRmCatalog(movements),
+                                    itemOtherRmLinks,
+                                    job.itemCode || job.itemName
+                                  );
+
                                   return (
                                     <div className="p-3 bg-white dark:bg-slate-950 rounded-xl border border-dashed border-slate-300 dark:border-slate-700 space-y-2">
                                       <div className="flex items-center justify-between gap-2">
                                         <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">Other Raw Materials</span>
-                                        <span className="text-[10px] text-slate-400">Optional — not compulsory</span>
+                                        <span className="text-[10px] text-slate-400">Optional (Linked + In-Stock Only)</span>
                                       </div>
                                       <p className="text-[10px] text-slate-500">
                                         Issued to this Job Card: Wire {wireAccepted} KG
                                         {otherAccepted > 0 ? ` + Other RM ${otherAccepted} KG` : ''}. Total {totalRm} KG. Net after scrap {net} KG.
                                       </p>
-                                      {otherRmRows.map((row) => (
-                                        <div key={row.id} className="grid grid-cols-12 gap-2 items-end">
-                                          <label className="col-span-5 text-[9px] font-bold uppercase text-slate-400">
-                                            Material
-                                            <input
-                                              type="text"
-                                              value={row.materialCode}
-                                              onChange={(e) =>
-                                                setOtherRmRows((prev) =>
-                                                  prev.map((r) => (r.id === row.id ? { ...r, materialCode: e.target.value } : r))
-                                                )
-                                              }
-                                              placeholder="e.g. Plain Washer"
-                                              className="mt-0.5 w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-1.5 text-xs"
-                                            />
-                                          </label>
-                                          <label className="col-span-3 text-[9px] font-bold uppercase text-slate-400">
-                                            Quantity
-                                            <input
-                                              type="text"
-                                              inputMode="decimal"
-                                              value={row.quantity || ''}
-                                              onChange={(e) =>
-                                                setOtherRmRows((prev) =>
-                                                  prev.map((r) =>
-                                                    r.id === row.id ? { ...r, quantity: Number(e.target.value.replace(/[^\d.]/g, '')) || 0 } : r
-                                                  )
-                                                )
-                                              }
-                                              className="mt-0.5 w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-1.5 font-mono text-xs"
-                                            />
-                                          </label>
-                                          <label className="col-span-2 text-[9px] font-bold uppercase text-slate-400">
-                                            Unit
-                                            <input
-                                              type="text"
-                                              value={row.unit}
-                                              onChange={(e) =>
-                                                setOtherRmRows((prev) =>
-                                                  prev.map((r) => (r.id === row.id ? { ...r, unit: e.target.value } : r))
-                                                )
-                                              }
-                                              className="mt-0.5 w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-1.5 text-xs"
-                                            />
-                                          </label>
+                                      {linkedCatalog.length === 0 ? (
+                                        <p className="text-[10.5px] text-amber-600 dark:text-amber-400 italic">
+                                          ℹ️ No linked Other Raw Materials with stock available for this finished item ({job.itemName}).
+                                        </p>
+                                      ) : (
+                                        <>
+                                          {otherRmRows.map((row) => (
+                                            <div key={row.id} className="grid grid-cols-12 gap-2 items-end">
+                                              <label className="col-span-5 text-[9px] font-bold uppercase text-slate-400">
+                                                Material
+                                                <select
+                                                  value={row.materialCode}
+                                                  onChange={(e) => {
+                                                    const chosen = linkedCatalog.find((c) => c.code === e.target.value);
+                                                    setOtherRmRows((prev) =>
+                                                      prev.map((r) =>
+                                                        r.id === row.id
+                                                          ? {
+                                                              ...r,
+                                                              materialCode: e.target.value,
+                                                              materialName: chosen?.name,
+                                                              unit: chosen?.unit || 'KG'
+                                                            }
+                                                          : r
+                                                      )
+                                                    );
+                                                  }}
+                                                  className="mt-0.5 w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-1.5 text-xs font-semibold"
+                                                >
+                                                  <option value="">Select linked material</option>
+                                                  {linkedCatalog.map((m) => (
+                                                    <option key={m.code} value={m.code}>
+                                                      {m.name} ({m.code}) — {m.availableStock} {m.unit}
+                                                    </option>
+                                                  ))}
+                                                </select>
+                                              </label>
+                                              <label className="col-span-3 text-[9px] font-bold uppercase text-slate-400">
+                                                Quantity
+                                                <input
+                                                  type="text"
+                                                  inputMode="decimal"
+                                                  value={row.quantity || ''}
+                                                  onChange={(e) =>
+                                                    setOtherRmRows((prev) =>
+                                                      prev.map((r) =>
+                                                        r.id === row.id ? { ...r, quantity: Number(e.target.value.replace(/[^\d.]/g, '')) || 0 } : r
+                                                      )
+                                                    )
+                                                  }
+                                                  className="mt-0.5 w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded p-1.5 font-mono text-xs"
+                                                />
+                                              </label>
+                                              <label className="col-span-2 text-[9px] font-bold uppercase text-slate-400">
+                                                Unit
+                                                <input
+                                                  type="text"
+                                                  readOnly
+                                                  value={row.unit}
+                                                  className="mt-0.5 w-full bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded p-1.5 text-xs font-mono"
+                                                />
+                                              </label>
+                                              <button
+                                                type="button"
+                                                onClick={() => setOtherRmRows((prev) => removeOtherRawMaterialRow(prev, row.id))}
+                                                className="col-span-2 text-[10px] font-bold text-rose-600 cursor-pointer"
+                                              >
+                                                Remove
+                                              </button>
+                                            </div>
+                                          ))}
                                           <button
                                             type="button"
-                                            onClick={() => setOtherRmRows((prev) => removeOtherRawMaterialRow(prev, row.id))}
-                                            className="col-span-2 text-[10px] font-bold text-rose-600 cursor-pointer"
+                                            onClick={() => {
+                                              const first = linkedCatalog[0];
+                                              setOtherRmRows((prev) =>
+                                                addOtherRawMaterialRow(prev, {
+                                                  materialCode: first?.code || '',
+                                                  materialName: first?.name,
+                                                  unit: first?.unit || 'KG'
+                                                })
+                                              );
+                                            }}
+                                            className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-[10px] font-extrabold uppercase tracking-wider cursor-pointer"
                                           >
-                                            Remove
+                                            + Add Other Raw Material
                                           </button>
-                                        </div>
-                                      ))}
-                                      <button
-                                        type="button"
-                                        onClick={() => setOtherRmRows((prev) => addOtherRawMaterialRow(prev, { unit: 'KG' }))}
-                                        className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-[10px] font-extrabold uppercase tracking-wider cursor-pointer"
-                                      >
-                                        + Add Other Raw Material
-                                      </button>
+                                        </>
+                                      )}
                                     </div>
                                   );
                                 })()}
@@ -8361,24 +8403,47 @@ Please adjust the quantity or request additional raw material issue.`);
                             </div>
                           </div>
 
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              if (confirm(`Are you sure you want to delete item "${item.itemName}" from customer "${custName}"?`)) {
-                                try {
-                                  await DBService.deleteSavedItem(item.id);
-                                  setSavedItems(prev => prev.filter(x => x.id !== item.id));
-                                } catch (err) {
-                                  console.error("Delete error:", err);
-                                  alert("Failed to delete item.");
+                          <div className="flex items-center gap-2 shrink-0">
+                            {(() => {
+                              const normCode = normalizeItemCode(item.itemCode && item.itemCode !== '-' ? item.itemCode : item.itemName);
+                              const linked = itemOtherRmLinks.filter(
+                                (l) => l.active !== false && normalizeItemCode(l.itemCode) === normCode
+                              );
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingLinksForItem(item);
+                                    setSelectedOtherRmsForLink(linked.map((l) => l.otherRawMaterialCode));
+                                  }}
+                                  className="px-2.5 py-1 bg-purple-50 dark:bg-purple-950 text-purple-700 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/50 text-[11px] font-bold rounded-lg border border-purple-200 dark:border-purple-800 transition flex items-center gap-1 cursor-pointer"
+                                  title="Configure Allowed Other Raw Materials"
+                                >
+                                  <Sliders className="h-3 w-3" />
+                                  <span>Other RMs ({linked.length})</span>
+                                </button>
+                              );
+                            })()}
+
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                if (confirm(`Are you sure you want to delete item "${item.itemName}" from customer "${custName}"?`)) {
+                                  try {
+                                    await DBService.deleteSavedItem(item.id);
+                                    setSavedItems(prev => prev.filter(x => x.id !== item.id));
+                                  } catch (err) {
+                                    console.error("Delete error:", err);
+                                    alert("Failed to delete item.");
+                                  }
                                 }
-                              }
-                            }}
-                            className="p-2 text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition shrink-0 cursor-pointer"
-                            title="Delete Item"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+                              }}
+                              className="p-2 text-slate-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 rounded-lg transition shrink-0 cursor-pointer"
+                              title="Delete Item"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
@@ -8398,6 +8463,141 @@ Please adjust the quantity or request additional raw material issue.`);
               </button>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* ITEM ↔ OTHER RAW MATERIAL LINKING SUB-MODAL */}
+      {editingLinksForItem && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div>
+                <h3 className="text-sm font-extrabold uppercase tracking-wider text-purple-700 dark:text-purple-300">
+                  Allowed Other Raw Materials
+                </h3>
+                <p className="text-xs font-bold text-slate-800 dark:text-white mt-1">
+                  {editingLinksForItem.itemName}
+                </p>
+                <p className="text-[11px] text-slate-500 font-mono">
+                  Code: {editingLinksForItem.itemCode && editingLinksForItem.itemCode !== '-' ? editingLinksForItem.itemCode : normalizeItemCode(editingLinksForItem.itemName)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingLinksForItem(null)}
+                className="text-slate-400 hover:text-slate-600 font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-[11px] text-slate-500">
+              Select which Other Raw Materials are permitted to be issued to Production Job Cards for this finished item. Wire is compulsory and cannot be linked here.
+            </p>
+
+            {(() => {
+              const catalog = listIncomingStoreOtherRmCatalog(movements);
+              if (catalog.length === 0) {
+                return (
+                  <div className="p-4 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-dashed border-slate-200 dark:border-slate-700 text-xs text-slate-400 text-center">
+                    No Other Raw Materials found in Incoming Store stock. Purchase Other RMs (e.g. Washers) first.
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-2 max-h-60 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl p-3 bg-slate-50/50 dark:bg-slate-950/50">
+                  {catalog.map((rm) => {
+                    const isChecked = selectedOtherRmsForLink.some(
+                      (c) => normalizeItemCode(c) === normalizeItemCode(rm.code)
+                    );
+                    return (
+                      <label
+                        key={rm.code}
+                        className="flex items-center justify-between p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 cursor-pointer hover:border-purple-300 transition"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedOtherRmsForLink((prev) => [...prev, rm.code]);
+                              } else {
+                                setSelectedOtherRmsForLink((prev) =>
+                                  prev.filter((c) => normalizeItemCode(c) !== normalizeItemCode(rm.code))
+                                );
+                              }
+                            }}
+                            className="rounded text-purple-600 focus:ring-purple-500 h-4 w-4"
+                          />
+                          <div>
+                            <span className="text-xs font-bold text-slate-800 dark:text-slate-100 block">
+                              {rm.name}
+                            </span>
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              {rm.code} — {rm.unit}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-mono font-semibold text-indigo-600 dark:text-indigo-400">
+                          Stock: {rm.availableStock} {rm.unit}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => setEditingLinksForItem(null)}
+                className="px-4 py-2 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-bold rounded-xl cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isSavingItemLinks}
+                onClick={async () => {
+                  if (!editingLinksForItem) return;
+                  setIsSavingItemLinks(true);
+                  try {
+                    const catalog = listIncomingStoreOtherRmCatalog(movements);
+                    const cleanCode =
+                      editingLinksForItem.itemCode && editingLinksForItem.itemCode !== '-'
+                        ? editingLinksForItem.itemCode
+                        : editingLinksForItem.itemName;
+                    const chosen = catalog
+                      .filter((rm) =>
+                        selectedOtherRmsForLink.some(
+                          (c) => normalizeItemCode(c) === normalizeItemCode(rm.code)
+                        )
+                      )
+                      .map((rm) => ({ code: rm.code, name: rm.name }));
+
+                    await DBService.saveItemOtherRmLinksBatch(
+                      cleanCode,
+                      editingLinksForItem.itemName,
+                      chosen
+                    );
+                    const refreshed = await DBService.getItemOtherRmLinks();
+                    setItemOtherRmLinks(refreshed);
+                    setEditingLinksForItem(null);
+                  } catch (err: any) {
+                    alert(err?.message || 'Failed to save Other RM links.');
+                  } finally {
+                    setIsSavingItemLinks(false);
+                  }
+                }}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold rounded-xl shadow cursor-pointer disabled:opacity-50 flex items-center gap-1"
+              >
+                {isSavingItemLinks ? 'Saving…' : 'Save Links'}
+              </button>
+            </div>
           </div>
         </div>
       )}
