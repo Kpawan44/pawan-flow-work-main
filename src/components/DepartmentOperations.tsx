@@ -72,6 +72,11 @@ import {
   unproducedOrderQty
 } from '../hardening/process2Manufacturing';
 import { finalizePackingBagLines, packingDetailsFromBagLines, lineTotalBagsTimesPcs } from '../hardening/packingBagLines';
+import {
+  jobCardMatchesSelectedCustomer,
+  jobCardMatchesSelectedItemName,
+  uniqueJobCardItemNames
+} from '../hardening/departmentJobCardFilter';
 import { enterAdvancesField, shouldIgnoreDuplicateSubmit } from '../hardening/tallyEntry';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
@@ -2074,6 +2079,7 @@ Please adjust the quantity or request additional raw material issue.`);
   const [deptSearchQuery, setDeptSearchQuery] = useState('');
   const [deptPersonFilter, setDeptPersonFilter] = useState('All');
   const [deptPartyFilter, setDeptPartyFilter] = useState('All');
+  const [deptItemNameFilter, setDeptItemNameFilter] = useState('All');
   const [deptOrderNoFilter, setDeptOrderNoFilter] = useState('All');
   const [deptSortBy, setDeptSortBy] = useState<'oldest' | 'newest' | 'job_no'>('oldest');
 
@@ -2087,6 +2093,8 @@ Please adjust the quantity or request additional raw material issue.`);
       )
     ).sort();
   }, [jobCards]);
+
+  const uniqueItemNames = useMemo(() => uniqueJobCardItemNames(jobCards), [jobCards]);
 
   const uniquePersons = useMemo(() => {
     const set = new Set<string>();
@@ -2120,7 +2128,6 @@ Please adjust the quantity or request additional raw material issue.`);
   const filterJobCard = (j: JobCard) => {
     const q = (deptSearchQuery ?? '').toString().trim().toLowerCase();
     const personQ = (deptPersonFilter ?? '').toString().trim().toLowerCase();
-    const partyQ = (deptPartyFilter ?? '').toString().trim().toLowerCase();
     const orderQ = (deptOrderNoFilter ?? '').toString().trim().toLowerCase();
     const partyName = (j.partyName ?? '').toString().toLowerCase();
     const jobCardNo = (j.jobCardNo ?? '').toString().toLowerCase();
@@ -2150,9 +2157,10 @@ Please adjust the quantity or request additional raw material issue.`);
     }
 
     // 2. Party / Customer
-    if (partyQ && partyQ !== 'all') {
-      if (!partyName.includes(partyQ)) return false;
-    }
+    if (!jobCardMatchesSelectedCustomer(j, deptPartyFilter)) return false;
+
+    // 2b. Item Name (dropdown: exact case-insensitive match; All disables)
+    if (!jobCardMatchesSelectedItemName(j, deptItemNameFilter)) return false;
 
     // 3. Order No
     if (orderQ && orderQ !== 'all') {
@@ -2204,7 +2212,7 @@ Please adjust the quantity or request additional raw material issue.`);
       }
       return 0;
     });
-  }, [activeDepartmentJobs, deptSearchQuery, deptPersonFilter, deptPartyFilter, deptOrderNoFilter, deptSortBy, movements]);
+  }, [activeDepartmentJobs, deptSearchQuery, deptPersonFilter, deptPartyFilter, deptItemNameFilter, deptOrderNoFilter, deptSortBy, movements]);
 
   // C. Archived Outbound transfers from this department (both accepted and pending custody downstream)
   const completedDepartmentLogs = movements.filter(m => {
@@ -2662,6 +2670,19 @@ Please adjust the quantity or request additional raw material issue.`);
               ))}
             </select>
 
+            {/* Item Name Filter */}
+            <select
+              value={deptItemNameFilter}
+              onChange={(e) => setDeptItemNameFilter(e.target.value)}
+              className="bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-800 text-xs px-3 py-2 rounded-xl focus:outline-none max-w-[170px] truncate"
+              title="Filter by Item Name"
+            >
+              <option value="All">📦 Item: All Items</option>
+              {uniqueItemNames.map(name => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+
             {/* Person Filter */}
             <select
               value={deptPersonFilter}
@@ -2700,13 +2721,14 @@ Please adjust the quantity or request additional raw material issue.`);
               <option value="job_no">🔢 Job Card No</option>
             </select>
 
-            {(deptSearchQuery || deptPersonFilter !== 'All' || deptPartyFilter !== 'All' || deptOrderNoFilter !== 'All') && (
+            {(deptSearchQuery || deptPersonFilter !== 'All' || deptPartyFilter !== 'All' || deptItemNameFilter !== 'All' || deptOrderNoFilter !== 'All') && (
               <button
                 type="button"
                 onClick={() => {
                   setDeptSearchQuery('');
                   setDeptPersonFilter('All');
                   setDeptPartyFilter('All');
+                  setDeptItemNameFilter('All');
                   setDeptOrderNoFilter('All');
                 }}
                 className="px-2.5 py-2 bg-red-50 dark:bg-red-950/40 hover:bg-red-100 text-red-600 dark:text-red-300 border border-red-200 dark:border-red-800 rounded-xl text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
@@ -2718,7 +2740,7 @@ Please adjust the quantity or request additional raw material issue.`);
           </div>
         </div>
 
-        {(deptSearchQuery || deptPersonFilter !== 'All' || deptPartyFilter !== 'All' || deptOrderNoFilter !== 'All') && (
+        {(deptSearchQuery || deptPersonFilter !== 'All' || deptPartyFilter !== 'All' || deptItemNameFilter !== 'All' || deptOrderNoFilter !== 'All') && (
           <div className="flex items-center gap-2 text-[11px] text-indigo-600 dark:text-indigo-300 font-medium pt-1 border-t border-slate-100 dark:border-slate-800/60">
             <span>Filtering active department view:</span>
             <span className="font-bold bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-800/60">
