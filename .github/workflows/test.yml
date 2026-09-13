@@ -68,6 +68,9 @@ jobs:
       - name: Run Staging Manufacturing Resilience Suite (Process 147/148)
         run: npm run test:staging:process147
 
+      - name: Run Staging Process 210/248 Integration (Process 312)
+        run: npm run test:staging:process312
+
       - name: Build Web Application & Server Bundle
         run: npm run build
 
