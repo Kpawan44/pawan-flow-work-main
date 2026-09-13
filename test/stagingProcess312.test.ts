@@ -483,9 +483,14 @@ async function runProcess312() {
     });
     assert("210 G Store → Packing/Repacking PCS remains allowed", repack.success === true, repack.error);
 
+    // Dedicated card: Store→Plating is locked to one pending handover per job.
+    // Reusing jcKg (already has an unaccepted 200 KG send) would hit that lock,
+    // not the operationId cache path. MemoryStore Process 210 uses a fresh job too.
+    const jcIdemp = `${testPrefix}-JC-210-IDEMP`;
+    await seedStoreJob(store, jcIdemp, 1000);
     const firstId = await commitMaterialMovementTx(store, {
       operationId: `${testPrefix}-op-210-idemp`,
-      jobCardNo: jcKg,
+      jobCardNo: jcIdemp,
       fromDepartment: "Store",
       toDepartment: "Plating",
       quantity: 15,
@@ -495,7 +500,7 @@ async function runProcess312() {
     });
     const retryId = await commitMaterialMovementTx(store, {
       operationId: `${testPrefix}-op-210-idemp`,
-      jobCardNo: jcKg,
+      jobCardNo: jcIdemp,
       fromDepartment: "Store",
       toDepartment: "Plating",
       quantity: 15,
@@ -503,7 +508,18 @@ async function runProcess312() {
       requireRawMaterialForProduction: false,
       actor: actor("Store")
     });
-    assert("210 duplicate operationId is cached", firstId.success === true && retryId.success === true && retryId.cached === true);
+    const idempMoves = prefixedMoves(await store.list("mfr_movements"), jcIdemp).filter(
+      (m) => String(m.fromDepartment || "") === "Store" && String(m.toDepartment || "") === "Plating"
+    );
+    assert(
+      "210 duplicate operationId is cached",
+      firstId.success === true &&
+        retryId.success === true &&
+        retryId.cached === true &&
+        retryId.movement?.movementId === firstId.movement?.movementId &&
+        idempMoves.length === 1,
+      `first=${firstId.success} ${firstId.error || ""} retry=${retryId.success} cached=${retryId.cached} ${retryId.error || ""} moves=${idempMoves.length}`
+    );
 
     const jcConc = `${testPrefix}-JC-210-CONC`;
     await seedStoreJob(store, jcConc, 200);
