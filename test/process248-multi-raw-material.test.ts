@@ -21,6 +21,7 @@ import {
   totalRawMaterialWeight
 } from "../src/hardening/process248OtherRawMaterial";
 import { INCOMING_STORE, RAW_MATERIAL_STORE } from "../src/hardening/process1Purchase";
+import { upsertItemOtherRmLink } from "../src/hardening/itemOtherRawMaterialLink";
 
 let passed = 0;
 let failed = 0;
@@ -168,10 +169,21 @@ async function seedJob(store: MemoryStore, jobCardNo: string, orderQty = 1000) {
     currentDepartment: "Production",
     status: "Pending",
     processType: "Manufacturing",
+    itemCode: "6x13 MS Double Washer Screw",
     itemName: "6x13 MS Double Washer Screw",
     unit: "KGS",
     version: 1
   });
+  await upsertItemOtherRmLink(
+    store,
+    { itemCode: "6x13 MS Double Washer Screw", otherRawMaterialCode: "PLAIN-WASHER", active: true },
+    { userId: "admin", userName: "Admin" }
+  );
+  await upsertItemOtherRmLink(
+    store,
+    { itemCode: "6x13 MS Double Washer Screw", otherRawMaterialCode: "SPRING-WASHER", active: true },
+    { userId: "admin", userName: "Admin" }
+  );
 }
 
 async function run() {

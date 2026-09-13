@@ -21,7 +21,7 @@ import {
   runTransaction
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer } from '../types';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink } from '../types';
 import { 
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
@@ -2244,6 +2244,94 @@ export class DBService {
       [{ collection: 'mfr_items', docId: id, operation: 'delete' }],
       async () => { await deleteDoc(doc(db, 'mfr_items', id)); }
     );
+  }
+
+  // --- ITEM ↔ OTHER RAW MATERIAL LINKS (Process 328) ---
+  static async getItemOtherRmLinks(itemCode?: string): Promise<ItemOtherRawMaterialLink[]> {
+    const apiBase = getApiBaseUrl();
+    const query = itemCode ? `?itemCode=${encodeURIComponent(itemCode)}` : '';
+    try {
+      const headers = await this.getAuthHeaders();
+      const response = await fetch(`${apiBase}/api/item-other-rm-links${query}`, { headers });
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && Array.isArray(result.links)) {
+          const stored = getLocalStorageItem<ItemOtherRawMaterialLink[]>('mfr_item_other_rm_links', []);
+          const mergedMap = new Map<string, ItemOtherRawMaterialLink>();
+          stored.forEach(l => { if (l && l.id) mergedMap.set(l.id, l); });
+          result.links.forEach((l: ItemOtherRawMaterialLink) => { if (l && l.id) mergedMap.set(l.id, l); });
+          const all = Array.from(mergedMap.values());
+          setLocalStorageItem('mfr_item_other_rm_links', all);
+          return itemCode
+            ? all.filter(l => (l.itemCode || '').trim().toUpperCase() === itemCode.trim().toUpperCase())
+            : all;
+        }
+      }
+    } catch (_) {}
+
+    if (useRealFirebase && db && !this.isOfflineMode()) {
+      try {
+        const snap = await getDocs(collection(db, 'mfr_item_other_rm_links'));
+        const list: ItemOtherRawMaterialLink[] = [];
+        snap.forEach(d => {
+          const data = d.data() as ItemOtherRawMaterialLink;
+          if (data && data.itemCode) {
+            list.push({ ...data, id: d.id });
+          }
+        });
+        setLocalStorageItem('mfr_item_other_rm_links', list);
+        return itemCode
+          ? list.filter(l => (l.itemCode || '').trim().toUpperCase() === itemCode.trim().toUpperCase())
+          : list;
+      } catch (_) {}
+    }
+
+    const cached = getLocalStorageItem<ItemOtherRawMaterialLink[]>('mfr_item_other_rm_links', []);
+    return itemCode
+      ? cached.filter(l => (l.itemCode || '').trim().toUpperCase() === itemCode.trim().toUpperCase())
+      : cached;
+  }
+
+  static async saveItemOtherRmLinksBatch(
+    itemCode: string,
+    itemName: string,
+    otherRawMaterials: Array<{ code: string; name?: string }>
+  ): Promise<ItemOtherRawMaterialLink[]> {
+    const apiBase = getApiBaseUrl();
+    const opId = `op-link-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const payload = {
+      operationId: opId,
+      itemCode,
+      itemName,
+      otherRawMaterials
+    };
+
+    const headers = await this.getAuthHeaders({
+      'Content-Type': 'application/json',
+      'X-Operation-Id': opId
+    });
+
+    const response = await fetch(`${apiBase}/api/item-other-rm-links`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errJson = await response.json().catch(() => ({}));
+      throw new Error(errJson.error || `Failed to save Other RM links (HTTP ${response.status})`);
+    }
+
+    const res = await response.json();
+    const updatedLinks = res.links || [];
+
+    const cached = getLocalStorageItem<ItemOtherRawMaterialLink[]>('mfr_item_other_rm_links', []);
+    const map = new Map<string, ItemOtherRawMaterialLink>();
+    cached.forEach(l => { if (l && l.id) map.set(l.id, l); });
+    updatedLinks.forEach((l: ItemOtherRawMaterialLink) => { if (l && l.id) map.set(l.id, l); });
+    setLocalStorageItem('mfr_item_other_rm_links', Array.from(map.values()));
+
+    return updatedLinks;
   }
 
   // --- SYNC QUEUE MANAGEMENT ---

@@ -556,3 +556,17 @@ export interface SubcontractChallan {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface ItemOtherRawMaterialLink {
+  id?: string;
+  itemCode: string;
+  itemName?: string;
+  otherRawMaterialCode: string;
+  otherRawMaterialName?: string;
+  active: boolean;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
