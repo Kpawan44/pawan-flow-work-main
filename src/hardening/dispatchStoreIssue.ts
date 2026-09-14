@@ -258,6 +258,9 @@ export async function createDispatchStoreRequirementTx(
       return { success: false, statusCode: 400, error: "requestedQty must be greater than 0." };
     }
     const job = await store.get("mfr_job_cards", jobCardNo);
+    if (!job) {
+      return { success: false, statusCode: 404, error: "jobCardNo was not found. A Dispatch → Store requirement requires an existing job card." };
+    }
     const id = newId("DSR");
     const requirement: DispatchStoreRequirementRecord = {
       id,
@@ -331,6 +334,9 @@ export async function applyStoreUnitOpeningTx(
     }
 
     const job = await store.get("mfr_job_cards", jobCardNo);
+    if (!job) {
+      return { success: false, statusCode: 404, error: "jobCardNo was not found. Independent unit opening requires an existing job card." };
+    }
     const existingStock = (await store.get(STORE_UNIT_STOCK_COLLECTION, jobCardNo)) as StoreUnitStockRecord | null;
     const current = existingStock || emptyStoreUnitStock(jobCardNo, now, input.actor.userName || input.actor.userId);
     const next: StoreUnitStockRecord = {
@@ -393,9 +399,15 @@ export async function issueDispatchStoreRequirementTx(
   if (!store.runTransaction) {
     return { success: false, statusCode: 500, error: "Atomic transaction store is required for Dispatch → Store issue." };
   }
-  const preview = requirementId ? await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, requirementId) : null;
-  const serializeJob = preview?.jobCardNo ? String(preview.jobCardNo) : requirementId || "issue";
-  return runSerialized(store, storeUnitSerializeKey(serializeJob), () =>
+  if (!requirementId) {
+    return { success: false, statusCode: 400, error: "requirementId is required." };
+  }
+  const requirementForLock = await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, requirementId);
+  const jobCardNoForLock = normalizeJobCardNo(requirementForLock?.jobCardNo);
+  if (!jobCardNoForLock) {
+    return { success: false, statusCode: 404, error: "Dispatch → Store requirement was not found." };
+  }
+  return runSerialized(store, storeUnitSerializeKey(jobCardNoForLock), () =>
     store.runTransaction!(async (tx) => {
       const now = input.nowIso || new Date().toISOString();
       const existing = await tx.get("mfr_idempotency_keys", opKey);
@@ -430,6 +442,9 @@ export async function issueDispatchStoreRequirementTx(
       const requirement = (await tx.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, requirementId)) as DispatchStoreRequirementRecord | null;
       if (!requirement) {
         return { success: false, statusCode: 404, error: "Dispatch → Store requirement was not found." };
+      }
+      if (normalizeJobCardNo(requirement.jobCardNo) !== jobCardNoForLock) {
+        return { success: false, statusCode: 409, error: "Requirement job card does not match the stock serialization key." };
       }
       if (requirement.status === "COMPLETED" || Number(requirement.remainingQty) <= 0) {
         return { success: false, statusCode: 409, error: "Requirement is already completed." };

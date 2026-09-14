@@ -690,6 +690,97 @@ async function run() {
     assert("issue without operationId is rejected", missing.success === false && missing.statusCode === 400);
   }
 
+  {
+    const missingJob = new MemoryStore();
+    const reqMissing = await createDispatchStoreRequirementTx(missingJob, {
+      jobCardNo: "JC-DOES-NOT-EXIST",
+      requestedQty: 10,
+      requestedUnit: "BAG",
+      actor: dispatchActor()
+    });
+    assert("nonexistent job → requirement rejected", reqMissing.success === false && reqMissing.statusCode === 404);
+  }
+
+  {
+    const missingJob = new MemoryStore();
+    const openMissing = await applyStoreUnitOpeningTx(missingJob, {
+      jobCardNo: "JC-DOES-NOT-EXIST",
+      bagQty: 5,
+      actor: storeActor()
+    });
+    assert("nonexistent job → opening rejected", openMissing.success === false && openMissing.statusCode === 404);
+  }
+
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-EXISTS");
+    const reqOk = await createDispatchStoreRequirementTx(store, {
+      jobCardNo: "JC-EXISTS",
+      requestedQty: 3,
+      requestedUnit: "PCS",
+      actor: dispatchActor()
+    });
+    assert("existing job → requirement succeeds", reqOk.success === true && reqOk.data?.requirement.jobCardNo === "JC-EXISTS");
+  }
+
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-EXISTS");
+    const openOk = await applyStoreUnitOpeningTx(store, {
+      jobCardNo: "JC-EXISTS",
+      bagQty: 1,
+      pcsQty: 2,
+      kgQty: 3,
+      actor: storeActor()
+    });
+    assert(
+      "existing job → opening succeeds",
+      openOk.success === true && openOk.data?.stock.bagQty === 1 && openOk.data?.stock.pcsQty === 2 && openOk.data?.stock.kgQty === 3
+    );
+  }
+
+  {
+    class KeyedSerializeStore extends MemoryStore {
+      serializeKeys: string[] = [];
+      private chains = new Map<string, Promise<unknown>>();
+      async runSerialized<T>(key: string, fn: () => Promise<T>): Promise<T> {
+        const k = String(key || "").toUpperCase();
+        this.serializeKeys.push(k);
+        const prev = this.chains.get(k) ?? Promise.resolve();
+        const run = prev.then(fn, fn);
+        this.chains.set(
+          k,
+          run.then(
+            () => undefined,
+            () => undefined
+          )
+        );
+        return run;
+      }
+    }
+    const store = new KeyedSerializeStore();
+    await seedJob(store, "JC-DS-1");
+    await seedStock(store, "JC-DS-1", 100, 0, 0);
+    const reqA = await makeReq(store, "JC-DS-1", 80, "BAG");
+    const reqB = await makeReq(store, "JC-DS-1", 80, "BAG");
+    const [a, b] = await Promise.all([
+      issueUnits(store, { requirementId: reqA.id, issuedBagQty: 80 }),
+      issueUnits(store, { requirementId: reqB.id, issuedBagQty: 80 })
+    ]);
+    const stock = await store.get(STORE_UNIT_STOCK_COLLECTION, "JC-DS-1");
+    const issueKeys = store.serializeKeys.filter((k) => k.startsWith("STORE-UNIT:"));
+    const successes = [a, b].filter((r) => r.success);
+    const failures = [a, b].filter((r) => !r.success);
+    assert(
+      "two requirements for the same job use store-unit:{jobCardNo} serialization",
+      issueKeys.length >= 2 && issueKeys.every((k) => k === "STORE-UNIT:JC-DS-1")
+    );
+    assert(
+      "same-job requirements cannot bypass stock serialization via preview read",
+      successes.length === 1 && failures.length === 1 && stock.bagQty === 20 && stock.bagQty >= 0
+    );
+  }
+
   const denied = await createDispatchStoreRequirementTx(new MemoryStore(), {
     jobCardNo: "JC-X",
     requestedQty: 1,
