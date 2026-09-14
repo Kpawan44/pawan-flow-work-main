@@ -45,7 +45,8 @@ import {
   Eye,
   EyeOff,
   Info,
-  RotateCcw
+  RotateCcw,
+  GitBranch
 } from 'lucide-react';
 import { DBService, auth, signInWithCustomToken, signOut, onAuthStateChanged, getApiBaseUrl } from './lib/firebase';
 import { runDailyAutoBackupIfNeeded } from './lib/backup';
@@ -89,6 +90,7 @@ const BulkTransferModal = lazy(() => import('./components/BulkTransferModal'));
 const BulkPrintManifestModal = lazy(() => import('./components/BulkPrintManifestModal'));
 const BulkStatusUpdateModal = lazy(() => import('./components/BulkStatusUpdateModal'));
 const OutsourceManager = lazy(() => import('./components/OutsourceManager').then(m => ({ default: m.OutsourceManager })));
+const ProcessDesigner = lazy(() => import('./components/ProcessDesigner'));
 
 interface ReportViewErrorBoundaryProps {
   children: React.ReactNode;
@@ -4197,6 +4199,15 @@ export default function App() {
 
               </div>
             </div>
+          )}
+
+          {/* PROCESS MAP (documentation graph — does not execute manufacturing) */}
+          {activeTab === 'process-designer' && (
+            <Suspense fallback={<ComponentFallback />}>
+              <div className="h-[calc(100dvh-11rem)] min-h-[480px] -mx-2.5 sm:-mx-4 md:-mx-6 -mt-1">
+                <ProcessDesigner currentUser={currentUser} showToast={showToast} />
+              </div>
+            </Suspense>
           )}
 
           {/* PROCESS OUTSOURCING VIEW */}

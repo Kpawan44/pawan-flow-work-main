@@ -12,7 +12,8 @@ import {
   Bell, 
   Activity, 
   X,
-  LogOut
+  LogOut,
+  GitBranch
 } from 'lucide-react';
 import { Department, UserProfile, CompanyConfig } from '../types';
 import { isFirestoreOffline } from '../lib/firebase';
@@ -61,6 +62,7 @@ export default function Sidebar({
     { id: 'all-orders', label: 'All Job Cards', icon: FileText },
     { id: 'outsource', label: 'Process Outsourcing', icon: Truck },
     { id: 'timeline-live', label: 'Real-Time Tracking', icon: Activity },
+    { id: 'process-designer', label: 'Process Map', icon: GitBranch },
     { id: 'reports', label: 'Reports & Analytics', icon: Layers },
   ];
 

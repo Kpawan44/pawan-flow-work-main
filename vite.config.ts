@@ -2,8 +2,10 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
+import { applyViteClientFirebaseEnvFromProcess } from './src/hardening/envGuard';
 
 export default defineConfig(() => {
+  applyViteClientFirebaseEnvFromProcess(process.env);
   return {
     base: './',
     plugins: [react(), tailwindcss()],

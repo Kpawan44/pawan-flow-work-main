@@ -13,6 +13,27 @@ RUN npm ci
 # Copy source files needed for the build
 COPY . .
 
+# Staging Cloud Build should pass these so Vite inlines staging Firebase into the browser bundle:
+#   --build-arg APP_ENV=staging
+#   --build-arg GCP_PROJECT=pmw-tracker-staging-9ca72
+#   --build-arg FIRESTORE_DATABASE_ID=ai-studio-staging
+#   --build-arg VITE_APP_ENV=staging
+#   --build-arg VITE_FIREBASE_PROJECT_ID=pmw-tracker-staging-9ca72
+#   --build-arg VITE_FIRESTORE_DATABASE_ID=ai-studio-staging
+# Production builds omit them and keep firebase-applet-config.json (my-project-9ca72).
+ARG APP_ENV
+ARG GCP_PROJECT
+ARG FIRESTORE_DATABASE_ID
+ARG VITE_APP_ENV
+ARG VITE_FIREBASE_PROJECT_ID
+ARG VITE_FIRESTORE_DATABASE_ID
+ENV APP_ENV=$APP_ENV
+ENV GCP_PROJECT=$GCP_PROJECT
+ENV FIRESTORE_DATABASE_ID=$FIRESTORE_DATABASE_ID
+ENV VITE_APP_ENV=$VITE_APP_ENV
+ENV VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID
+ENV VITE_FIRESTORE_DATABASE_ID=$VITE_FIRESTORE_DATABASE_ID
+
 # Run the same build script used locally
 RUN npm run build
 
