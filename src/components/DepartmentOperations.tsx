@@ -55,7 +55,6 @@ import {
   sanitizeDecimalInput,
   displayUnitLabel,
   isHeldInIncomingStore,
-  isVisibleInProductionQueue,
   RAW_MATERIAL_STORE,
   normalizeItemCode
 } from '../hardening/process1Purchase';
@@ -71,7 +70,8 @@ import {
   productionSendAvailable,
   isPendingAcceptanceMovement,
   process2SendAvailableQty,
-  unproducedOrderQty
+  unproducedOrderQty,
+  isEligibleForProductionOperationalQueue
 } from '../hardening/process2Manufacturing';
 import { finalizePackingBagLines, packingDetailsFromBagLines, lineTotalBagsTimesPcs } from '../hardening/packingBagLines';
 import {
@@ -2011,16 +2011,7 @@ Please adjust the quantity or request additional raw material issue.`);
       return c.processType === 'Purchase' && c.currentDepartment === 'Purchase';
     }
     if (activeDept === 'Production') {
-      if (unproducedOrderQty(c, movements) > 0) return true;
-      if (remainingAtProduction(c, movements, { compulsory: isRawMaterialCompulsory }) > 0) return true;
-      if (isVisibleInProductionQueue(c)) return true;
-      const returned = movements.some(m =>
-        m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() &&
-        m.toDepartment === 'Production' &&
-        (m.processDetails?.isRejectionReturn || m.transactionType === 'REVERSAL') &&
-        m.accepted
-      );
-      return returned && remainingAtProduction(c, movements, { compulsory: isRawMaterialCompulsory }) > 0;
+      return isEligibleForProductionOperationalQueue(c, movements, { compulsory: isRawMaterialCompulsory });
     }
     if (activeDept === 'Heat Treatment') {
       const pendingHTQty = remainingAtDepartment(c, movements, 'Heat Treatment');

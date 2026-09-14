@@ -17,7 +17,10 @@ import {
   isRawMaterialStoreIssuingToProduction,
   sameDepartmentTransferBlocked,
   unproducedOrderQty,
-  shouldBlockPendingDuplicateRoute
+  shouldBlockPendingDuplicateRoute,
+  isEligibleForProductionOperationalQueue,
+  isVisibleInMobileDepartmentWip,
+  isRoutedAwayFromProductionQueue
 } from "../src/hardening/process2Manufacturing";
 
 let passed = 0;
@@ -405,6 +408,312 @@ async function run() {
     const movs = await store.list("mfr_movements");
     assert("TEST J 200+300+501 rejects excess", over.success === false && String(over.error || "").toLowerCase().includes("insufficient"), over.error);
     assert("TEST J remaining stays 500", unproducedOrderQty(job, movs) === 500);
+  }
+
+  {
+    const leftoverJob = (jc: string, currentDepartment: string, extra: Record<string, unknown> = {}) => ({
+      jobCardNo: jc,
+      orderQty: 100,
+      currentQty: 100,
+      currentDepartment,
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false,
+      ...extra
+    });
+    const leftoverMoves = (jc: string, dest: string, accepted: boolean) => [
+      { jobCardNo: jc, fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: jc, fromDepartment: "Purchase", toDepartment: dest, accepted, quantity: 100 }
+    ];
+    const assertDeskAndMobile = (name: string, card: any, moves: any[], expected: boolean) => {
+      const desk = isEligibleForProductionOperationalQueue(card, moves, { compulsory: true });
+      const mob = isVisibleInMobileDepartmentWip("Production", card, moves);
+      assert(`${name} desktop=${expected}`, desk === expected, `desktop=${desk}`);
+      assert(`${name} mobile matches desktop`, mob === desk, `mobile=${mob} desktop=${desk}`);
+    };
+
+    const purchaseDestinationsAway = [
+      "Plating",
+      "Heat Treatment",
+      "Store",
+      "Packing",
+      "Dispatch",
+      "Incoming Store",
+      "Raw Material Store"
+    ];
+    for (const dest of purchaseDestinationsAway) {
+      for (const accepted of [false, true]) {
+        const jc = `JC-P2-${dest.replace(/\s+/g, "")}-${accepted ? "ACC" : "PEND"}`;
+        const card = leftoverJob(jc, dest);
+        const moves = leftoverMoves(jc, dest, accepted);
+        assertDeskAndMobile(
+          `Purchase→${dest} accepted=${accepted} currentDepartment=${dest} Production NO`,
+          card,
+          moves,
+          false
+        );
+      }
+    }
+
+    const purchaseHold = leftoverJob("JC-P2-HOLD", "Purchase", { outsourceStatus: "Completed" });
+    assertDeskAndMobile(
+      "Purchase hold currentDepartment=Purchase Production NO",
+      purchaseHold,
+      leftoverMoves("JC-P2-HOLD", "Purchase", false),
+      false
+    );
+
+    const toProdPending = leftoverJob("JC-P2-TOPROD-PEND", "Production");
+    assertDeskAndMobile(
+      "Purchase→Production pending currentDepartment=Production YES",
+      toProdPending,
+      leftoverMoves("JC-P2-TOPROD-PEND", "Production", false),
+      true
+    );
+    const toProdAcc = leftoverJob("JC-P2-TOPROD-ACC", "Production");
+    assertDeskAndMobile(
+      "Purchase→Production accepted currentDepartment=Production YES",
+      toProdAcc,
+      leftoverMoves("JC-P2-TOPROD-ACC", "Production", true),
+      true
+    );
+
+    const pendingAwayStillAtProd = leftoverJob("JC-P2-PEND-AWAY", "Production");
+    assertDeskAndMobile(
+      "pending Purchase→Plating while currentDepartment still Production Production NO",
+      pendingAwayStillAtProd,
+      leftoverMoves("JC-P2-PEND-AWAY", "Plating", false),
+      false
+    );
+    assert(
+      "pending Purchase→non-Production is routed away even if job card still says Production",
+      isRoutedAwayFromProductionQueue(pendingAwayStillAtProd, leftoverMoves("JC-P2-PEND-AWAY", "Plating", false)) === true
+    );
+
+    const inHousePendingHt = leftoverJob("JC-P2-IH-HT", "Production");
+    const inHousePendingHtMoves = [
+      { jobCardNo: "JC-P2-IH-HT", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-P2-IH-HT", fromDepartment: "Production", toDepartment: "Heat Treatment", accepted: false, quantity: 40 }
+    ];
+    assertDeskAndMobile(
+      "in-house Production→HT pending keeps Production YES",
+      inHousePendingHt,
+      inHousePendingHtMoves,
+      true
+    );
+  }
+
+  {
+    const platingPendingJob = {
+      jobCardNo: "JC-OS-PLATE-PEND",
+      orderQty: 100,
+      currentQty: 100,
+      currentDepartment: "Plating",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false,
+      outsourceStatus: "Completed"
+    };
+    const platingPendingMoves = [
+      { jobCardNo: "JC-OS-PLATE-PEND", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-OS-PLATE-PEND", fromDepartment: "Production", toDepartment: "Purchase", accepted: true, quantity: 40 },
+      { jobCardNo: "JC-OS-PLATE-PEND", fromDepartment: "Purchase", toDepartment: "Plating", accepted: false, quantity: 100 }
+    ];
+    assert(
+      "OUTSOURCE SFG Purchase→Plating pending accept is NOT in Production immediately",
+      isEligibleForProductionOperationalQueue(platingPendingJob, platingPendingMoves, { compulsory: true }) === false
+    );
+    assert(
+      "OUTSOURCE SFG pending Plating remains in Plating WIP via currentDepartment",
+      isVisibleInMobileDepartmentWip("Plating", platingPendingJob, platingPendingMoves) === true
+    );
+    assert(
+      "MOBILE Production hides pending outsourced SFG → Plating",
+      isVisibleInMobileDepartmentWip("Production", platingPendingJob, platingPendingMoves) === false
+    );
+
+    const platingJob = {
+      jobCardNo: "JC-OS-PLATE",
+      orderQty: 100,
+      currentQty: 100,
+      currentDepartment: "Plating",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false,
+      outsourceStatus: "Completed"
+    };
+    const platingMoves = [
+      { jobCardNo: "JC-OS-PLATE", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-OS-PLATE", fromDepartment: "Production", toDepartment: "Purchase", accepted: true, quantity: 40 },
+      { jobCardNo: "JC-OS-PLATE", fromDepartment: "Purchase", toDepartment: "Plating", accepted: true, quantity: 100 }
+    ];
+    assert(
+      "OUTSOURCE SFG Purchase→Plating accepted is NOT in Production queue",
+      isEligibleForProductionOperationalQueue(platingJob, platingMoves, { compulsory: true }) === false
+    );
+    assert(
+      "MOBILE Production hides accepted outsourced SFG → Plating",
+      isVisibleInMobileDepartmentWip("Production", platingJob, platingMoves) === false
+    );
+    assert(
+      "MOBILE Plating still shows accepted outsourced SFG",
+      isVisibleInMobileDepartmentWip("Plating", platingJob, platingMoves) === true
+    );
+
+    const htPendingJob = {
+      jobCardNo: "JC-OS-HT-PEND",
+      orderQty: 100,
+      currentQty: 100,
+      currentDepartment: "Heat Treatment",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false,
+      outsourceStatus: "Completed"
+    };
+    const htPendingMoves = [
+      { jobCardNo: "JC-OS-HT-PEND", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-OS-HT-PEND", fromDepartment: "Purchase", toDepartment: "Heat Treatment", accepted: false, quantity: 100 }
+    ];
+    assert(
+      "OUTSOURCE SFG Purchase→HT pending accept is NOT in Production immediately",
+      isEligibleForProductionOperationalQueue(htPendingJob, htPendingMoves, { compulsory: true }) === false
+    );
+    assert(
+      "MOBILE Production hides pending outsourced SFG → Heat Treatment",
+      isVisibleInMobileDepartmentWip("Production", htPendingJob, htPendingMoves) === false
+    );
+    assert(
+      "MOBILE Heat Treatment still shows pending outsourced SFG",
+      isVisibleInMobileDepartmentWip("Heat Treatment", htPendingJob, htPendingMoves) === true
+    );
+
+    const htJob = {
+      jobCardNo: "JC-OS-HT",
+      orderQty: 100,
+      currentQty: 100,
+      currentDepartment: "Heat Treatment",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false,
+      outsourceStatus: "Completed"
+    };
+    const htMoves = [
+      { jobCardNo: "JC-OS-HT", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-OS-HT", fromDepartment: "Purchase", toDepartment: "Heat Treatment", accepted: true, quantity: 100 }
+    ];
+    assert(
+      "OUTSOURCE SFG Purchase→Heat Treatment accepted is NOT in Production queue",
+      isEligibleForProductionOperationalQueue(htJob, htMoves, { compulsory: true }) === false
+    );
+    assert(
+      "MOBILE Production hides accepted outsourced SFG → Heat Treatment",
+      isVisibleInMobileDepartmentWip("Production", htJob, htMoves) === false
+    );
+
+    const normalProd = {
+      jobCardNo: "JC-NORMAL-PROD",
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const normalMoves = [
+      { jobCardNo: "JC-NORMAL-PROD", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 1000 }
+    ];
+    assert(
+      "NORMAL Production job remains visible in Production queue",
+      isEligibleForProductionOperationalQueue(normalProd, normalMoves, { compulsory: true }) === true
+    );
+    assert(
+      "MOBILE Production still shows normal Production job",
+      isVisibleInMobileDepartmentWip("Production", normalProd, normalMoves) === true
+    );
+
+    const rejectReturnJob = {
+      jobCardNo: "JC-REJ-RET",
+      orderQty: 100,
+      currentQty: 25,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const rejectReturnMoves = [
+      { jobCardNo: "JC-REJ-RET", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-REJ-RET", fromDepartment: "Production", toDepartment: "Heat Treatment", accepted: true, quantity: 100 },
+      { jobCardNo: "JC-REJ-RET", fromDepartment: "Heat Treatment", toDepartment: "Production", accepted: true, quantity: 25, processDetails: { isRejectionReturn: true } }
+    ];
+    assert(
+      "ACCEPTED rejection return to Production remains visible",
+      isEligibleForProductionOperationalQueue(rejectReturnJob, rejectReturnMoves, { compulsory: true }) === true
+    );
+    assert(
+      "MOBILE Production still shows accepted rejection return",
+      isVisibleInMobileDepartmentWip("Production", rejectReturnJob, rejectReturnMoves) === true
+    );
+
+    const reversalJob = {
+      jobCardNo: "JC-REV-PROD",
+      orderQty: 80,
+      currentQty: 20,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const reversalMoves = [
+      { jobCardNo: "JC-REV-PROD", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 80 },
+      { jobCardNo: "JC-REV-PROD", fromDepartment: "Production", toDepartment: "Plating", accepted: true, quantity: 80 },
+      { jobCardNo: "JC-REV-PROD", fromDepartment: "Plating", toDepartment: "Production", accepted: true, quantity: 20, transactionType: "REVERSAL" }
+    ];
+    assert(
+      "ACCEPTED REVERSAL to Production remains visible",
+      isEligibleForProductionOperationalQueue(reversalJob, reversalMoves, { compulsory: true }) === true
+    );
+    assert(
+      "MOBILE Production still shows accepted REVERSAL",
+      isVisibleInMobileDepartmentWip("Production", reversalJob, reversalMoves) === true
+    );
+
+    const rmIssueJob = {
+      jobCardNo: "JC-RM-ISSUE",
+      orderQty: 500,
+      currentQty: 500,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const rmIssueMoves = [
+      { jobCardNo: "JC-RM-ISSUE", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", accepted: true, quantity: 500 }
+    ];
+    assert(
+      "RM Store → Production issued/accepted job remains visible",
+      isEligibleForProductionOperationalQueue(rmIssueJob, rmIssueMoves, { compulsory: true }) === true
+    );
+    assert(
+      "MOBILE Production still shows RM Store → Production issued job",
+      isVisibleInMobileDepartmentWip("Production", rmIssueJob, rmIssueMoves) === true
+    );
+
+    const rmPendingJob = {
+      jobCardNo: "JC-RM-PEND",
+      orderQty: 500,
+      currentQty: 500,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const rmPendingMoves = [
+      { jobCardNo: "JC-RM-PEND", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", accepted: false, quantity: 500 }
+    ];
+    assert(
+      "RM Store → Production issue request still uses existing Production visibility",
+      isEligibleForProductionOperationalQueue(rmPendingJob, rmPendingMoves, { compulsory: false }) === true
+    );
   }
 
   console.log(`\nProcess 2 tests: ${passed} passed, ${failed} failed`);
