@@ -160,6 +160,36 @@ export function controllingIssuedQty(
   return issuedKgQty;
 }
 
+export function ensureDispatchStoreIssueOperationId(payload: { operationId?: string } | null | undefined): string {
+  if (!payload || typeof payload !== "object") {
+    throw new Error("operationId is required.");
+  }
+  const existing = String(payload.operationId || "").trim();
+  if (existing) return existing;
+  const minted =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? `dsi-${crypto.randomUUID()}`
+      : `dsi-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  payload.operationId = minted;
+  return minted;
+}
+
+export function createDispatchStoreIssueFingerprint(input: {
+  requirementId: string;
+  jobCardNo: string;
+  issuedBagQty: number;
+  issuedPcsQty: number;
+  issuedKgQty: number;
+}): string {
+  return [
+    String(input.requirementId || "").trim(),
+    normalizeJobCardNo(input.jobCardNo),
+    String(input.issuedBagQty),
+    String(input.issuedPcsQty),
+    String(input.issuedKgQty)
+  ].join("|");
+}
+
 function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`.toUpperCase();
 }
@@ -356,13 +386,19 @@ export async function issueDispatchStoreRequirementTx(
   }
 ): Promise<DispatchStoreTxResult<{ requirement: DispatchStoreRequirementRecord; issue: DispatchStoreIssueRecord; stock: StoreUnitStockRecord }>> {
   const requirementId = String(input.requirementId || "").trim();
+  const opKey = String(input.operationId || "").trim();
+  if (!opKey) {
+    return { success: false, statusCode: 400, error: "operationId is required. Retry the same issue with the identical operationId to avoid duplicate deductions." };
+  }
+  if (!store.runTransaction) {
+    return { success: false, statusCode: 500, error: "Atomic transaction store is required for Dispatch → Store issue." };
+  }
   const preview = requirementId ? await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, requirementId) : null;
   const serializeJob = preview?.jobCardNo ? String(preview.jobCardNo) : requirementId || "issue";
-  return runSerialized(store, storeUnitSerializeKey(serializeJob), async () => {
-    const now = input.nowIso || new Date().toISOString();
-    const opKey = String(input.operationId || "").trim();
-    if (opKey) {
-      const existing = await store.get("mfr_idempotency_keys", opKey);
+  return runSerialized(store, storeUnitSerializeKey(serializeJob), () =>
+    store.runTransaction!(async (tx) => {
+      const now = input.nowIso || new Date().toISOString();
+      const existing = await tx.get("mfr_idempotency_keys", opKey);
       if (existing?.result?.requirement && existing?.result?.issue && existing?.result?.stock) {
         return {
           success: true,
@@ -374,105 +410,123 @@ export async function issueDispatchStoreRequirementTx(
           }
         };
       }
-    }
-    if (!canIssueDispatchStoreStock(input.actor)) {
-      return { success: false, statusCode: 403, error: "Only Store (or admin) can issue independent unit stock." };
-    }
-    if (!requirementId) {
-      return { success: false, statusCode: 400, error: "requirementId is required." };
-    }
+      if (!canIssueDispatchStoreStock(input.actor)) {
+        return { success: false, statusCode: 403, error: "Only Store (or admin) can issue independent unit stock." };
+      }
+      if (!requirementId) {
+        return { success: false, statusCode: 400, error: "requirementId is required." };
+      }
 
-    const bag = parseNonNegativeQty(input.issuedBagQty);
-    const pcs = parseNonNegativeQty(input.issuedPcsQty);
-    const kg = parseNonNegativeQty(input.issuedKgQty);
-    if (bag.ok === false) return { success: false, statusCode: 400, error: bag.error };
-    if (pcs.ok === false) return { success: false, statusCode: 400, error: pcs.error };
-    if (kg.ok === false) return { success: false, statusCode: 400, error: kg.error };
-    if (!(bag.qty > 0 || pcs.qty > 0 || kg.qty > 0)) {
-      return { success: false, statusCode: 400, error: "At least one of Bags Issued, PCS Issued, or KG Issued must be greater than 0." };
-    }
+      const bag = parseNonNegativeQty(input.issuedBagQty);
+      const pcs = parseNonNegativeQty(input.issuedPcsQty);
+      const kg = parseNonNegativeQty(input.issuedKgQty);
+      if (bag.ok === false) return { success: false, statusCode: 400, error: bag.error };
+      if (pcs.ok === false) return { success: false, statusCode: 400, error: pcs.error };
+      if (kg.ok === false) return { success: false, statusCode: 400, error: kg.error };
+      if (!(bag.qty > 0 || pcs.qty > 0 || kg.qty > 0)) {
+        return { success: false, statusCode: 400, error: "At least one of Bags Issued, PCS Issued, or KG Issued must be greater than 0." };
+      }
 
-    const requirement = (await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, requirementId)) as DispatchStoreRequirementRecord | null;
-    if (!requirement) {
-      return { success: false, statusCode: 404, error: "Dispatch → Store requirement was not found." };
-    }
-    if (requirement.status === "COMPLETED" || Number(requirement.remainingQty) <= 0) {
-      return { success: false, statusCode: 409, error: "Requirement is already completed." };
-    }
+      const requirement = (await tx.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, requirementId)) as DispatchStoreRequirementRecord | null;
+      if (!requirement) {
+        return { success: false, statusCode: 404, error: "Dispatch → Store requirement was not found." };
+      }
+      if (requirement.status === "COMPLETED" || Number(requirement.remainingQty) <= 0) {
+        return { success: false, statusCode: 409, error: "Requirement is already completed." };
+      }
 
-    const controllingQty = controllingIssuedQty(requirement.requestedUnit, bag.qty, pcs.qty, kg.qty);
-    if (controllingQty > Number(requirement.remainingQty)) {
-      return {
-        success: false,
-        statusCode: 409,
-        error: `Controlling-unit issue (${controllingQty} ${requirement.requestedUnit}) exceeds remaining ${requirement.remainingQty} ${requirement.requestedUnit}.`
+      const controllingQty = controllingIssuedQty(requirement.requestedUnit, bag.qty, pcs.qty, kg.qty);
+      if (controllingQty > Number(requirement.remainingQty)) {
+        return {
+          success: false,
+          statusCode: 409,
+          error: `Controlling-unit issue (${controllingQty} ${requirement.requestedUnit}) exceeds remaining ${requirement.remainingQty} ${requirement.requestedUnit}.`
+        };
+      }
+
+      const jobCardNo = normalizeJobCardNo(requirement.jobCardNo);
+      const requestFingerprint = createDispatchStoreIssueFingerprint({
+        requirementId: requirement.id,
+        jobCardNo,
+        issuedBagQty: bag.qty,
+        issuedPcsQty: pcs.qty,
+        issuedKgQty: kg.qty
+      });
+      if (existing?.requestFingerprint && existing.requestFingerprint !== requestFingerprint) {
+        return {
+          success: false,
+          statusCode: 409,
+          error: "operationId was already used for a different Dispatch → Store issue. Use a new operationId for a distinct issue."
+        };
+      }
+
+      const existingStock = (await tx.get(STORE_UNIT_STOCK_COLLECTION, jobCardNo)) as StoreUnitStockRecord | null;
+      const current = existingStock || emptyStoreUnitStock(jobCardNo, now, input.actor.userName || input.actor.userId);
+
+      if (bag.qty > current.bagQty) {
+        return { success: false, statusCode: 409, error: `BAG stock is insufficient (available ${current.bagQty}, requested ${bag.qty}).` };
+      }
+      if (pcs.qty > current.pcsQty) {
+        return { success: false, statusCode: 409, error: `PCS stock is insufficient (available ${current.pcsQty}, requested ${pcs.qty}).` };
+      }
+      if (kg.qty > current.kgQty) {
+        return { success: false, statusCode: 409, error: `KG stock is insufficient (available ${current.kgQty}, requested ${kg.qty}).` };
+      }
+
+      const nextStock: StoreUnitStockRecord = {
+        ...current,
+        jobCardNo,
+        bagQty: current.bagQty - bag.qty,
+        pcsQty: current.pcsQty - pcs.qty,
+        kgQty: current.kgQty - kg.qty,
+        version: Number(current.version || 0) + 1,
+        updatedAt: now,
+        updatedBy: input.actor.userName || input.actor.userId
       };
-    }
+      const nextIssued = Number(requirement.issuedQty || 0) + controllingQty;
+      const nextRemaining = Number(requirement.requestedQty) - nextIssued;
+      const nextRequirement: DispatchStoreRequirementRecord = {
+        ...requirement,
+        issuedQty: nextIssued,
+        remainingQty: nextRemaining,
+        status: requirementStatus(nextIssued, Number(requirement.requestedQty)),
+        updatedAt: now,
+        version: Number(requirement.version || 1) + 1
+      };
+      const issue: DispatchStoreIssueRecord = {
+        id: newId("DSI"),
+        requirementId: requirement.id,
+        jobCardNo,
+        issuedBagQty: bag.qty,
+        issuedPcsQty: pcs.qty,
+        issuedKgQty: kg.qty,
+        controllingUnit: requirement.requestedUnit,
+        controllingQty,
+        issuedBy: input.actor.userName || input.actor.userId,
+        issuedAt: now,
+        remarks: input.remarks ? String(input.remarks) : undefined
+      };
 
-    const jobCardNo = normalizeJobCardNo(requirement.jobCardNo);
-    const existingStock = (await store.get(STORE_UNIT_STOCK_COLLECTION, jobCardNo)) as StoreUnitStockRecord | null;
-    const current = existingStock || emptyStoreUnitStock(jobCardNo, now, input.actor.userName || input.actor.userId);
-
-    if (bag.qty > current.bagQty) {
-      return { success: false, statusCode: 409, error: `BAG stock is insufficient (available ${current.bagQty}, requested ${bag.qty}).` };
-    }
-    if (pcs.qty > current.pcsQty) {
-      return { success: false, statusCode: 409, error: `PCS stock is insufficient (available ${current.pcsQty}, requested ${pcs.qty}).` };
-    }
-    if (kg.qty > current.kgQty) {
-      return { success: false, statusCode: 409, error: `KG stock is insufficient (available ${current.kgQty}, requested ${kg.qty}).` };
-    }
-
-    const nextStock: StoreUnitStockRecord = {
-      ...current,
-      jobCardNo,
-      bagQty: current.bagQty - bag.qty,
-      pcsQty: current.pcsQty - pcs.qty,
-      kgQty: current.kgQty - kg.qty,
-      version: Number(current.version || 0) + 1,
-      updatedAt: now,
-      updatedBy: input.actor.userName || input.actor.userId
-    };
-    const nextIssued = Number(requirement.issuedQty || 0) + controllingQty;
-    const nextRemaining = Number(requirement.requestedQty) - nextIssued;
-    const nextRequirement: DispatchStoreRequirementRecord = {
-      ...requirement,
-      issuedQty: nextIssued,
-      remainingQty: nextRemaining,
-      status: requirementStatus(nextIssued, Number(requirement.requestedQty)),
-      updatedAt: now,
-      version: Number(requirement.version || 1) + 1
-    };
-    const issue: DispatchStoreIssueRecord = {
-      id: newId("DSI"),
-      requirementId: requirement.id,
-      jobCardNo,
-      issuedBagQty: bag.qty,
-      issuedPcsQty: pcs.qty,
-      issuedKgQty: kg.qty,
-      controllingUnit: requirement.requestedUnit,
-      controllingQty,
-      issuedBy: input.actor.userName || input.actor.userId,
-      issuedAt: now,
-      remarks: input.remarks ? String(input.remarks) : undefined
-    };
-
-    await store.set(STORE_UNIT_STOCK_COLLECTION, jobCardNo, nextStock);
-    await store.set(DISPATCH_STORE_REQUIREMENT_COLLECTION, requirement.id, nextRequirement);
-    await store.set(DISPATCH_STORE_ISSUE_COLLECTION, issue.id, issue);
-    if (opKey) {
-      await store.set("mfr_idempotency_keys", opKey, {
+      tx.set(STORE_UNIT_STOCK_COLLECTION, jobCardNo, nextStock);
+      tx.set(DISPATCH_STORE_REQUIREMENT_COLLECTION, requirement.id, nextRequirement);
+      tx.set(DISPATCH_STORE_ISSUE_COLLECTION, issue.id, issue);
+      tx.set("mfr_idempotency_keys", opKey, {
         operationId: opKey,
+        requestFingerprint,
         result: { requirement: nextRequirement, issue, stock: nextStock }
       });
+      return { success: true, data: { requirement: nextRequirement, issue, stock: nextStock } };
+    })
+  ).then(async (result) => {
+    if (result.success && !result.cached && result.data) {
+      await writeAudit(
+        store,
+        input.actor,
+        "DISPATCH_STORE_ISSUE",
+        `Issued BAG ${result.data.issue.issuedBagQty}, PCS ${result.data.issue.issuedPcsQty}, KG ${result.data.issue.issuedKgQty} against ${result.data.requirement.id} (${result.data.requirement.requestedUnit}). Controlling ${result.data.issue.controllingQty}. Isolated from mfr_movements.`,
+        result.data.issue.issuedAt
+      );
     }
-    await writeAudit(
-      store,
-      input.actor,
-      "DISPATCH_STORE_ISSUE",
-      `Issued BAG ${bag.qty}, PCS ${pcs.qty}, KG ${kg.qty} against ${requirement.id} (${requirement.requestedUnit}). Controlling ${controllingQty}. Isolated from mfr_movements.`,
-      now
-    );
-    return { success: true, data: { requirement: nextRequirement, issue, stock: nextStock } };
+    return result;
   });
 }

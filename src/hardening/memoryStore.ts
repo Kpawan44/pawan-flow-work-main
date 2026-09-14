@@ -39,4 +39,24 @@ export class MemoryStore implements SimpleStore {
     );
     return run;
   }
+
+  async runTransaction<T>(fn: (tx: { get(collection: string, id: string): Promise<any | null>; set(collection: string, id: string, data: any): void }) => Promise<T>): Promise<T> {
+    const pending = new Map<string, { collection: string; id: string; data: any }>();
+    const keyOf = (collection: string, id: string) => `${collection}\0${id}`;
+    const tx = {
+      get: async (collection: string, id: string) => {
+        const hit = pending.get(keyOf(collection, id));
+        if (hit) return JSON.parse(JSON.stringify(hit.data));
+        return this.get(collection, id);
+      },
+      set: (collection: string, id: string, data: any) => {
+        pending.set(keyOf(collection, id), { collection, id, data: JSON.parse(JSON.stringify(data)) });
+      }
+    };
+    const result = await fn(tx);
+    for (const row of pending.values()) {
+      this.col(row.collection).set(row.id, row.data);
+    }
+    return result;
+  }
 }

@@ -538,6 +538,7 @@ export default function DepartmentOperations({
   const [dsIssueKg, setDsIssueKg] = useState<number>(0);
   const [dsIssueRemarks, setDsIssueRemarks] = useState<string>('');
   const [dsIssueError, setDsIssueError] = useState<string>('');
+  const [dsIssueOperationIds, setDsIssueOperationIds] = useState<Record<string, string>>({});
   const [openingJobCardNo, setOpeningJobCardNo] = useState<string>('');
   const [openingBag, setOpeningBag] = useState<number>(0);
   const [openingPcs, setOpeningPcs] = useState<number>(0);
@@ -5609,6 +5610,16 @@ Please adjust the quantity or request additional raw material issue.`);
                                 setDsIssueKg(0);
                                 setDsIssueRemarks('');
                                 setDsIssueError('');
+                                if (!isIssuing) {
+                                  setDsIssueOperationIds((prev) => {
+                                    if (prev[req.id]) return prev;
+                                    const minted =
+                                      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+                                        ? `dsi-${crypto.randomUUID()}`
+                                        : `dsi-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+                                    return { ...prev, [req.id]: minted };
+                                  });
+                                }
                               }}
                               className="bg-emerald-600 hover:bg-emerald-500 text-white text-[10.5px] font-bold py-1.5 px-3 rounded-md"
                             >
@@ -5651,7 +5662,8 @@ Please adjust the quantity or request additional raw material issue.`);
                                         issuedBagQty: dsIssueBag,
                                         issuedPcsQty: dsIssuePcs,
                                         issuedKgQty: dsIssueKg,
-                                        remarks: dsIssueRemarks
+                                        remarks: dsIssueRemarks,
+                                        operationId: dsIssueOperationIds[req.id]
                                       });
                                       setDispatchStoreRequirements((prev) => prev.map((r) => r.id === result.requirement.id ? result.requirement : r));
                                       setStoreUnitStock((prev) => {
@@ -5659,6 +5671,11 @@ Please adjust the quantity or request additional raw material issue.`);
                                         return [result.stock, ...rest];
                                       });
                                       setDispatchStoreIssues((prev) => [result.issue, ...prev]);
+                                      setDsIssueOperationIds((prev) => {
+                                        const next = { ...prev };
+                                        delete next[req.id];
+                                        return next;
+                                      });
                                       setActiveDsIssueId(null);
                                     } catch (err) {
                                       setDsIssueError(err instanceof Error ? err.message : 'Issue failed');

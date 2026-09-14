@@ -38,6 +38,7 @@ import {
   FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE
 } from '../hardening/clientLedgerGuards';
 import { omitLedgerFieldsFromJobCardPut } from '../hardening/jobCardUpdatePolicy';
+import { ensureDispatchStoreIssueOperationId } from '../hardening/dispatchStoreIssue';
 import {
   authorizeDatabaseRestore,
   isLedgerRestoreCollection,
@@ -1982,14 +1983,16 @@ export class DBService {
     issuedPcsQty?: number;
     issuedKgQty?: number;
     remarks?: string;
+    operationId?: string;
   }): Promise<{ requirement: DispatchStoreRequirement; issue: DispatchStoreIssue; stock: StoreUnitStock }> {
     const apiBase = getApiBaseUrl();
-    const operationId = `dsi-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
     const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
     const res = await fetch(`${apiBase}/api/dispatch-store/issues`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ ...input, operationId })
+      body: JSON.stringify({ ...payload, operationId })
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.success || !data.requirement || !data.issue || !data.stock) {

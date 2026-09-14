@@ -10,7 +10,13 @@ import {
   STORE_UNIT_STOCK_COLLECTION
 } from "../src/hardening/dispatchStoreIssue";
 import { isLedgerCollectionBlockedFromClientSync } from "../src/hardening/clientLedgerGuards";
-import { operationalCollectionsForFactoryReset } from "../src/hardening/factoryResetPolicy";
+import {
+  applyFactoryResetToStore,
+  DISPATCH_STORE_UNIT_LEDGER_COLLECTIONS,
+  liveFactoryDeleteAllPurgeCollections,
+  liveFactoryResetPurgeCollections,
+  operationalCollectionsForFactoryReset
+} from "../src/hardening/factoryResetPolicy";
 
 let passed = 0;
 let failed = 0;
@@ -93,6 +99,33 @@ async function makeReq(
   return r.data!.requirement;
 }
 
+let issueOpSeq = 0;
+function nextIssueOp(label = "auto"): string {
+  issueOpSeq += 1;
+  return `dsi-test-${label}-${issueOpSeq}`;
+}
+
+async function issueUnits(
+  store: MemoryStore,
+  input: {
+    requirementId: string;
+    issuedBagQty?: unknown;
+    issuedPcsQty?: unknown;
+    issuedKgQty?: unknown;
+    operationId?: string;
+    actor?: ReturnType<typeof storeActor>;
+  }
+) {
+  return issueDispatchStoreRequirementTx(store, {
+    operationId: input.operationId || nextIssueOp(),
+    requirementId: input.requirementId,
+    issuedBagQty: input.issuedBagQty,
+    issuedPcsQty: input.issuedPcsQty,
+    issuedKgQty: input.issuedKgQty,
+    actor: input.actor || storeActor()
+  });
+}
+
 async function run() {
   console.log("=== DISPATCH → STORE INDEPENDENT MULTI-UNIT INVENTORY ===");
 
@@ -101,7 +134,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 100, 0, 0);
     const req = await makeReq(store, "JC-DS-1", 40, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 40,
       actor: storeActor()
@@ -115,7 +148,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 0, 200, 0);
     const req = await makeReq(store, "JC-DS-1", 50, "PCS");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedPcsQty: 50,
       actor: storeActor()
@@ -129,7 +162,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 0, 0, 80);
     const req = await makeReq(store, "JC-DS-1", 25, "KG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedKgQty: 25,
       actor: storeActor()
@@ -143,7 +176,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 100, 0, 0);
     const req = await makeReq(store, "JC-DS-1", 100, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 20,
       actor: storeActor()
@@ -161,7 +194,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 0, 100, 0);
     const req = await makeReq(store, "JC-DS-1", 100, "PCS");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedPcsQty: 25,
       actor: storeActor()
@@ -174,7 +207,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 0, 0, 100);
     const req = await makeReq(store, "JC-DS-1", 100, "KG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedKgQty: 30,
       actor: storeActor()
@@ -187,7 +220,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 100, 500, 80);
     const req = await makeReq(store, "JC-DS-1", 100, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 20,
       issuedPcsQty: 500,
@@ -211,7 +244,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 10, 100, 50);
     const req = await makeReq(store, "JC-DS-1", 100, "PCS");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 10,
       issuedPcsQty: 25,
@@ -234,7 +267,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 5, 9, 100);
     const req = await makeReq(store, "JC-DS-1", 40, "KG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 5,
       issuedPcsQty: 9,
@@ -249,7 +282,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 200, 0, 0);
     const req = await makeReq(store, "JC-DS-1", 10, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 11,
       actor: storeActor()
@@ -263,7 +296,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 5, 100, 100);
     const req = await makeReq(store, "JC-DS-1", 10, "PCS");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 6,
       issuedPcsQty: 1,
@@ -278,7 +311,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 100, 2, 100);
     const req = await makeReq(store, "JC-DS-1", 10, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 1,
       issuedPcsQty: 3,
@@ -293,7 +326,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 100, 100, 4);
     const req = await makeReq(store, "JC-DS-1", 10, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 1,
       issuedKgQty: 5,
@@ -308,7 +341,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 10, 10, 1);
     const req = await makeReq(store, "JC-DS-1", 100, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 10,
       issuedPcsQty: 10,
@@ -333,8 +366,8 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 100, 0, 0);
     const req = await makeReq(store, "JC-DS-1", 100, "BAG");
-    await issueDispatchStoreRequirementTx(store, { requirementId: req.id, issuedBagQty: 20, actor: storeActor() });
-    await issueDispatchStoreRequirementTx(store, { requirementId: req.id, issuedBagQty: 30, actor: storeActor() });
+    await issueUnits(store, { requirementId: req.id, issuedBagQty: 20, actor: storeActor() });
+    await issueUnits(store, { requirementId: req.id, issuedBagQty: 30, actor: storeActor() });
     const reqAfter = await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, req.id);
     const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
     const stock = await store.get(STORE_UNIT_STOCK_COLLECTION, "JC-DS-1");
@@ -349,7 +382,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 100, 500, 80);
     const req = await makeReq(store, "JC-DS-1", 100, "BAG");
-    await issueDispatchStoreRequirementTx(store, {
+    await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 99,
       issuedPcsQty: 500,
@@ -358,7 +391,7 @@ async function run() {
     });
     let reqAfter = await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, req.id);
     assert("16a not complete until controlling quantity is met", reqAfter.status === "PARTIALLY_ISSUED");
-    const last = await issueDispatchStoreRequirementTx(store, {
+    const last = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 1,
       actor: storeActor()
@@ -372,7 +405,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 100, 1000, 1000);
     const req = await makeReq(store, "JC-DS-1", 100, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 0,
       issuedPcsQty: 1000,
@@ -394,8 +427,8 @@ async function run() {
     await seedStock(store, "JC-DS-1", 100, 0, 0);
     const req = await makeReq(store, "JC-DS-1", 1000, "BAG");
     const [a, b] = await Promise.all([
-      issueDispatchStoreRequirementTx(store, { requirementId: req.id, issuedBagQty: 80, actor: storeActor() }),
-      issueDispatchStoreRequirementTx(store, { requirementId: req.id, issuedBagQty: 80, actor: storeActor() })
+      issueUnits(store, { requirementId: req.id, issuedBagQty: 80, actor: storeActor() }),
+      issueUnits(store, { requirementId: req.id, issuedBagQty: 80, actor: storeActor() })
     ]);
     const stock = await store.get(STORE_UNIT_STOCK_COLLECTION, "JC-DS-1");
     const successes = [a, b].filter((r) => r.success);
@@ -409,8 +442,8 @@ async function run() {
     await seedStock(store, "JC-DS-1", 200, 0, 0);
     const req = await makeReq(store, "JC-DS-1", 100, "BAG");
     const [a, b] = await Promise.all([
-      issueDispatchStoreRequirementTx(store, { requirementId: req.id, issuedBagQty: 70, actor: storeActor() }),
-      issueDispatchStoreRequirementTx(store, { requirementId: req.id, issuedBagQty: 70, actor: storeActor() })
+      issueUnits(store, { requirementId: req.id, issuedBagQty: 70, actor: storeActor() }),
+      issueUnits(store, { requirementId: req.id, issuedBagQty: 70, actor: storeActor() })
     ]);
     const reqAfter = await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, req.id);
     const successes = [a, b].filter((r) => r.success);
@@ -425,7 +458,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 10, 10, 10);
     const req = await makeReq(store, "JC-DS-1", 10, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 0,
       issuedPcsQty: 0,
@@ -440,7 +473,7 @@ async function run() {
     await seedJob(store);
     await seedStock(store, "JC-DS-1", 10, 10, 10);
     const req = await makeReq(store, "JC-DS-1", 10, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(store, {
+    const issue = await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: -1,
       actor: storeActor()
@@ -465,7 +498,7 @@ async function run() {
     const onHandBefore = storeAuthoritativeOnHand(job, [inbound]);
     await seedStock(store, "JC-LEGACY", 50, 50, 50);
     const req = await makeReq(store, "JC-LEGACY", 10, "BAG");
-    await issueDispatchStoreRequirementTx(store, {
+    await issueUnits(store, {
       requirementId: req.id,
       issuedBagQty: 10,
       issuedPcsQty: 10,
@@ -495,7 +528,7 @@ async function run() {
     const noOpening = new MemoryStore();
     await seedJob(noOpening);
     const req = await makeReq(noOpening, "JC-DS-1", 1, "BAG");
-    const issue = await issueDispatchStoreRequirementTx(noOpening, {
+    const issue = await issueUnits(noOpening, {
       requirementId: req.id,
       issuedBagQty: 1,
       actor: storeActor()
@@ -505,10 +538,157 @@ async function run() {
 
   assert("client sync queue blocks independent-unit collections", isLedgerCollectionBlockedFromClientSync("mfr_store_unit_stock"));
   assert(
-    "factory reset includes independent-unit collections",
-    operationalCollectionsForFactoryReset().includes("mfr_dispatch_store_requirements") &&
-      operationalCollectionsForFactoryReset().includes("mfr_store_unit_stock")
+    "live factory-reset purge list includes all four unit-ledger collections",
+    DISPATCH_STORE_UNIT_LEDGER_COLLECTIONS.every((c) => liveFactoryResetPurgeCollections().includes(c))
   );
+  assert(
+    "live delete-all purge list includes all four unit-ledger collections",
+    DISPATCH_STORE_UNIT_LEDGER_COLLECTIONS.every((c) => liveFactoryDeleteAllPurgeCollections().includes(c))
+  );
+  assert(
+    "authoritative operational reset list includes all four unit-ledger collections",
+    DISPATCH_STORE_UNIT_LEDGER_COLLECTIONS.every((c) => operationalCollectionsForFactoryReset().includes(c))
+  );
+
+  {
+    const store = new MemoryStore();
+    await store.set("mfr_users", "super-1", { userId: "super-1", role: "super_admin", name: "Boss", active: true });
+    await store.set("mfr_user_credentials", "super-1", { pinHash: "hash" });
+    await store.set("mfr_users", "staff-1", { userId: "staff-1", role: "staff", name: "Staff" });
+    await seedJob(store, "JC-RESET");
+    await seedStock(store, "JC-RESET", 12, 8, 3);
+    const req = await makeReq(store, "JC-RESET", 5, "BAG");
+    const issued = await issueUnits(store, { requirementId: req.id, issuedBagQty: 2 });
+    assert("reset seed issue succeeded", issued.success === true);
+    const resetOut = await applyFactoryResetToStore(store, "gen-ds-reset");
+    const leftover = await Promise.all(DISPATCH_STORE_UNIT_LEDGER_COLLECTIONS.map((c) => store.list(c)));
+    const usersAfter = await store.list("mfr_users");
+    assert(
+      "factory reset actually empties all four independent-unit collections",
+      leftover.every((rows) => rows.length === 0)
+    );
+    assert(
+      "super_admin survives factory reset",
+      resetOut.preservedSuperAdmins.length === 1 &&
+        usersAfter.some((u) => u.role === "super_admin" && u.userId === "super-1") &&
+        !usersAfter.some((u) => u.role === "staff")
+    );
+  }
+
+  {
+    const store = new MemoryStore();
+    await seedJob(store);
+    await seedStock(store, "JC-DS-1", 100, 0, 0);
+    const req = await makeReq(store, "JC-DS-1", 40, "BAG");
+    const op = "dsi-stable-replay-1";
+    const first = await issueUnits(store, { requirementId: req.id, issuedBagQty: 10, operationId: op });
+    const second = await issueUnits(store, { requirementId: req.id, issuedBagQty: 10, operationId: op });
+    const stock = await store.get(STORE_UNIT_STOCK_COLLECTION, "JC-DS-1");
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+    const reqAfter = await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, req.id);
+    assert("same operationId second call is cached", first.success === true && second.success === true && second.cached === true);
+    assert("same operationId deducts stock only once", stock.bagQty === 90 && reqAfter.issuedQty === 10 && issues.length === 1);
+    assert("cached issue id matches first commit", second.data?.issue.id === first.data?.issue.id);
+  }
+
+  {
+    const store = new MemoryStore();
+    await seedJob(store);
+    await seedStock(store, "JC-DS-1", 100, 0, 0);
+    const req = await makeReq(store, "JC-DS-1", 80, "BAG");
+    const op = "dsi-stable-concurrent-1";
+    const [a, b] = await Promise.all([
+      issueUnits(store, { requirementId: req.id, issuedBagQty: 15, operationId: op }),
+      issueUnits(store, { requirementId: req.id, issuedBagQty: 15, operationId: op })
+    ]);
+    const stock = await store.get(STORE_UNIT_STOCK_COLLECTION, "JC-DS-1");
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+    const successes = [a, b].filter((r) => r.success);
+    const cached = [a, b].filter((r) => r.cached);
+    assert("concurrent same operationId only one deduction", successes.length === 2 && cached.length === 1 && stock.bagQty === 85 && issues.length === 1);
+  }
+
+  {
+    const store = new MemoryStore();
+    await seedJob(store);
+    await seedStock(store, "JC-DS-1", 100, 0, 0);
+    const req = await makeReq(store, "JC-DS-1", 50, "BAG");
+    const first = await issueUnits(store, { requirementId: req.id, issuedBagQty: 10, operationId: "dsi-legit-a" });
+    const second = await issueUnits(store, { requirementId: req.id, issuedBagQty: 10, operationId: "dsi-legit-b" });
+    const stock = await store.get(STORE_UNIT_STOCK_COLLECTION, "JC-DS-1");
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+    assert(
+      "different operationIds with identical quantities are separate issues",
+      first.success === true && second.success === true && !second.cached && stock.bagQty === 80 && issues.length === 2
+    );
+  }
+
+  {
+    class AbortBeforeCommitStore extends MemoryStore {
+      async runTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
+        const pending = new Map<string, { collection: string; id: string; data: any }>();
+        const keyOf = (collection: string, id: string) => `${collection}\0${id}`;
+        const tx = {
+          get: async (collection: string, id: string) => {
+            const hit = pending.get(keyOf(collection, id));
+            if (hit) return JSON.parse(JSON.stringify(hit.data));
+            return this.get(collection, id);
+          },
+          set: (collection: string, id: string, data: any) => {
+            pending.set(keyOf(collection, id), { collection, id, data: JSON.parse(JSON.stringify(data)) });
+          }
+        };
+        await fn(tx);
+        throw new Error("commit-aborted");
+      }
+    }
+    const store = new AbortBeforeCommitStore();
+    await seedJob(store);
+    await seedStock(store, "JC-DS-1", 50, 40, 30);
+    const req = await makeReq(store, "JC-DS-1", 20, "BAG");
+    let threw = false;
+    try {
+      await issueUnits(store, { requirementId: req.id, issuedBagQty: 5, issuedPcsQty: 4, issuedKgQty: 3 });
+    } catch {
+      threw = true;
+    }
+    const stock = await store.get(STORE_UNIT_STOCK_COLLECTION, "JC-DS-1");
+    const reqAfter = await store.get(DISPATCH_STORE_REQUIREMENT_COLLECTION, req.id);
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+    assert("atomic issue uses runTransaction and aborts with no writes", threw);
+    assert(
+      "aborted transaction leaves stock, requirement, and issue history untouched",
+      stock.bagQty === 50 && stock.pcsQty === 40 && stock.kgQty === 30 && reqAfter.remainingQty === 20 && issues.length === 0
+    );
+  }
+
+  {
+    const store = new MemoryStore();
+    let txCalls = 0;
+    const inner = store.runTransaction!.bind(store);
+    store.runTransaction = async (fn) => {
+      txCalls += 1;
+      return inner(fn);
+    };
+    await seedJob(store);
+    await seedStock(store, "JC-DS-1", 10, 0, 0);
+    const req = await makeReq(store, "JC-DS-1", 5, "BAG");
+    await issueUnits(store, { requirementId: req.id, issuedBagQty: 1 });
+    assert("issue commit invokes store.runTransaction", txCalls === 1);
+  }
+
+  {
+    const store = new MemoryStore();
+    await seedJob(store);
+    await seedStock(store, "JC-DS-1", 10, 0, 0);
+    const req = await makeReq(store, "JC-DS-1", 5, "BAG");
+    const missing = await issueDispatchStoreRequirementTx(store, {
+      requirementId: req.id,
+      issuedBagQty: 1,
+      actor: storeActor()
+    });
+    assert("issue without operationId is rejected", missing.success === false && missing.statusCode === 400);
+  }
 
   const denied = await createDispatchStoreRequirementTx(new MemoryStore(), {
     jobCardNo: "JC-X",
