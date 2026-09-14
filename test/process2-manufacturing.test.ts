@@ -19,7 +19,8 @@ import {
   unproducedOrderQty,
   shouldBlockPendingDuplicateRoute,
   isEligibleForProductionOperationalQueue,
-  isVisibleInMobileDepartmentWip
+  isVisibleInMobileDepartmentWip,
+  isRoutedAwayFromProductionQueue
 } from "../src/hardening/process2Manufacturing";
 
 let passed = 0;
@@ -407,6 +408,99 @@ async function run() {
     const movs = await store.list("mfr_movements");
     assert("TEST J 200+300+501 rejects excess", over.success === false && String(over.error || "").toLowerCase().includes("insufficient"), over.error);
     assert("TEST J remaining stays 500", unproducedOrderQty(job, movs) === 500);
+  }
+
+  {
+    const leftoverJob = (jc: string, currentDepartment: string, extra: Record<string, unknown> = {}) => ({
+      jobCardNo: jc,
+      orderQty: 100,
+      currentQty: 100,
+      currentDepartment,
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false,
+      ...extra
+    });
+    const leftoverMoves = (jc: string, dest: string, accepted: boolean) => [
+      { jobCardNo: jc, fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: jc, fromDepartment: "Purchase", toDepartment: dest, accepted, quantity: 100 }
+    ];
+    const assertDeskAndMobile = (name: string, card: any, moves: any[], expected: boolean) => {
+      const desk = isEligibleForProductionOperationalQueue(card, moves, { compulsory: true });
+      const mob = isVisibleInMobileDepartmentWip("Production", card, moves);
+      assert(`${name} desktop=${expected}`, desk === expected, `desktop=${desk}`);
+      assert(`${name} mobile matches desktop`, mob === desk, `mobile=${mob} desktop=${desk}`);
+    };
+
+    const purchaseDestinationsAway = [
+      "Plating",
+      "Heat Treatment",
+      "Store",
+      "Packing",
+      "Dispatch",
+      "Incoming Store",
+      "Raw Material Store"
+    ];
+    for (const dest of purchaseDestinationsAway) {
+      for (const accepted of [false, true]) {
+        const jc = `JC-P2-${dest.replace(/\s+/g, "")}-${accepted ? "ACC" : "PEND"}`;
+        const card = leftoverJob(jc, dest);
+        const moves = leftoverMoves(jc, dest, accepted);
+        assertDeskAndMobile(
+          `Purchase→${dest} accepted=${accepted} currentDepartment=${dest} Production NO`,
+          card,
+          moves,
+          false
+        );
+      }
+    }
+
+    const purchaseHold = leftoverJob("JC-P2-HOLD", "Purchase", { outsourceStatus: "Completed" });
+    assertDeskAndMobile(
+      "Purchase hold currentDepartment=Purchase Production NO",
+      purchaseHold,
+      leftoverMoves("JC-P2-HOLD", "Purchase", false),
+      false
+    );
+
+    const toProdPending = leftoverJob("JC-P2-TOPROD-PEND", "Production");
+    assertDeskAndMobile(
+      "Purchase→Production pending currentDepartment=Production YES",
+      toProdPending,
+      leftoverMoves("JC-P2-TOPROD-PEND", "Production", false),
+      true
+    );
+    const toProdAcc = leftoverJob("JC-P2-TOPROD-ACC", "Production");
+    assertDeskAndMobile(
+      "Purchase→Production accepted currentDepartment=Production YES",
+      toProdAcc,
+      leftoverMoves("JC-P2-TOPROD-ACC", "Production", true),
+      true
+    );
+
+    const pendingAwayStillAtProd = leftoverJob("JC-P2-PEND-AWAY", "Production");
+    assertDeskAndMobile(
+      "pending Purchase→Plating while currentDepartment still Production Production NO",
+      pendingAwayStillAtProd,
+      leftoverMoves("JC-P2-PEND-AWAY", "Plating", false),
+      false
+    );
+    assert(
+      "pending Purchase→non-Production is routed away even if job card still says Production",
+      isRoutedAwayFromProductionQueue(pendingAwayStillAtProd, leftoverMoves("JC-P2-PEND-AWAY", "Plating", false)) === true
+    );
+
+    const inHousePendingHt = leftoverJob("JC-P2-IH-HT", "Production");
+    const inHousePendingHtMoves = [
+      { jobCardNo: "JC-P2-IH-HT", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-P2-IH-HT", fromDepartment: "Production", toDepartment: "Heat Treatment", accepted: false, quantity: 40 }
+    ];
+    assertDeskAndMobile(
+      "in-house Production→HT pending keeps Production YES",
+      inHousePendingHt,
+      inHousePendingHtMoves,
+      true
+    );
   }
 
   {

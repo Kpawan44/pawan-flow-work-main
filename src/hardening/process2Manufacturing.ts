@@ -380,6 +380,38 @@ export function hasAcceptedProductionRejectionOrReversal(
   );
 }
 
+function hasPendingPurchaseRouteAwayFromProduction(
+  jobCardNo: string | undefined,
+  movements: Array<any> = []
+): boolean {
+  return (movements || []).some((m) => {
+    if (!m || !jobCardMatchesMovement(jobCardNo, m)) return false;
+    if (isDeletedMovement(m) || isFullyRejectedMovement(m) || isUndoneMovement(m)) return false;
+    if (m.accepted) return false;
+    if (normalizeDeptName(m.fromDepartment) !== "purchase") return false;
+    const to = normalizeDeptName(m.toDepartment);
+    return Boolean(to) && to !== "purchase" && to !== "production";
+  });
+}
+
+/**
+ * Operational assignment away from Production.
+ * currentDepartment is authoritative once set. A still-pending Purchase → non-Production
+ * movement covers the receipt window before custody accept updates the job card.
+ * Does not treat in-house Production → HT/Plating pending sends as leaving Production.
+ */
+export function isRoutedAwayFromProductionQueue(
+  job: { currentDepartment?: string; jobCardNo?: string },
+  movements: Array<any> = []
+): boolean {
+  const current = normalizeDeptName(job?.currentDepartment);
+  if (current === "production") {
+    return hasPendingPurchaseRouteAwayFromProduction(job?.jobCardNo, movements);
+  }
+  if (!current || current === "completed") return false;
+  return true;
+}
+
 function isOutsourcedSfgRoutedToPlatingOrHeatTreatment(
   job: {
     currentDepartment?: string;
@@ -388,21 +420,15 @@ function isOutsourcedSfgRoutedToPlatingOrHeatTreatment(
   },
   movements: Array<any> = []
 ): boolean {
-  const current = normalizeDeptName(job.currentDepartment);
-  if (current !== "plating" && current !== "heat treatment") return false;
-  const dest = current === "plating" ? "Plating" : "Heat Treatment";
-  if (String(job.outsourceStatus || "").trim().toLowerCase() === "completed") return true;
-  return hasPurchaseReceiptRouteToDepartment(job.jobCardNo, movements, dest);
+  return isRoutedAwayFromProductionQueue(job, movements);
 }
 
 /**
  * Production operational queue eligibility (desktop DepartmentOperations + mobile WIP).
  * Does not rewrite remainingAtProduction / unproducedOrderQty.
  *
- * After Purchase records an outsource receipt and sets currentDepartment to Plating
- * or Heat Treatment, historical Production quantity must not keep the job in Production.
- * Destination custody may still be pending (accepted: false). Genuine rejection/return
- * to Production still qualifies.
+ * Historical Production quantity must not resurrect a job already assigned to another
+ * department. Genuine rejection/return to Production still qualifies.
  */
 export function isEligibleForProductionOperationalQueue(
   job: {
@@ -422,7 +448,7 @@ export function isEligibleForProductionOperationalQueue(
 
   const returnedToProduction = hasAcceptedProductionRejectionOrReversal(job.jobCardNo, movements);
 
-  if (isOutsourcedSfgRoutedToPlatingOrHeatTreatment(job, movements) && !returnedToProduction) {
+  if (isRoutedAwayFromProductionQueue(job, movements) && !returnedToProduction) {
     return false;
   }
 
