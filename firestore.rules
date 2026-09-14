@@ -48,6 +48,18 @@ service cloud.firestore {
       return hasUserDoc(request.auth.uid) ? getUserDoc(request.auth.uid).department : '';
     }
 
+    // Process Designer writes: admin / super_admin / management (or Admin/Management dept).
+    // Shop-floor department membership alone is not enough.
+    function canEditProcessDesigner() {
+      return isActiveUser() && (
+        getUserRole() == 'admin' ||
+        getUserRole() == 'super_admin' ||
+        getUserRole() == 'management' ||
+        getUserDepartment() == 'Admin' ||
+        getUserDepartment() == 'Management'
+      );
+    }
+
     // Audit logs strictly require request.auth.uid as the authoritative actor identity
     function isValidAuditLog(data) {
       return data.keys().hasAll(['id', 'timestamp', 'userId', 'userName', 'action', 'details']) &&
@@ -170,6 +182,23 @@ service cloud.firestore {
     match /mfr_item_other_rm_links/{linkId} {
       allow read: if isActiveUser();
       allow write: if false;
+    }
+
+    // Process Designer (documentation graph only). Isolated from mfr_movements / job cards.
+    // Does not control manufacturing routing.
+    match /process_designer_graphs/{graphId} {
+      allow read: if isActiveUser();
+      allow create, update, delete: if canEditProcessDesigner();
+    }
+
+    match /process_designer_nodes/{nodeId} {
+      allow read: if isActiveUser();
+      allow create, update, delete: if canEditProcessDesigner();
+    }
+
+    match /process_designer_edges/{edgeId} {
+      allow read: if isActiveUser();
+      allow create, update, delete: if canEditProcessDesigner();
     }
   }
 }
