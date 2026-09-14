@@ -21,7 +21,7 @@ import {
   runTransaction
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink } from '../types';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink, DispatchStoreRequirement, DispatchStoreIssue, StoreUnitStock, StorePhysicalUnit } from '../types';
 import { 
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
@@ -1872,6 +1872,137 @@ export class DBService {
       'UNDO_TRANSFER',
       `Undid pending material transfer ${movementId} via reversal lineage (history preserved).`
     );
+  }
+
+  static async getDispatchStoreRequirements(): Promise<DispatchStoreRequirement[]> {
+    const apiBase = getApiBaseUrl();
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${apiBase}/api/dispatch-store/requirements`, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.requirements)) return data.requirements;
+    } catch (_) {}
+    if (useRealFirebase && db) {
+      const snap = await getDocs(collection(db, 'mfr_dispatch_store_requirements'));
+      return snap.docs.map((d) => d.data() as DispatchStoreRequirement);
+    }
+    return [];
+  }
+
+  static async getStoreUnitStock(): Promise<StoreUnitStock[]> {
+    const apiBase = getApiBaseUrl();
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${apiBase}/api/dispatch-store/stock`, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.stock)) return data.stock;
+    } catch (_) {}
+    if (useRealFirebase && db) {
+      const snap = await getDocs(collection(db, 'mfr_store_unit_stock'));
+      return snap.docs.map((d) => d.data() as StoreUnitStock);
+    }
+    return [];
+  }
+
+  static async getDispatchStoreIssues(): Promise<DispatchStoreIssue[]> {
+    const apiBase = getApiBaseUrl();
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${apiBase}/api/dispatch-store/issues`, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.issues)) return data.issues;
+    } catch (_) {}
+    if (useRealFirebase && db) {
+      const snap = await getDocs(collection(db, 'mfr_dispatch_store_issues'));
+      return snap.docs.map((d) => d.data() as DispatchStoreIssue);
+    }
+    return [];
+  }
+
+  static async createDispatchStoreRequirement(input: {
+    jobCardNo: string;
+    requestedQty: number;
+    requestedUnit: StorePhysicalUnit;
+    remarks?: string;
+  }): Promise<DispatchStoreRequirement> {
+    const apiBase = getApiBaseUrl();
+    const operationId = `dsr-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/requirements`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...input, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.requirement) {
+      throw new Error(data.error || `Failed to create Dispatch → Store requirement (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    await this.logAction(
+      user?.uid || 'dispatch',
+      user?.displayName || 'Dispatch',
+      'DISPATCH_STORE_REQUIREMENT',
+      `Requested ${input.requestedQty} ${input.requestedUnit} for ${input.jobCardNo}.`
+    );
+    return data.requirement as DispatchStoreRequirement;
+  }
+
+  static async applyStoreUnitOpening(input: {
+    jobCardNo: string;
+    bagQty?: number;
+    pcsQty?: number;
+    kgQty?: number;
+    remarks?: string;
+  }): Promise<StoreUnitStock> {
+    const apiBase = getApiBaseUrl();
+    const operationId = `dso-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/openings`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...input, kind: 'OPENING', operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.stock) {
+      throw new Error(data.error || `Failed to apply independent unit opening (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'STORE_UNIT_OPENING',
+      `Opening BAG ${input.bagQty || 0}, PCS ${input.pcsQty || 0}, KG ${input.kgQty || 0} for ${input.jobCardNo}.`
+    );
+    return data.stock as StoreUnitStock;
+  }
+
+  static async issueDispatchStoreRequirement(input: {
+    requirementId: string;
+    issuedBagQty?: number;
+    issuedPcsQty?: number;
+    issuedKgQty?: number;
+    remarks?: string;
+  }): Promise<{ requirement: DispatchStoreRequirement; issue: DispatchStoreIssue; stock: StoreUnitStock }> {
+    const apiBase = getApiBaseUrl();
+    const operationId = `dsi-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/issues`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...input, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.requirement || !data.issue || !data.stock) {
+      throw new Error(data.error || `Failed to issue independent unit stock (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'DISPATCH_STORE_ISSUE',
+      `Issued BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} against ${input.requirementId}.`
+    );
+    return { requirement: data.requirement, issue: data.issue, stock: data.stock };
   }
 
   // --- NOTIFICATIONS ---

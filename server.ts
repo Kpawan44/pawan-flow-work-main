@@ -21,6 +21,7 @@ import {
 } from "./src/hardening/process1Purchase";
 import { createPurchaseJobInwardTx } from "./src/hardening/purchaseJobCardCreate";
 import { mountLedgerRoutes } from "./src/hardening/ledgerHttp";
+import { mountDispatchStoreRoutes } from "./src/hardening/dispatchStoreHttp";
 import { runKeyedSerialized, runWithExclusiveLock } from "./src/hardening/movementSerialize";
 import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
@@ -3385,6 +3386,21 @@ async function startServer() {
         if (data?.jobCardNo) inMemoryJobCards.set(String(data.jobCardNo).toUpperCase(), data);
         broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: data?.jobCardNo || id, jobCard: data });
       }
+    }
+  });
+
+  mountDispatchStoreRoutes(app, {
+    requireAuth: requireFirebaseAuth,
+    getStore: createServerStore,
+    getActor: (req) => {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      if (!authUid || !requester) return null;
+      return actorFromRequester(authUid, requester);
+    },
+    onWrite: (collection, id, data) => {
+      inMemoryLedgerDocs.set(`${collection}:${id}`, data);
+      broadcastRealtimeEvent("DISPATCH_STORE_UPDATED", { collection, id, doc: data, jobCardNo: data?.jobCardNo });
     }
   });
 
