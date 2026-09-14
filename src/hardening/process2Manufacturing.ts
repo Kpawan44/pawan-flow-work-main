@@ -305,6 +305,86 @@ export function remainingAtProduction(
   return ledger;
 }
 
+function jobCardMatchesMovement(jobCardNo: string | undefined, movement: { jobCardNo?: string }): boolean {
+  return String(movement.jobCardNo || "").toLowerCase() === String(jobCardNo || "").toLowerCase();
+}
+
+/** Accepted Purchase → dest receipt (outsourced SFG routed after vendor receipt). */
+export function hasAcceptedPurchaseReceiptToDepartment(
+  jobCardNo: string | undefined,
+  movements: Array<{ jobCardNo?: string; fromDepartment?: string; toDepartment?: string; accepted?: boolean }> = [],
+  department: string
+): boolean {
+  const dest = normalizeDeptName(department);
+  return (movements || []).some(
+    (m) =>
+      m &&
+      jobCardMatchesMovement(jobCardNo, m) &&
+      m.accepted &&
+      normalizeDeptName(m.fromDepartment) === "purchase" &&
+      normalizeDeptName(m.toDepartment) === dest
+  );
+}
+
+export function hasAcceptedProductionRejectionOrReversal(
+  jobCardNo: string | undefined,
+  movements: Array<{
+    jobCardNo?: string;
+    toDepartment?: string;
+    accepted?: boolean;
+    processDetails?: any;
+    transactionType?: string;
+  }> = []
+): boolean {
+  return (movements || []).some(
+    (m) =>
+      m &&
+      jobCardMatchesMovement(jobCardNo, m) &&
+      m.accepted &&
+      normalizeDeptName(m.toDepartment) === "production" &&
+      isRejectionReturnMovement(m)
+  );
+}
+
+/**
+ * Production operational queue (DepartmentOperations) eligibility.
+ * Does not rewrite remainingAtProduction / unproducedOrderQty.
+ *
+ * Outsourced SFG with currentDepartment Plating or Heat Treatment and an accepted
+ * Purchase → that department movement must not reappear in Production because of
+ * historical Production quantity. Genuine rejection/return to Production still qualifies.
+ */
+export function isEligibleForProductionOperationalQueue(
+  job: {
+    completed?: boolean;
+    currentDepartment?: string;
+    status?: string;
+    jobCardNo?: string;
+    orderQty?: number;
+    processType?: string;
+    currentQty?: number;
+  },
+  movements: Array<any> = [],
+  opts?: { compulsory?: boolean }
+): boolean {
+  if (!job || job.completed) return false;
+
+  const current = normalizeDeptName(job.currentDepartment);
+  const outsourcedSfgAtPlatingOrHt =
+    (current === "plating" && hasAcceptedPurchaseReceiptToDepartment(job.jobCardNo, movements, "Plating")) ||
+    (current === "heat treatment" && hasAcceptedPurchaseReceiptToDepartment(job.jobCardNo, movements, "Heat Treatment"));
+  const returnedToProduction = hasAcceptedProductionRejectionOrReversal(job.jobCardNo, movements);
+
+  if (outsourcedSfgAtPlatingOrHt && !returnedToProduction) {
+    return false;
+  }
+
+  if (unproducedOrderQty(job, movements) > 0) return true;
+  if (remainingAtProduction(job, movements, opts) > 0) return true;
+  if (isVisibleInProductionQueue(job)) return true;
+  return returnedToProduction && remainingAtProduction(job, movements, opts) > 0;
+}
+
 export function remainingAtSourceDepartment(
   job: any,
   movements: any[] = [],
