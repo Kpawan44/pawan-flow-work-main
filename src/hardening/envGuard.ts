@@ -11,6 +11,8 @@ export const PRODUCTION_PROJECT_ID = "my-project-9ca72";
 export const PRODUCTION_DATABASE_ID = "ai-studio-remixraj-d7813b87-2e92-4313-844a-f71df5b7a8d";
 export const PRODUCTION_CLOUD_RUN_URL = "https://pmw-tracker-928410476586.asia-south1.run.app";
 export const PRODUCTION_HOSTING_URL = "https://my-project-9ca72.web.app";
+export const STAGING_PROJECT_ID = "pmw-tracker-staging-9ca72";
+export const STAGING_DATABASE_ID = "ai-studio-staging";
 
 export type AppEnvironment = 'production' | 'staging' | 'development' | 'test' | 'emulator';
 
@@ -211,4 +213,123 @@ export function resolveClientApiBaseUrl(options: {
 
   // Web served from same-origin server uses relative endpoint path ''
   return '';
+}
+
+export interface ClientFirebaseAppletConfig {
+  projectId: string;
+  appId?: string;
+  apiKey?: string;
+  authDomain?: string;
+  firestoreDatabaseId?: string;
+  storageBucket?: string;
+  messagingSenderId?: string;
+  measurementId?: string;
+  oAuthClientId?: string;
+  recaptchaSiteKey?: string;
+  [key: string]: unknown;
+}
+
+export function isStagingFirebaseTarget(
+  env: Record<string, string | undefined> = {}
+): boolean {
+  const appEnv = String(env.VITE_APP_ENV || env.APP_ENV || "").trim().toLowerCase();
+  if (appEnv === "staging") return true;
+  const project = String(env.VITE_FIREBASE_PROJECT_ID || env.GCP_PROJECT || "").trim();
+  const database = String(env.VITE_FIRESTORE_DATABASE_ID || env.FIRESTORE_DATABASE_ID || "").trim();
+  return project === STAGING_PROJECT_ID || database === STAGING_DATABASE_ID;
+}
+
+/**
+ * Copy Cloud Run / Docker GCP env into Vite-visible VITE_* keys before `vite build`.
+ * Does not overwrite VITE_* values that are already set.
+ */
+export function applyViteClientFirebaseEnvFromProcess(
+  env: Record<string, string | undefined> = process.env
+): Record<string, string | undefined> {
+  if (!env.VITE_FIREBASE_PROJECT_ID && env.GCP_PROJECT) {
+    env.VITE_FIREBASE_PROJECT_ID = env.GCP_PROJECT;
+  }
+  if (!env.VITE_FIRESTORE_DATABASE_ID && env.FIRESTORE_DATABASE_ID) {
+    env.VITE_FIRESTORE_DATABASE_ID = env.FIRESTORE_DATABASE_ID;
+  }
+  if (!env.VITE_APP_ENV && env.APP_ENV) {
+    env.VITE_APP_ENV = env.APP_ENV;
+  }
+  if (
+    !env.VITE_APP_ENV &&
+    (env.VITE_FIREBASE_PROJECT_ID === STAGING_PROJECT_ID || env.GCP_PROJECT === STAGING_PROJECT_ID)
+  ) {
+    env.VITE_APP_ENV = "staging";
+  }
+  return env;
+}
+
+/**
+ * Browser Firebase config resolver.
+ * Default: production applet JSON (unchanged).
+ * Staging builds / Cloud Run env select pmw-tracker-staging-9ca72 + ai-studio-staging.
+ */
+export function resolveClientFirebaseConfig(
+  fileConfig: ClientFirebaseAppletConfig,
+  envOverride?: Record<string, string | undefined>
+): ClientFirebaseAppletConfig {
+  const env = envOverride || (typeof process !== "undefined" ? process.env : {});
+  const base: ClientFirebaseAppletConfig = { ...fileConfig };
+
+  if (!isStagingFirebaseTarget(env)) {
+    return {
+      ...base,
+      projectId: String(base.projectId || PRODUCTION_PROJECT_ID),
+      firestoreDatabaseId: String(base.firestoreDatabaseId || PRODUCTION_DATABASE_ID)
+    };
+  }
+
+  const projectId = String(
+    env.VITE_FIREBASE_PROJECT_ID || env.GCP_PROJECT || STAGING_PROJECT_ID
+  ).trim();
+  const firestoreDatabaseId = String(
+    env.VITE_FIRESTORE_DATABASE_ID || env.FIRESTORE_DATABASE_ID || STAGING_DATABASE_ID
+  ).trim();
+
+  assertNotProductionTarget(
+    {
+      projectId,
+      databaseId: firestoreDatabaseId,
+      environment: "staging"
+    },
+    { ...env, APP_ENV: "staging" }
+  );
+
+  return {
+    ...base,
+    projectId,
+    firestoreDatabaseId,
+    authDomain: String(env.VITE_FIREBASE_AUTH_DOMAIN || `${projectId}.firebaseapp.com`).trim(),
+    storageBucket: String(
+      env.VITE_FIREBASE_STORAGE_BUCKET || `${projectId}.firebasestorage.app`
+    ).trim(),
+    apiKey: String(env.VITE_FIREBASE_API_KEY || base.apiKey || "").trim() || base.apiKey,
+    appId: String(env.VITE_FIREBASE_APP_ID || base.appId || "").trim() || base.appId
+  };
+}
+
+export function injectClientFirebaseConfigScript(
+  html: string,
+  config: { projectId: string; firestoreDatabaseId: string }
+): string {
+  const payload = {
+    projectId: config.projectId,
+    firestoreDatabaseId: config.firestoreDatabaseId
+  };
+  const script = `<script>window.__PMW_FIREBASE_CLIENT__=${JSON.stringify(payload)};</script>`;
+  if (html.includes("__PMW_FIREBASE_CLIENT__")) {
+    return html.replace(
+      /<script>window\.__PMW_FIREBASE_CLIENT__=.*?<\/script>/,
+      script
+    );
+  }
+  if (html.includes("<head>")) {
+    return html.replace("<head>", `<head>${script}`);
+  }
+  return `${script}${html}`;
 }

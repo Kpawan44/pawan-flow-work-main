@@ -27,6 +27,7 @@ import { splitJobCardTx } from "./src/hardening/splitJobCard";
 import { verifyBatchManifestTx } from "./src/hardening/batchManifestScanner";
 import { createSubcontractChallanTx } from "./src/hardening/subcontractChallan";
 import { assertStoreProcessTransferUnit } from "./src/hardening/storePlatingKgOnly";
+import { injectClientFirebaseConfigScript } from "./src/hardening/envGuard";
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
 
@@ -4109,11 +4110,17 @@ async function startServer() {
     }));
     app.use(express.static(distPath, {
       maxAge: '1h',
-      etag: true
+      etag: true,
+      index: false
     }));
     app.get('*', (req, res) => {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.sendFile(path.join(distPath, 'index.html'));
+      const indexPath = path.join(distPath, 'index.html');
+      const html = injectClientFirebaseConfigScript(fs.readFileSync(indexPath, 'utf8'), {
+        projectId: firebaseProjectId,
+        firestoreDatabaseId: firestoreDbId
+      });
+      res.type('html').send(html);
     });
   } else {
     const vite = await createViteServer({

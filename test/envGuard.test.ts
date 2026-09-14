@@ -10,7 +10,12 @@ import {
   PRODUCTION_PROJECT_ID,
   PRODUCTION_DATABASE_ID,
   PRODUCTION_CLOUD_RUN_URL,
-  PRODUCTION_HOSTING_URL
+  PRODUCTION_HOSTING_URL,
+  STAGING_PROJECT_ID,
+  STAGING_DATABASE_ID,
+  resolveClientFirebaseConfig,
+  applyViteClientFirebaseEnvFromProcess,
+  injectClientFirebaseConfigScript
 } from "../src/hardening/envGuard";
 import { MemoryStore } from "../src/hardening/memoryStore";
 
@@ -112,6 +117,82 @@ async function runTests() {
   await store.set("mfr_test", "doc-1", { status: "OK" });
   const fetched = await store.get("mfr_test", "doc-1");
   assert("TEST 10: MemoryStore remains completely isolated in memory", fetched?.status === "OK");
+
+  const productionApplet = {
+    projectId: PRODUCTION_PROJECT_ID,
+    firestoreDatabaseId: PRODUCTION_DATABASE_ID,
+    apiKey: "test-key",
+    authDomain: "my-project-9ca72.firebaseapp.com"
+  };
+
+  const prodClient = resolveClientFirebaseConfig(productionApplet, {
+    NODE_ENV: "production",
+    ALLOW_EXPLICIT_PRODUCTION: "true",
+    GCP_PROJECT: PRODUCTION_PROJECT_ID
+  });
+  assert(
+    "TEST 11: Production client config remains production project/database",
+    prodClient.projectId === PRODUCTION_PROJECT_ID &&
+      prodClient.firestoreDatabaseId === PRODUCTION_DATABASE_ID
+  );
+
+  const stagingClient = resolveClientFirebaseConfig(productionApplet, {
+    APP_ENV: "staging",
+    VITE_APP_ENV: "staging",
+    GCP_PROJECT: STAGING_PROJECT_ID,
+    FIRESTORE_DATABASE_ID: STAGING_DATABASE_ID
+  });
+  assert(
+    "TEST 12: Staging APP_ENV resolves client Firebase to staging project/database",
+    stagingClient.projectId === STAGING_PROJECT_ID &&
+      stagingClient.firestoreDatabaseId === STAGING_DATABASE_ID
+  );
+
+  const stagingVite = resolveClientFirebaseConfig(productionApplet, {
+    VITE_FIREBASE_PROJECT_ID: STAGING_PROJECT_ID,
+    VITE_FIRESTORE_DATABASE_ID: STAGING_DATABASE_ID
+  });
+  assert(
+    "TEST 13: Staging VITE_ Firebase vars resolve to pmw-tracker-staging-9ca72 + ai-studio-staging",
+    stagingVite.projectId === "pmw-tracker-staging-9ca72" &&
+      stagingVite.firestoreDatabaseId === "ai-studio-staging"
+  );
+
+  const mapped = applyViteClientFirebaseEnvFromProcess({
+    GCP_PROJECT: STAGING_PROJECT_ID,
+    FIRESTORE_DATABASE_ID: STAGING_DATABASE_ID
+  });
+  assert(
+    "TEST 14: Docker/Cloud Run GCP env is copied into VITE_ keys for the browser bundle",
+    mapped.VITE_FIREBASE_PROJECT_ID === STAGING_PROJECT_ID &&
+      mapped.VITE_FIRESTORE_DATABASE_ID === STAGING_DATABASE_ID &&
+      mapped.VITE_APP_ENV === "staging"
+  );
+
+  const injectedHtml = injectClientFirebaseConfigScript(
+    "<html><head></head><body></body></html>",
+    { projectId: STAGING_PROJECT_ID, firestoreDatabaseId: STAGING_DATABASE_ID }
+  );
+  assert(
+    "TEST 15: Cloud Run HTML injection exposes staging Firebase ids to the client",
+    injectedHtml.includes(STAGING_PROJECT_ID) &&
+      injectedHtml.includes(STAGING_DATABASE_ID) &&
+      injectedHtml.includes("__PMW_FIREBASE_CLIENT__")
+  );
+
+  try {
+    resolveClientFirebaseConfig(productionApplet, {
+      APP_ENV: "staging",
+      GCP_PROJECT: PRODUCTION_PROJECT_ID,
+      FIRESTORE_DATABASE_ID: PRODUCTION_DATABASE_ID
+    });
+    assert("TEST 16: Staging mode cannot target production Firebase", false, "Expected fail-closed");
+  } catch (err: any) {
+    assert(
+      "TEST 16: Staging mode cannot target production Firebase",
+      String(err.message || err).includes("Production Firebase")
+    );
+  }
 
   console.log("=================================================");
   console.log(`Results: ${passed} PASSED, ${failed} FAILED`);

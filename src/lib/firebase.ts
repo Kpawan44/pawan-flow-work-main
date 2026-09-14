@@ -20,7 +20,8 @@ import {
   limit,
   runTransaction
 } from 'firebase/firestore';
-import firebaseConfig from '../firebase-applet-config.json';
+import firebaseAppletConfig from '../firebase-applet-config.json';
+import { resolveClientFirebaseConfig, type ClientFirebaseAppletConfig } from '../hardening/envGuard';
 import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink } from '../types';
 import { 
   logJobCardToSheets, 
@@ -47,7 +48,30 @@ import { JOB_CARD_CLIENT_DESTROY_BLOCKED_MESSAGE } from '../hardening/jobCardTom
 import { assertStoreProcessTransferUnit } from '../hardening/storePlatingKgOnly';
 import { applyTargetedLedgerPatch } from '../hardening/targetedLedgerPatch';
 
-// Directly use configuration from firebase-applet-config.json
+function clientFirebaseEnv(): Record<string, string | undefined> {
+  const vite = (typeof import.meta !== 'undefined' ? (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env : undefined) || {};
+  const injected =
+    typeof window !== 'undefined'
+      ? (window as Window & { __PMW_FIREBASE_CLIENT__?: { projectId?: string; firestoreDatabaseId?: string } }).__PMW_FIREBASE_CLIENT__
+      : undefined;
+  return {
+    VITE_APP_ENV: vite.VITE_APP_ENV,
+    APP_ENV: vite.VITE_APP_ENV || vite.APP_ENV,
+    VITE_FIREBASE_PROJECT_ID: injected?.projectId || vite.VITE_FIREBASE_PROJECT_ID,
+    VITE_FIRESTORE_DATABASE_ID: injected?.firestoreDatabaseId || vite.VITE_FIRESTORE_DATABASE_ID,
+    VITE_FIREBASE_API_KEY: vite.VITE_FIREBASE_API_KEY,
+    VITE_FIREBASE_APP_ID: vite.VITE_FIREBASE_APP_ID,
+    VITE_FIREBASE_AUTH_DOMAIN: vite.VITE_FIREBASE_AUTH_DOMAIN,
+    VITE_FIREBASE_STORAGE_BUCKET: vite.VITE_FIREBASE_STORAGE_BUCKET,
+    GCP_PROJECT: injected?.projectId,
+    FIRESTORE_DATABASE_ID: injected?.firestoreDatabaseId
+  };
+}
+
+const firebaseConfig = resolveClientFirebaseConfig(
+  firebaseAppletConfig as ClientFirebaseAppletConfig,
+  clientFirebaseEnv()
+);
 export { firebaseConfig };
 
 // Check if the configuration consists of placeholders

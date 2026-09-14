@@ -230,4 +230,30 @@ describe("Process Designer Phase 1 — isolated documentation graph", () => {
     assert.match(app, /activeTab === 'outsource'/);
     assert.match(app, /activeTab === 'admin-users'/);
   });
+
+  test("Process Designer Firestore client uses resolved environment-aware Firebase config", () => {
+    const firebaseSrc = readSrc("src/lib/firebase.ts");
+    const storeSrc = readSrc("src/lib/processDesignerStore.ts");
+    const applet = JSON.parse(readSrc("src/firebase-applet-config.json"));
+    const rootApplet = JSON.parse(readSrc("firebase-applet-config.json"));
+    assert.match(firebaseSrc, /resolveClientFirebaseConfig/);
+    assert.match(firebaseSrc, /__PMW_FIREBASE_CLIENT__/);
+    assert.match(storeSrc, /from "\.\/firebase"/);
+    assert.equal(applet.projectId, "my-project-9ca72");
+    assert.equal(
+      applet.firestoreDatabaseId,
+      "ai-studio-remixraj-d7813b87-2e92-4313-844a-f71fdf5b7a8d"
+    );
+    assert.equal(rootApplet.projectId, "my-project-9ca72");
+    assert.equal(
+      rootApplet.firestoreDatabaseId,
+      "ai-studio-remixraj-d7813b87-2e92-4313-844a-f71fdf5b7a8d"
+    );
+    const dockerfile = readSrc("Dockerfile");
+    assert.match(dockerfile, /VITE_FIREBASE_PROJECT_ID/);
+    assert.match(dockerfile, /VITE_FIRESTORE_DATABASE_ID/);
+    const server = readSrc("server.ts");
+    assert.match(server, /injectClientFirebaseConfigScript/);
+    assert.match(server, /process\.env\.FIRESTORE_DATABASE_ID \|\| firebaseConfig\?\.firestoreDatabaseId/);
+  });
 });
