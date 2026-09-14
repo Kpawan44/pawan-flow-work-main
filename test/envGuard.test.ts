@@ -11,11 +11,14 @@ import {
   PRODUCTION_DATABASE_ID,
   PRODUCTION_CLOUD_RUN_URL,
   PRODUCTION_HOSTING_URL,
+  PRODUCTION_MESSAGING_SENDER_ID,
   STAGING_PROJECT_ID,
   STAGING_DATABASE_ID,
+  STAGING_MESSAGING_SENDER_ID,
   resolveClientFirebaseConfig,
   applyViteClientFirebaseEnvFromProcess,
-  injectClientFirebaseConfigScript
+  injectClientFirebaseConfigScript,
+  usesProductionFirebaseWebCredentials
 } from "../src/hardening/envGuard";
 import { MemoryStore } from "../src/hardening/memoryStore";
 
@@ -147,6 +150,12 @@ async function runTests() {
     stagingClient.projectId === STAGING_PROJECT_ID &&
       stagingClient.firestoreDatabaseId === STAGING_DATABASE_ID
   );
+  assert(
+    "TEST 12b: Staging config does not inherit production apiKey/appId/authDomain",
+    stagingClient.apiKey !== "test-key" &&
+      !usesProductionFirebaseWebCredentials(stagingClient) &&
+      stagingClient.messagingSenderId === STAGING_MESSAGING_SENDER_ID
+  );
 
   const stagingVite = resolveClientFirebaseConfig(productionApplet, {
     VITE_FIREBASE_PROJECT_ID: STAGING_PROJECT_ID,
@@ -171,12 +180,23 @@ async function runTests() {
 
   const injectedHtml = injectClientFirebaseConfigScript(
     "<html><head></head><body></body></html>",
-    { projectId: STAGING_PROJECT_ID, firestoreDatabaseId: STAGING_DATABASE_ID }
+    {
+      projectId: STAGING_PROJECT_ID,
+      firestoreDatabaseId: STAGING_DATABASE_ID,
+      apiKey: "staging-web-api-key",
+      appId: `1:${STAGING_MESSAGING_SENDER_ID}:web:abc`,
+      authDomain: `${STAGING_PROJECT_ID}.firebaseapp.com`,
+      storageBucket: `${STAGING_PROJECT_ID}.firebasestorage.app`,
+      messagingSenderId: STAGING_MESSAGING_SENDER_ID
+    }
   );
   assert(
-    "TEST 15: Cloud Run HTML injection exposes staging Firebase ids to the client",
+    "TEST 15: Cloud Run HTML injection exposes complete staging Firebase web config",
     injectedHtml.includes(STAGING_PROJECT_ID) &&
       injectedHtml.includes(STAGING_DATABASE_ID) &&
+      injectedHtml.includes("staging-web-api-key") &&
+      injectedHtml.includes(`1:${STAGING_MESSAGING_SENDER_ID}:web:abc`) &&
+      !injectedHtml.includes(PRODUCTION_MESSAGING_SENDER_ID) &&
       injectedHtml.includes("__PMW_FIREBASE_CLIENT__")
   );
 
@@ -193,6 +213,36 @@ async function runTests() {
       String(err.message || err).includes("Production Firebase")
     );
   }
+
+  const stagingComplete = resolveClientFirebaseConfig(productionApplet, {
+    GCP_PROJECT: STAGING_PROJECT_ID,
+    FIRESTORE_DATABASE_ID: STAGING_DATABASE_ID,
+    FIREBASE_WEB_APP_CONFIG: JSON.stringify({
+      apiKey: "AIzaSyStagingOnlyKey0000000000000000000",
+      appId: `1:${STAGING_MESSAGING_SENDER_ID}:web:seed`,
+      authDomain: `${STAGING_PROJECT_ID}.firebaseapp.com`,
+      storageBucket: `${STAGING_PROJECT_ID}.firebasestorage.app`,
+      messagingSenderId: STAGING_MESSAGING_SENDER_ID
+    })
+  });
+  assert(
+    "TEST 17: Staging web app config supplies apiKey/appId instead of production applet credentials",
+    stagingComplete.apiKey === "AIzaSyStagingOnlyKey0000000000000000000" &&
+      stagingComplete.appId?.includes(STAGING_MESSAGING_SENDER_ID) === true &&
+      stagingComplete.projectId === STAGING_PROJECT_ID &&
+      stagingComplete.firestoreDatabaseId === STAGING_DATABASE_ID &&
+      !usesProductionFirebaseWebCredentials(stagingComplete)
+  );
+
+  assert(
+    "TEST 18: Production web credentials detector recognizes production sender/app ids",
+    usesProductionFirebaseWebCredentials({
+      projectId: PRODUCTION_PROJECT_ID,
+      appId: `1:${PRODUCTION_MESSAGING_SENDER_ID}:web:b2a0ea5581df909548a353`,
+      messagingSenderId: PRODUCTION_MESSAGING_SENDER_ID,
+      authDomain: "my-project-9ca72.firebaseapp.com"
+    }) === true
+  );
 
   console.log("=================================================");
   console.log(`Results: ${passed} PASSED, ${failed} FAILED`);

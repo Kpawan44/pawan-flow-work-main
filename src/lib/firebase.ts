@@ -52,17 +52,32 @@ function clientFirebaseEnv(): Record<string, string | undefined> {
   const vite = (typeof import.meta !== 'undefined' ? (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env : undefined) || {};
   const injected =
     typeof window !== 'undefined'
-      ? (window as Window & { __PMW_FIREBASE_CLIENT__?: { projectId?: string; firestoreDatabaseId?: string } }).__PMW_FIREBASE_CLIENT__
+      ? (window as Window & {
+          __PMW_FIREBASE_CLIENT__?: {
+            projectId?: string;
+            firestoreDatabaseId?: string;
+            apiKey?: string;
+            appId?: string;
+            authDomain?: string;
+            storageBucket?: string;
+            messagingSenderId?: string;
+            measurementId?: string;
+            oAuthClientId?: string;
+          };
+        }).__PMW_FIREBASE_CLIENT__
       : undefined;
   return {
     VITE_APP_ENV: vite.VITE_APP_ENV,
     APP_ENV: vite.VITE_APP_ENV || vite.APP_ENV,
     VITE_FIREBASE_PROJECT_ID: injected?.projectId || vite.VITE_FIREBASE_PROJECT_ID,
     VITE_FIRESTORE_DATABASE_ID: injected?.firestoreDatabaseId || vite.VITE_FIRESTORE_DATABASE_ID,
-    VITE_FIREBASE_API_KEY: vite.VITE_FIREBASE_API_KEY,
-    VITE_FIREBASE_APP_ID: vite.VITE_FIREBASE_APP_ID,
-    VITE_FIREBASE_AUTH_DOMAIN: vite.VITE_FIREBASE_AUTH_DOMAIN,
-    VITE_FIREBASE_STORAGE_BUCKET: vite.VITE_FIREBASE_STORAGE_BUCKET,
+    VITE_FIREBASE_API_KEY: injected?.apiKey || vite.VITE_FIREBASE_API_KEY,
+    VITE_FIREBASE_APP_ID: injected?.appId || vite.VITE_FIREBASE_APP_ID,
+    VITE_FIREBASE_AUTH_DOMAIN: injected?.authDomain || vite.VITE_FIREBASE_AUTH_DOMAIN,
+    VITE_FIREBASE_STORAGE_BUCKET: injected?.storageBucket || vite.VITE_FIREBASE_STORAGE_BUCKET,
+    VITE_FIREBASE_MESSAGING_SENDER_ID: injected?.messagingSenderId || vite.VITE_FIREBASE_MESSAGING_SENDER_ID,
+    VITE_FIREBASE_MEASUREMENT_ID: injected?.measurementId || vite.VITE_FIREBASE_MEASUREMENT_ID,
+    VITE_FIREBASE_OAUTH_CLIENT_ID: injected?.oAuthClientId || vite.VITE_FIREBASE_OAUTH_CLIENT_ID,
     GCP_PROJECT: injected?.projectId,
     FIRESTORE_DATABASE_ID: injected?.firestoreDatabaseId
   };

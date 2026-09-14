@@ -238,6 +238,11 @@ describe("Process Designer Phase 1 — isolated documentation graph", () => {
     const rootApplet = JSON.parse(readSrc("firebase-applet-config.json"));
     assert.match(firebaseSrc, /resolveClientFirebaseConfig/);
     assert.match(firebaseSrc, /__PMW_FIREBASE_CLIENT__/);
+    assert.match(firebaseSrc, /injected\?\.apiKey/);
+    assert.match(firebaseSrc, /injected\?\.appId/);
+    assert.match(firebaseSrc, /injected\?\.authDomain/);
+    assert.match(firebaseSrc, /injected\?\.storageBucket/);
+    assert.match(firebaseSrc, /injected\?\.messagingSenderId/);
     assert.match(storeSrc, /from "\.\/firebase"/);
     assert.equal(applet.projectId, "my-project-9ca72");
     assert.equal(
@@ -254,6 +259,7 @@ describe("Process Designer Phase 1 — isolated documentation graph", () => {
     assert.match(dockerfile, /VITE_FIRESTORE_DATABASE_ID/);
     const server = readSrc("server.ts");
     assert.match(server, /injectClientFirebaseConfigScript/);
+    assert.match(server, /fetchFirebaseWebAppClientConfig/);
     assert.match(server, /process\.env\.FIRESTORE_DATABASE_ID \|\| firebaseConfig\?\.firestoreDatabaseId/);
   });
 });

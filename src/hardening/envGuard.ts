@@ -13,6 +13,8 @@ export const PRODUCTION_CLOUD_RUN_URL = "https://pmw-tracker-928410476586.asia-s
 export const PRODUCTION_HOSTING_URL = "https://my-project-9ca72.web.app";
 export const STAGING_PROJECT_ID = "pmw-tracker-staging-9ca72";
 export const STAGING_DATABASE_ID = "ai-studio-staging";
+export const PRODUCTION_MESSAGING_SENDER_ID = "928410476586";
+export const STAGING_MESSAGING_SENDER_ID = "818812911919";
 
 export type AppEnvironment = 'production' | 'staging' | 'development' | 'test' | 'emulator';
 
@@ -261,13 +263,74 @@ export function applyViteClientFirebaseEnvFromProcess(
   ) {
     env.VITE_APP_ENV = "staging";
   }
+  if (!env.VITE_FIREBASE_API_KEY && env.FIREBASE_API_KEY) {
+    env.VITE_FIREBASE_API_KEY = env.FIREBASE_API_KEY;
+  }
+  if (!env.VITE_FIREBASE_APP_ID && env.FIREBASE_APP_ID) {
+    env.VITE_FIREBASE_APP_ID = env.FIREBASE_APP_ID;
+  }
+  if (!env.VITE_FIREBASE_AUTH_DOMAIN && env.FIREBASE_AUTH_DOMAIN) {
+    env.VITE_FIREBASE_AUTH_DOMAIN = env.FIREBASE_AUTH_DOMAIN;
+  }
+  if (!env.VITE_FIREBASE_STORAGE_BUCKET && env.FIREBASE_STORAGE_BUCKET) {
+    env.VITE_FIREBASE_STORAGE_BUCKET = env.FIREBASE_STORAGE_BUCKET;
+  }
+  if (!env.VITE_FIREBASE_MESSAGING_SENDER_ID && env.FIREBASE_MESSAGING_SENDER_ID) {
+    env.VITE_FIREBASE_MESSAGING_SENDER_ID = env.FIREBASE_MESSAGING_SENDER_ID;
+  }
   return env;
+}
+
+export function stagingClientFirebaseSkeleton(): ClientFirebaseAppletConfig {
+  return {
+    projectId: STAGING_PROJECT_ID,
+    firestoreDatabaseId: STAGING_DATABASE_ID,
+    authDomain: `${STAGING_PROJECT_ID}.firebaseapp.com`,
+    storageBucket: `${STAGING_PROJECT_ID}.firebasestorage.app`,
+    messagingSenderId: STAGING_MESSAGING_SENDER_ID,
+    apiKey: "",
+    appId: "",
+    measurementId: "",
+    oAuthClientId: "",
+    recaptchaSiteKey: ""
+  };
+}
+
+export function usesProductionFirebaseWebCredentials(
+  config: Partial<ClientFirebaseAppletConfig> | null | undefined
+): boolean {
+  const appId = String(config?.appId || "");
+  const authDomain = String(config?.authDomain || "");
+  const messagingSenderId = String(config?.messagingSenderId || "");
+  const storageBucket = String(config?.storageBucket || "");
+  const oAuth = String(config?.oAuthClientId || "");
+  const projectId = String(config?.projectId || "");
+  return (
+    projectId === PRODUCTION_PROJECT_ID ||
+    messagingSenderId === PRODUCTION_MESSAGING_SENDER_ID ||
+    appId.includes(PRODUCTION_MESSAGING_SENDER_ID) ||
+    authDomain.includes(PRODUCTION_PROJECT_ID) ||
+    storageBucket.includes(PRODUCTION_PROJECT_ID) ||
+    oAuth.includes(PRODUCTION_MESSAGING_SENDER_ID)
+  );
+}
+
+function parseFirebaseWebAppJson(raw: string | undefined): Partial<ClientFirebaseAppletConfig> | null {
+  if (!raw || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed as Partial<ClientFirebaseAppletConfig>;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Browser Firebase config resolver.
  * Default: production applet JSON (unchanged).
- * Staging builds / Cloud Run env select pmw-tracker-staging-9ca72 + ai-studio-staging.
+ * Staging must use a complete staging web app config. Production apiKey/appId/authDomain
+ * /storageBucket/messagingSenderId are never reused for staging.
  */
 export function resolveClientFirebaseConfig(
   fileConfig: ClientFirebaseAppletConfig,
@@ -284,11 +347,15 @@ export function resolveClientFirebaseConfig(
     };
   }
 
+  const fetched =
+    parseFirebaseWebAppJson(env.FIREBASE_WEB_APP_CONFIG) ||
+    parseFirebaseWebAppJson(env.FIREBASE_CONFIG);
+  const skeleton = stagingClientFirebaseSkeleton();
   const projectId = String(
-    env.VITE_FIREBASE_PROJECT_ID || env.GCP_PROJECT || STAGING_PROJECT_ID
+    env.VITE_FIREBASE_PROJECT_ID || env.GCP_PROJECT || fetched?.projectId || skeleton.projectId
   ).trim();
   const firestoreDatabaseId = String(
-    env.VITE_FIRESTORE_DATABASE_ID || env.FIRESTORE_DATABASE_ID || STAGING_DATABASE_ID
+    env.VITE_FIRESTORE_DATABASE_ID || env.FIRESTORE_DATABASE_ID || skeleton.firestoreDatabaseId
   ).trim();
 
   assertNotProductionTarget(
@@ -300,27 +367,70 @@ export function resolveClientFirebaseConfig(
     { ...env, APP_ENV: "staging" }
   );
 
-  return {
-    ...base,
+  const resolved: ClientFirebaseAppletConfig = {
+    ...skeleton,
     projectId,
     firestoreDatabaseId,
-    authDomain: String(env.VITE_FIREBASE_AUTH_DOMAIN || `${projectId}.firebaseapp.com`).trim(),
-    storageBucket: String(
-      env.VITE_FIREBASE_STORAGE_BUCKET || `${projectId}.firebasestorage.app`
+    authDomain: String(
+      env.VITE_FIREBASE_AUTH_DOMAIN || fetched?.authDomain || `${projectId}.firebaseapp.com`
     ).trim(),
-    apiKey: String(env.VITE_FIREBASE_API_KEY || base.apiKey || "").trim() || base.apiKey,
-    appId: String(env.VITE_FIREBASE_APP_ID || base.appId || "").trim() || base.appId
+    storageBucket: String(
+      env.VITE_FIREBASE_STORAGE_BUCKET ||
+        fetched?.storageBucket ||
+        `${projectId}.firebasestorage.app`
+    ).trim(),
+    messagingSenderId: String(
+      env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
+        fetched?.messagingSenderId ||
+        skeleton.messagingSenderId
+    ).trim(),
+    apiKey: String(env.VITE_FIREBASE_API_KEY || env.FIREBASE_API_KEY || fetched?.apiKey || "").trim(),
+    appId: String(env.VITE_FIREBASE_APP_ID || env.FIREBASE_APP_ID || fetched?.appId || "").trim(),
+    measurementId: String(env.VITE_FIREBASE_MEASUREMENT_ID || fetched?.measurementId || "").trim(),
+    oAuthClientId: String(env.VITE_FIREBASE_OAUTH_CLIENT_ID || fetched?.oAuthClientId || "").trim(),
+    recaptchaSiteKey: String(fetched?.recaptchaSiteKey || "").trim()
+  };
+
+  if (usesProductionFirebaseWebCredentials(resolved)) {
+    throw new Error(
+      "Staging Firebase client config must not reuse production web credentials (apiKey/appId/authDomain/storageBucket/messagingSenderId)."
+    );
+  }
+
+  return resolved;
+}
+
+export function publicClientFirebaseConfig(
+  config: ClientFirebaseAppletConfig
+): {
+  projectId: string;
+  firestoreDatabaseId: string;
+  apiKey: string;
+  appId: string;
+  authDomain: string;
+  storageBucket: string;
+  messagingSenderId: string;
+  measurementId?: string;
+  oAuthClientId?: string;
+} {
+  return {
+    projectId: String(config.projectId || ""),
+    firestoreDatabaseId: String(config.firestoreDatabaseId || ""),
+    apiKey: String(config.apiKey || ""),
+    appId: String(config.appId || ""),
+    authDomain: String(config.authDomain || ""),
+    storageBucket: String(config.storageBucket || ""),
+    messagingSenderId: String(config.messagingSenderId || ""),
+    measurementId: String(config.measurementId || ""),
+    oAuthClientId: String(config.oAuthClientId || "")
   };
 }
 
 export function injectClientFirebaseConfigScript(
   html: string,
-  config: { projectId: string; firestoreDatabaseId: string }
+  config: ClientFirebaseAppletConfig
 ): string {
-  const payload = {
-    projectId: config.projectId,
-    firestoreDatabaseId: config.firestoreDatabaseId
-  };
+  const payload = publicClientFirebaseConfig(config);
   const script = `<script>window.__PMW_FIREBASE_CLIENT__=${JSON.stringify(payload)};</script>`;
   if (html.includes("__PMW_FIREBASE_CLIENT__")) {
     return html.replace(

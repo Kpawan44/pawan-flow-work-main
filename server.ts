@@ -27,7 +27,13 @@ import { splitJobCardTx } from "./src/hardening/splitJobCard";
 import { verifyBatchManifestTx } from "./src/hardening/batchManifestScanner";
 import { createSubcontractChallanTx } from "./src/hardening/subcontractChallan";
 import { assertStoreProcessTransferUnit } from "./src/hardening/storePlatingKgOnly";
-import { injectClientFirebaseConfigScript } from "./src/hardening/envGuard";
+import {
+  injectClientFirebaseConfigScript,
+  isStagingFirebaseTarget,
+  resolveClientFirebaseConfig,
+  usesProductionFirebaseWebCredentials,
+  type ClientFirebaseAppletConfig
+} from "./src/hardening/envGuard";
 // Force IPv4 first to prevent dual-stack DNS timeout issues in Node.js fetch
 dns.setDefaultResultOrder("ipv4first");
 
@@ -202,6 +208,90 @@ async function startServer() {
     } catch (_) {
       return null;
     }
+  }
+
+  let cachedBrowserFirebaseConfig: ClientFirebaseAppletConfig | null = null;
+
+  async function fetchFirebaseWebAppClientConfig(projectId: string): Promise<Partial<ClientFirebaseAppletConfig> | null> {
+    try {
+      const token = await getGcpAccessToken();
+      if (!token) return null;
+      const listRes = await fetch(`https://firebase.googleapis.com/v1beta1/projects/${projectId}/webApps`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!listRes.ok) {
+        console.warn(`[Firebase] webApps list failed for ${projectId}: ${listRes.status}`);
+        return null;
+      }
+      const listJson: any = await listRes.json();
+      const apps = listJson.apps || listJson.webApps || [];
+      if (!Array.isArray(apps) || apps.length === 0) {
+        console.warn(`[Firebase] No web apps found for ${projectId}`);
+        return null;
+      }
+      const appName = String(apps[0].name || "");
+      if (!appName) return null;
+      const cfgRes = await fetch(`https://firebase.googleapis.com/v1beta1/${appName}/config`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!cfgRes.ok) {
+        console.warn(`[Firebase] webApp config failed for ${appName}: ${cfgRes.status}`);
+        return null;
+      }
+      const cfgRaw: any = await cfgRes.json();
+      const cfg = cfgRaw.configJson
+        ? JSON.parse(cfgRaw.configJson)
+        : cfgRaw;
+      return {
+        projectId: cfg.projectId || projectId,
+        apiKey: cfg.apiKey || cfg.api_key,
+        appId: cfg.appId || cfg.app_id,
+        authDomain: cfg.authDomain || cfg.auth_domain,
+        storageBucket: cfg.storageBucket || cfg.storage_bucket,
+        messagingSenderId: cfg.messagingSenderId || cfg.messaging_sender_id,
+        measurementId: cfg.measurementId || cfg.measurement_id
+      };
+    } catch (err: any) {
+      console.warn("[Firebase] Could not load web app client config:", err?.message || err);
+      return null;
+    }
+  }
+
+  async function loadBrowserFirebaseClientConfig(): Promise<ClientFirebaseAppletConfig> {
+    const staging = isStagingFirebaseTarget({
+      ...process.env,
+      GCP_PROJECT: firebaseProjectId,
+      FIRESTORE_DATABASE_ID: firestoreDbId
+    });
+    if (!staging && cachedBrowserFirebaseConfig) {
+      return cachedBrowserFirebaseConfig;
+    }
+    if (staging && cachedBrowserFirebaseConfig?.apiKey && !usesProductionFirebaseWebCredentials(cachedBrowserFirebaseConfig)) {
+      return cachedBrowserFirebaseConfig;
+    }
+
+    const fetched = staging ? await fetchFirebaseWebAppClientConfig(firebaseProjectId) : null;
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      GCP_PROJECT: firebaseProjectId,
+      FIRESTORE_DATABASE_ID: firestoreDbId,
+      VITE_FIREBASE_API_KEY: process.env.VITE_FIREBASE_API_KEY || process.env.FIREBASE_API_KEY || fetched?.apiKey,
+      VITE_FIREBASE_APP_ID: process.env.VITE_FIREBASE_APP_ID || process.env.FIREBASE_APP_ID || fetched?.appId,
+      VITE_FIREBASE_AUTH_DOMAIN: process.env.VITE_FIREBASE_AUTH_DOMAIN || process.env.FIREBASE_AUTH_DOMAIN || fetched?.authDomain,
+      VITE_FIREBASE_STORAGE_BUCKET: process.env.VITE_FIREBASE_STORAGE_BUCKET || process.env.FIREBASE_STORAGE_BUCKET || fetched?.storageBucket,
+      VITE_FIREBASE_MESSAGING_SENDER_ID:
+        process.env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
+        process.env.FIREBASE_MESSAGING_SENDER_ID ||
+        fetched?.messagingSenderId
+    };
+    const resolved = resolveClientFirebaseConfig(
+      (firebaseConfig || {}) as ClientFirebaseAppletConfig,
+      env
+    );
+    if (!staging || (resolved.apiKey && !usesProductionFirebaseWebCredentials(resolved))) {
+      cachedBrowserFirebaseConfig = resolved;
+    }
+    return resolved;
   }
 
   function buildFirestoreRestUrl(docPath: string, hasGcpToken: boolean, queryParams: Record<string, string> = {}): string {
@@ -4113,13 +4203,11 @@ async function startServer() {
       etag: true,
       index: false
     }));
-    app.get('*', (req, res) => {
+    app.get('*', async (req, res) => {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       const indexPath = path.join(distPath, 'index.html');
-      const html = injectClientFirebaseConfigScript(fs.readFileSync(indexPath, 'utf8'), {
-        projectId: firebaseProjectId,
-        firestoreDatabaseId: firestoreDbId
-      });
+      const clientConfig = await loadBrowserFirebaseClientConfig();
+      const html = injectClientFirebaseConfigScript(fs.readFileSync(indexPath, 'utf8'), clientConfig);
       res.type('html').send(html);
     });
   } else {
