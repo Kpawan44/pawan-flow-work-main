@@ -17,7 +17,8 @@ import {
   isRawMaterialStoreIssuingToProduction,
   sameDepartmentTransferBlocked,
   unproducedOrderQty,
-  shouldBlockPendingDuplicateRoute
+  shouldBlockPendingDuplicateRoute,
+  isEligibleForProductionOperationalQueue
 } from "../src/hardening/process2Manufacturing";
 
 let passed = 0;
@@ -405,6 +406,138 @@ async function run() {
     const movs = await store.list("mfr_movements");
     assert("TEST J 200+300+501 rejects excess", over.success === false && String(over.error || "").toLowerCase().includes("insufficient"), over.error);
     assert("TEST J remaining stays 500", unproducedOrderQty(job, movs) === 500);
+  }
+
+  {
+    const platingJob = {
+      jobCardNo: "JC-OS-PLATE",
+      orderQty: 100,
+      currentQty: 100,
+      currentDepartment: "Plating",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const platingMoves = [
+      { jobCardNo: "JC-OS-PLATE", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-OS-PLATE", fromDepartment: "Production", toDepartment: "Purchase", accepted: true, quantity: 40 },
+      { jobCardNo: "JC-OS-PLATE", fromDepartment: "Purchase", toDepartment: "Plating", accepted: true, quantity: 100 }
+    ];
+    assert(
+      "OUTSOURCE SFG Purchase→Plating is NOT in Production queue",
+      isEligibleForProductionOperationalQueue(platingJob, platingMoves, { compulsory: true }) === false
+    );
+    assert(
+      "OUTSOURCE SFG Purchase→Plating remains visible to Plating via currentDepartment",
+      platingJob.currentDepartment === "Plating"
+    );
+
+    const htJob = {
+      jobCardNo: "JC-OS-HT",
+      orderQty: 100,
+      currentQty: 100,
+      currentDepartment: "Heat Treatment",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const htMoves = [
+      { jobCardNo: "JC-OS-HT", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-OS-HT", fromDepartment: "Purchase", toDepartment: "Heat Treatment", accepted: true, quantity: 100 }
+    ];
+    assert(
+      "OUTSOURCE SFG Purchase→Heat Treatment is NOT in Production queue",
+      isEligibleForProductionOperationalQueue(htJob, htMoves, { compulsory: true }) === false
+    );
+
+    const normalProd = {
+      jobCardNo: "JC-NORMAL-PROD",
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const normalMoves = [
+      { jobCardNo: "JC-NORMAL-PROD", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 1000 }
+    ];
+    assert(
+      "NORMAL Production job remains visible in Production queue",
+      isEligibleForProductionOperationalQueue(normalProd, normalMoves, { compulsory: true }) === true
+    );
+
+    const rejectReturnJob = {
+      jobCardNo: "JC-REJ-RET",
+      orderQty: 100,
+      currentQty: 25,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const rejectReturnMoves = [
+      { jobCardNo: "JC-REJ-RET", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-REJ-RET", fromDepartment: "Production", toDepartment: "Heat Treatment", accepted: true, quantity: 100 },
+      { jobCardNo: "JC-REJ-RET", fromDepartment: "Heat Treatment", toDepartment: "Production", accepted: true, quantity: 25, processDetails: { isRejectionReturn: true } }
+    ];
+    assert(
+      "ACCEPTED rejection return to Production remains visible",
+      isEligibleForProductionOperationalQueue(rejectReturnJob, rejectReturnMoves, { compulsory: true }) === true
+    );
+
+    const reversalJob = {
+      jobCardNo: "JC-REV-PROD",
+      orderQty: 80,
+      currentQty: 20,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const reversalMoves = [
+      { jobCardNo: "JC-REV-PROD", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 80 },
+      { jobCardNo: "JC-REV-PROD", fromDepartment: "Production", toDepartment: "Plating", accepted: true, quantity: 80 },
+      { jobCardNo: "JC-REV-PROD", fromDepartment: "Plating", toDepartment: "Production", accepted: true, quantity: 20, transactionType: "REVERSAL" }
+    ];
+    assert(
+      "ACCEPTED REVERSAL to Production remains visible",
+      isEligibleForProductionOperationalQueue(reversalJob, reversalMoves, { compulsory: true }) === true
+    );
+
+    const rmIssueJob = {
+      jobCardNo: "JC-RM-ISSUE",
+      orderQty: 500,
+      currentQty: 500,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const rmIssueMoves = [
+      { jobCardNo: "JC-RM-ISSUE", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", accepted: true, quantity: 500 }
+    ];
+    assert(
+      "RM Store → Production issued/accepted job remains visible",
+      isEligibleForProductionOperationalQueue(rmIssueJob, rmIssueMoves, { compulsory: true }) === true
+    );
+
+    const rmPendingJob = {
+      jobCardNo: "JC-RM-PEND",
+      orderQty: 500,
+      currentQty: 500,
+      currentDepartment: "Production",
+      status: "In Process",
+      processType: "Manufacturing",
+      completed: false
+    };
+    const rmPendingMoves = [
+      { jobCardNo: "JC-RM-PEND", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", accepted: false, quantity: 500 }
+    ];
+    assert(
+      "RM Store → Production issue request still uses existing Production visibility",
+      isEligibleForProductionOperationalQueue(rmPendingJob, rmPendingMoves, { compulsory: false }) === true
+    );
   }
 
   console.log(`\nProcess 2 tests: ${passed} passed, ${failed} failed`);
