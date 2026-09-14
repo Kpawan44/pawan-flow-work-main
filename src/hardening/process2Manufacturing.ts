@@ -309,7 +309,41 @@ function jobCardMatchesMovement(jobCardNo: string | undefined, movement: { jobCa
   return String(movement.jobCardNo || "").toLowerCase() === String(jobCardNo || "").toLowerCase();
 }
 
-/** Accepted Purchase → dest receipt (outsourced SFG routed after vendor receipt). */
+/**
+ * Purchase → dest receipt created by outsource vendor receipt.
+ * Counts pending (accepted: false) and accepted rows. Destination custody
+ * acceptance must not be required to leave the Production operational queue.
+ */
+export function hasPurchaseReceiptRouteToDepartment(
+  jobCardNo: string | undefined,
+  movements: Array<{
+    jobCardNo?: string;
+    fromDepartment?: string;
+    toDepartment?: string;
+    accepted?: boolean;
+    deletedDate?: string;
+    isDeleted?: boolean;
+    status?: string;
+    issueStatus?: string;
+    resolutionStatus?: string;
+    undone?: boolean;
+  }> = [],
+  department: string
+): boolean {
+  const dest = normalizeDeptName(department);
+  return (movements || []).some(
+    (m) =>
+      m &&
+      jobCardMatchesMovement(jobCardNo, m) &&
+      !isDeletedMovement(m) &&
+      !isFullyRejectedMovement(m) &&
+      !isUndoneMovement(m) &&
+      normalizeDeptName(m.fromDepartment) === "purchase" &&
+      normalizeDeptName(m.toDepartment) === dest
+  );
+}
+
+/** Accepted Purchase → dest receipt (outsourced SFG after destination accept). */
 export function hasAcceptedPurchaseReceiptToDepartment(
   jobCardNo: string | undefined,
   movements: Array<{ jobCardNo?: string; fromDepartment?: string; toDepartment?: string; accepted?: boolean }> = [],
@@ -346,13 +380,29 @@ export function hasAcceptedProductionRejectionOrReversal(
   );
 }
 
+function isOutsourcedSfgRoutedToPlatingOrHeatTreatment(
+  job: {
+    currentDepartment?: string;
+    outsourceStatus?: string;
+    jobCardNo?: string;
+  },
+  movements: Array<any> = []
+): boolean {
+  const current = normalizeDeptName(job.currentDepartment);
+  if (current !== "plating" && current !== "heat treatment") return false;
+  const dest = current === "plating" ? "Plating" : "Heat Treatment";
+  if (String(job.outsourceStatus || "").trim().toLowerCase() === "completed") return true;
+  return hasPurchaseReceiptRouteToDepartment(job.jobCardNo, movements, dest);
+}
+
 /**
- * Production operational queue (DepartmentOperations) eligibility.
+ * Production operational queue eligibility (desktop DepartmentOperations + mobile WIP).
  * Does not rewrite remainingAtProduction / unproducedOrderQty.
  *
- * Outsourced SFG with currentDepartment Plating or Heat Treatment and an accepted
- * Purchase → that department movement must not reappear in Production because of
- * historical Production quantity. Genuine rejection/return to Production still qualifies.
+ * After Purchase records an outsource receipt and sets currentDepartment to Plating
+ * or Heat Treatment, historical Production quantity must not keep the job in Production.
+ * Destination custody may still be pending (accepted: false). Genuine rejection/return
+ * to Production still qualifies.
  */
 export function isEligibleForProductionOperationalQueue(
   job: {
@@ -363,19 +413,16 @@ export function isEligibleForProductionOperationalQueue(
     orderQty?: number;
     processType?: string;
     currentQty?: number;
+    outsourceStatus?: string;
   },
   movements: Array<any> = [],
   opts?: { compulsory?: boolean }
 ): boolean {
   if (!job || job.completed) return false;
 
-  const current = normalizeDeptName(job.currentDepartment);
-  const outsourcedSfgAtPlatingOrHt =
-    (current === "plating" && hasAcceptedPurchaseReceiptToDepartment(job.jobCardNo, movements, "Plating")) ||
-    (current === "heat treatment" && hasAcceptedPurchaseReceiptToDepartment(job.jobCardNo, movements, "Heat Treatment"));
   const returnedToProduction = hasAcceptedProductionRejectionOrReversal(job.jobCardNo, movements);
 
-  if (outsourcedSfgAtPlatingOrHt && !returnedToProduction) {
+  if (isOutsourcedSfgRoutedToPlatingOrHeatTreatment(job, movements) && !returnedToProduction) {
     return false;
   }
 
@@ -383,6 +430,30 @@ export function isEligibleForProductionOperationalQueue(
   if (remainingAtProduction(job, movements, opts) > 0) return true;
   if (isVisibleInProductionQueue(job)) return true;
   return returnedToProduction && remainingAtProduction(job, movements, opts) > 0;
+}
+
+/** Mobile department WIP filter. Production uses the shared operational-queue helper. */
+export function isVisibleInMobileDepartmentWip(
+  department: string,
+  job: {
+    completed?: boolean;
+    currentDepartment?: string;
+    status?: string;
+    jobCardNo?: string;
+    orderQty?: number;
+    processType?: string;
+    currentQty?: number;
+    outsourceStatus?: string;
+  },
+  movements: Array<any> = [],
+  opts?: { compulsory?: boolean }
+): boolean {
+  if (!job || job.status === "Completed" || job.currentDepartment === "Completed" || job.completed) return false;
+  if (normalizeDeptName(department) === "production") {
+    return isEligibleForProductionOperationalQueue(job, movements, opts);
+  }
+  if (normalizeDeptName(job.currentDepartment) === normalizeDeptName(department)) return true;
+  return remainingAtDepartment(job, movements, department) > 0;
 }
 
 export function remainingAtSourceDepartment(

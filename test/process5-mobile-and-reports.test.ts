@@ -4,7 +4,8 @@ import {
   canFinalizeDispatch,
   remainingAtDepartment,
   storeAuthoritativeOnHand,
-  getCumulativeDispatchedQty
+  getCumulativeDispatchedQty,
+  isVisibleInMobileDepartmentWip
 } from "../src/hardening/process2Manufacturing";
 import { getJobCardProcessMetrics } from "../src/lib/metrics";
 import { MaterialMovement, JobCard } from "../src/types";
@@ -253,6 +254,50 @@ async function runProcess5Tests() {
       actor: { userId: "m-user", userName: "Mobile Operator", role: "staff", department: "Store", allowedDepartments: ["Store", "Dispatch"], accessList: ["Store", "Dispatch"] }
     });
     assert("TEST 18 Mobile/Desktop transaction contract parity verified", resMobile.success === true && resMobile.movement?.dispatchGroupNo === "MOB-GRP-100");
+  }
+
+  {
+    const osPlate = {
+      jobCardNo: "JC-P5-OS-PL",
+      orderQty: 50,
+      currentQty: 50,
+      currentDepartment: "Plating",
+      status: "In Process",
+      completed: false,
+      outsourceStatus: "Completed"
+    };
+    const osPlateMoves = [
+      { jobCardNo: "JC-P5-OS-PL", fromDepartment: "Purchase", toDepartment: "Plating", accepted: false, quantity: 50 }
+    ];
+    assert(
+      "TEST 19 Mobile Production WIP excludes pending outsourced SFG at Plating",
+      isVisibleInMobileDepartmentWip("Production", osPlate, osPlateMoves) === false
+    );
+    assert(
+      "TEST 19 Mobile Plating WIP includes pending outsourced SFG",
+      isVisibleInMobileDepartmentWip("Plating", osPlate, osPlateMoves) === true
+    );
+
+    const osHt = {
+      jobCardNo: "JC-P5-OS-HT",
+      orderQty: 50,
+      currentQty: 50,
+      currentDepartment: "Heat Treatment",
+      status: "In Process",
+      completed: false,
+      outsourceStatus: "Completed"
+    };
+    const osHtMoves = [
+      { jobCardNo: "JC-P5-OS-HT", fromDepartment: "Purchase", toDepartment: "Heat Treatment", accepted: true, quantity: 50 }
+    ];
+    assert(
+      "TEST 20 Mobile Production WIP excludes outsourced SFG at Heat Treatment",
+      isVisibleInMobileDepartmentWip("Production", osHt, osHtMoves) === false
+    );
+    assert(
+      "TEST 20 Mobile Heat Treatment WIP includes outsourced SFG",
+      isVisibleInMobileDepartmentWip("Heat Treatment", osHt, osHtMoves) === true
+    );
   }
 
   console.log(`\nProcess 5 Integration tests: ${passed} passed, ${failed} failed\n`);
