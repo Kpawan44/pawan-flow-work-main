@@ -501,6 +501,30 @@ async function run() {
       inHousePendingHtMoves,
       true
     );
+
+    const inHousePendingPlating = leftoverJob("JC-P2-IH-PL", "Production");
+    const inHousePendingPlatingMoves = [
+      { jobCardNo: "JC-P2-IH-PL", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, accepted: true, quantity: 100 },
+      { jobCardNo: "JC-P2-IH-PL", fromDepartment: "Production", toDepartment: "Plating", accepted: false, quantity: 40 }
+    ];
+    assertDeskAndMobile(
+      "in-house Production→Plating pending keeps Production YES",
+      inHousePendingPlating,
+      inHousePendingPlatingMoves,
+      true
+    );
+
+    for (const dest of purchaseDestinationsAway) {
+      const jc = `JC-P2-STILLPROD-${dest.replace(/\s+/g, "")}`;
+      const card = leftoverJob(jc, "Production");
+      const moves = leftoverMoves(jc, dest, false);
+      assertDeskAndMobile(
+        `pending Purchase→${dest} while currentDepartment still Production Production NO`,
+        card,
+        moves,
+        false
+      );
+    }
   }
 
   {
