@@ -1625,10 +1625,8 @@ Please adjust the quantity or request additional raw material issue.`);
       return;
     }
 
-    const availableJobQty = Number(jCard.orderQty || jCard.currentQty || remainingAvailable || 0);
     const bagResult = finalizePackingBagLines(
       packBagLines.map((row) => ({ bags: row.bags, pcsPerBag: row.pcsPerBag })),
-      availableJobQty
     );
     if (bagResult.ok === false) {
       alert(bagResult.error);

@@ -274,7 +274,7 @@ async function run() {
     assert("HT → Plating is not forced to KG-only", ht.success === true, ht.error);
   }
 
-  const single = finalizePackingBagLines([{ bags: 5, pcsPerBag: 100 }], 5000);
+  const single = finalizePackingBagLines([{ bags: 5, pcsPerBag: 100 }]);
   assert("8/9 single-size packing still works", single.ok === true && single.ok && single.grandTotal === 500);
 
   const mixed = finalizePackingBagLines(
@@ -283,14 +283,13 @@ async function run() {
       { bags: 5000, pcsPerBag: 1 },
       { bags: 2500, pcsPerBag: 1 }
     ],
-    19500
   );
   assert("10 mixed-bag 6000×2 + 5000×1 + 2500×1 = 19500", mixed.ok === true && mixed.ok && mixed.grandTotal === 19500);
   assert("10 mixed bag count 13500 bags across sizes", mixed.ok && mixed.boxCount === 13500);
   const rollup = packingDetailsFromBagLines(mixed as any);
   assert("10 rollup totalPcs preserved for print/QR", rollup.totalPcs === 19500 && rollup.bagLines.length === 3);
 
-  const setPack = finalizePackingBagLines([{ bags: 10, pcsPerBag: 50 }], 1000);
+  const setPack = finalizePackingBagLines([{ bags: 10, pcsPerBag: 50 }]);
   assert("11 Set Packing Bags × PCS still works", setPack.ok === true && setPack.ok && setPack.grandTotal === 500);
 
   {
