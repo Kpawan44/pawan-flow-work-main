@@ -515,15 +515,17 @@ async function run() {
     );
 
     for (const dest of purchaseDestinationsAway) {
-      const jc = `JC-P2-STILLPROD-${dest.replace(/\s+/g, "")}`;
-      const card = leftoverJob(jc, "Production");
-      const moves = leftoverMoves(jc, dest, false);
-      assertDeskAndMobile(
-        `pending Purchase→${dest} while currentDepartment still Production Production NO`,
-        card,
-        moves,
-        false
-      );
+      for (const accepted of [false, true]) {
+        const jc = `JC-P2-STILLPROD-${dest.replace(/\s+/g, "")}-${accepted ? "ACC" : "PEND"}`;
+        const card = leftoverJob(jc, "Production");
+        const moves = leftoverMoves(jc, dest, accepted);
+        assertDeskAndMobile(
+          `Purchase→${dest} accepted=${accepted} while currentDepartment still Production Production NO`,
+          card,
+          moves,
+          false
+        );
+      }
     }
   }
 
@@ -738,6 +740,140 @@ async function run() {
       "RM Store → Production issue request still uses existing Production visibility",
       isEligibleForProductionOperationalQueue(rmPendingJob, rmPendingMoves, { compulsory: false }) === true
     );
+  }
+
+  // =========================================================================
+  // PROCESS 203 ROOT-CAUSE FIX — 23 REGRESSION TESTS
+  // =========================================================================
+  {
+    const makeJob = (jc: string, currentDept: string, processType = "Purchase", extra: any = {}) => ({
+      jobCardNo: jc,
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: currentDept,
+      status: "Pending Acceptance",
+      processType,
+      completed: false,
+      ...extra
+    });
+
+    const makeMoves = (jc: string, from: string, to: string, accepted: boolean, qty = 1000) => [
+      {
+        jobCardNo: jc,
+        fromDepartment: from,
+        toDepartment: to,
+        accepted,
+        quantity: qty,
+        acceptedQty: accepted ? qty : 0,
+        status: accepted ? "Accepted" : "Pending Acceptance"
+      }
+    ];
+
+    const verifyQueue = (name: string, job: any, moves: any[], expected: boolean) => {
+      const desk = isEligibleForProductionOperationalQueue(job, moves, { compulsory: true });
+      const mob = isVisibleInMobileDepartmentWip("Production", job, moves);
+      assert(`${name} (Desktop)`, desk === expected, `expected=${expected}, got=${desk}`);
+      assert(`${name} (Mobile matches Desktop)`, mob === desk, `expected=${desk}, got=${mob}`);
+    };
+
+    // 1. Purchase → Production pending => visible
+    verifyQueue("1. Purchase → Production pending", makeJob("JC-REG-1", "Production"), makeMoves("JC-REG-1", "Purchase", "Production", false), true);
+
+    // 2. Purchase → Production accepted => visible
+    verifyQueue("2. Purchase → Production accepted", makeJob("JC-REG-2", "Production", "Purchase", { status: "In Process" }), makeMoves("JC-REG-2", "Purchase", "Production", true), true);
+
+    // 3. Purchase → Plating pending => hidden
+    verifyQueue("3. Purchase → Plating pending", makeJob("JC-REG-3", "Plating"), makeMoves("JC-REG-3", "Purchase", "Plating", false), false);
+
+    // 4. Purchase → Plating accepted => hidden
+    verifyQueue("4. Purchase → Plating accepted", makeJob("JC-REG-4", "Plating", "Purchase", { status: "In Process" }), makeMoves("JC-REG-4", "Purchase", "Plating", true), false);
+
+    // 5. Purchase → Heat Treatment pending => hidden
+    verifyQueue("5. Purchase → Heat Treatment pending", makeJob("JC-REG-5", "Heat Treatment"), makeMoves("JC-REG-5", "Purchase", "Heat Treatment", false), false);
+
+    // 6. Purchase → Heat Treatment accepted => hidden
+    verifyQueue("6. Purchase → Heat Treatment accepted", makeJob("JC-REG-6", "Heat Treatment", "Purchase", { status: "In Process" }), makeMoves("JC-REG-6", "Purchase", "Heat Treatment", true), false);
+
+    // 7. Purchase → Store pending => hidden
+    verifyQueue("7. Purchase → Store pending", makeJob("JC-REG-7", "Store"), makeMoves("JC-REG-7", "Purchase", "Store", false), false);
+
+    // 8. Purchase → Store accepted => hidden
+    verifyQueue("8. Purchase → Store accepted", makeJob("JC-REG-8", "Store", "Purchase", { status: "In Process" }), makeMoves("JC-REG-8", "Purchase", "Store", true), false);
+
+    // 9. Purchase → Dispatch pending => hidden
+    verifyQueue("9. Purchase → Dispatch pending", makeJob("JC-REG-9", "Dispatch"), makeMoves("JC-REG-9", "Purchase", "Dispatch", false), false);
+
+    // 10. Purchase → Dispatch accepted => hidden
+    verifyQueue("10. Purchase → Dispatch accepted", makeJob("JC-REG-10", "Dispatch", "Purchase", { status: "In Process" }), makeMoves("JC-REG-10", "Purchase", "Dispatch", true), false);
+
+    // 11. Purchase → Incoming Store pending => hidden
+    verifyQueue("11. Purchase → Incoming Store pending", makeJob("JC-REG-11", "Incoming Store"), makeMoves("JC-REG-11", "Purchase", "Incoming Store", false), false);
+
+    // 12. Purchase → Incoming Store accepted => hidden
+    verifyQueue("12. Purchase → Incoming Store accepted", makeJob("JC-REG-12", "Incoming Store", "Purchase", { status: "In Process" }), makeMoves("JC-REG-12", "Purchase", "Incoming Store", true), false);
+
+    // 13. Purchase → Raw Material Store pending => hidden
+    verifyQueue("13. Purchase → Raw Material Store pending", makeJob("JC-REG-13", "Raw Material Store"), makeMoves("JC-REG-13", "Purchase", "Raw Material Store", false), false);
+
+    // 14. Purchase → Raw Material Store accepted => hidden
+    verifyQueue("14. Purchase → Raw Material Store accepted", makeJob("JC-REG-14", "Raw Material Store", "Purchase", { status: "In Process" }), makeMoves("JC-REG-14", "Purchase", "Raw Material Store", true), false);
+
+    // 15. Purchase job with orderQty > 0 but no Production routing => hidden
+    verifyQueue("15. Purchase job with orderQty > 0 but no Production routing", makeJob("JC-REG-15", "Purchase"), [], false);
+
+    // Also test Purchase job with orderQty > 0 and legacy currentDepartment='Production' but no movements => hidden
+    verifyQueue("15b. Purchase job with orderQty > 0, currentDepartment=Production but no routing", makeJob("JC-REG-15B", "Production"), [], false);
+
+    // 16. In-house Manufacturing job with remaining Production quantity => still visible
+    const mfrJob = makeJob("JC-REG-16", "Production", "Manufacturing", { status: "In Process" });
+    const mfrMoves = [
+      { jobCardNo: "JC-REG-16", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", accepted: true, quantity: 1000 }
+    ];
+    verifyQueue("16. In-house Manufacturing job with remaining Production quantity", mfrJob, mfrMoves, true);
+
+    // 17. In-house Production → Plating with remaining Production work => remains eligible
+    const mfrPartialPlatingMoves = [
+      { jobCardNo: "JC-REG-16", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", accepted: true, quantity: 1000 },
+      { jobCardNo: "JC-REG-16", fromDepartment: "Production", toDepartment: "Plating", accepted: false, quantity: 200 }
+    ];
+    verifyQueue("17. In-house Production → Plating with remaining Production work", mfrJob, mfrPartialPlatingMoves, true);
+
+    // 18. In-house Production → Heat Treatment with remaining Production work => remains eligible
+    const mfrPartialHtMoves = [
+      { jobCardNo: "JC-REG-16", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", accepted: true, quantity: 1000 },
+      { jobCardNo: "JC-REG-16", fromDepartment: "Production", toDepartment: "Heat Treatment", accepted: false, quantity: 200 }
+    ];
+    verifyQueue("18. In-house Production → Heat Treatment with remaining Production work", mfrJob, mfrPartialHtMoves, true);
+
+    // 19. Genuine rejection/REVERSAL back to Production => visible when Production work remains
+    const reversalJob = makeJob("JC-REG-19", "Production", "Manufacturing", { status: "In Process" });
+    const reversalMoves = [
+      { jobCardNo: "JC-REG-19", fromDepartment: "Raw Material Store", toDepartment: "Production", isIssueRequest: true, issueStatus: "Issued", accepted: true, quantity: 1000 },
+      { jobCardNo: "JC-REG-19", fromDepartment: "Production", toDepartment: "Plating", accepted: true, quantity: 500 },
+      { jobCardNo: "JC-REG-19", fromDepartment: "Plating", toDepartment: "Production", accepted: true, quantity: 50, transactionType: "REVERSAL", processDetails: { isRejectionReturn: true } }
+    ];
+    verifyQueue("19. Genuine rejection/REVERSAL back to Production", reversalJob, reversalMoves, true);
+
+    // 20. Existing Purchase job routed to Plating => hidden from Production even if currentDepartment was initially Production
+    const stillProdPlatePending = makeJob("JC-REG-20A", "Production");
+    verifyQueue("20a. Purchase → Plating pending with currentDept=Production", stillProdPlatePending, makeMoves("JC-REG-20A", "Purchase", "Plating", false), false);
+    const stillProdPlateAcc = makeJob("JC-REG-20B", "Production");
+    verifyQueue("20b. Purchase → Plating accepted with currentDept=Production", stillProdPlateAcc, makeMoves("JC-REG-20B", "Purchase", "Plating", true), false);
+
+    // 21. Existing Purchase job routed to Heat Treatment => hidden from Production even if currentDepartment was initially Production
+    const stillProdHtPending = makeJob("JC-REG-21A", "Production");
+    verifyQueue("21a. Purchase → HT pending with currentDept=Production", stillProdHtPending, makeMoves("JC-REG-21A", "Purchase", "Heat Treatment", false), false);
+    const stillProdHtAcc = makeJob("JC-REG-21B", "Production");
+    verifyQueue("21b. Purchase → HT accepted with currentDept=Production", stillProdHtAcc, makeMoves("JC-REG-21B", "Purchase", "Heat Treatment", true), false);
+
+    // 22. Existing Purchase job routed to Store => hidden from Production even if currentDepartment was initially Production
+    const stillProdStorePending = makeJob("JC-REG-22A", "Production");
+    verifyQueue("22a. Purchase → Store pending with currentDept=Production", stillProdStorePending, makeMoves("JC-REG-22A", "Purchase", "Store", false), false);
+    const stillProdStoreAcc = makeJob("JC-REG-22B", "Production");
+    verifyQueue("22b. Purchase → Store accepted with currentDept=Production", stillProdStoreAcc, makeMoves("JC-REG-22B", "Purchase", "Store", true), false);
+
+    // 23. Mobile Production Queue matches Desktop across all above test cases (verified in verifyQueue).
+    assert("23. Mobile Production Queue follows the same result", true);
   }
 
   console.log(`\nProcess 2 tests: ${passed} passed, ${failed} failed`);

@@ -1057,6 +1057,7 @@ export default function DepartmentOperations({
       if (opts.existingJob) {
         onUpdateJobCard(opts.existingJob.jobCardNo, {
           status: 'Pending Acceptance',
+          currentDepartment: dest,
           materialType: opts.materialType,
           isWire: route.isWire,
           rawMaterialKind: route.rawMaterialKind || undefined,
@@ -1319,6 +1320,7 @@ export default function DepartmentOperations({
     });
 
     onUpdateJobCard(jCard.jobCardNo, {
+      currentDepartment: dest,
       materialType: purchaseMaterialType,
       isWire: purchaseMaterialType === 'Raw Material' ? route.isWire : undefined,
       rawMaterialKind: route.rawMaterialKind || undefined,

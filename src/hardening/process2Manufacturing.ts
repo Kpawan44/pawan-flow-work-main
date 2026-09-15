@@ -380,24 +380,31 @@ export function hasAcceptedProductionRejectionOrReversal(
   );
 }
 
-function hasPendingPurchaseRouteAwayFromProduction(
+function hasPurchaseRouteAwayFromProduction(
   jobCardNo: string | undefined,
   movements: Array<any> = []
 ): boolean {
   return (movements || []).some((m) => {
     if (!m || !jobCardMatchesMovement(jobCardNo, m)) return false;
     if (isDeletedMovement(m) || isFullyRejectedMovement(m) || isUndoneMovement(m)) return false;
-    if (m.accepted) return false;
     if (normalizeDeptName(m.fromDepartment) !== "purchase") return false;
     const to = normalizeDeptName(m.toDepartment);
     return Boolean(to) && to !== "purchase" && to !== "production";
   });
 }
 
+function hasPendingPurchaseRouteAwayFromProduction(
+  jobCardNo: string | undefined,
+  movements: Array<any> = []
+): boolean {
+  return hasPurchaseRouteAwayFromProduction(jobCardNo, movements);
+}
+
 /**
  * Operational assignment away from Production.
- * currentDepartment is authoritative once set. A still-pending Purchase → non-Production
- * movement covers the receipt window before custody accept updates the job card.
+ * currentDepartment is authoritative once set. A Purchase → non-Production
+ * movement covers the receipt window before custody accept updates the job card,
+ * and remains active after acceptance if currentDepartment was not yet relocated.
  * Does not treat in-house Production → HT/Plating pending sends as leaving Production.
  */
 export function isRoutedAwayFromProductionQueue(
@@ -406,7 +413,7 @@ export function isRoutedAwayFromProductionQueue(
 ): boolean {
   const current = normalizeDeptName(job?.currentDepartment);
   if (current === "production") {
-    return hasPendingPurchaseRouteAwayFromProduction(job?.jobCardNo, movements);
+    return hasPurchaseRouteAwayFromProduction(job?.jobCardNo, movements);
   }
   if (!current || current === "completed") return false;
   return true;
@@ -449,6 +456,39 @@ export function isEligibleForProductionOperationalQueue(
   const returnedToProduction = hasAcceptedProductionRejectionOrReversal(job.jobCardNo, movements);
 
   if (isRoutedAwayFromProductionQueue(job, movements) && !returnedToProduction) {
+    return false;
+  }
+
+  // Purchase material is purchased, not manufactured in-house.
+  // For processType === 'Purchase', a job must NOT be resurrected into Production solely by orderQty > 0.
+  // It is only eligible for Production if actively routed to/remaining at Production, or returned via genuine rejection/reversal.
+  if (job.processType === "Purchase") {
+    if (returnedToProduction && remainingAtProduction(job, movements, opts) > 0) return true;
+    const hasActivePurchaseToProduction = (movements || []).some(
+      (m) =>
+        m &&
+        jobCardMatchesMovement(job.jobCardNo, m) &&
+        !isDeletedMovement(m) &&
+        !isFullyRejectedMovement(m) &&
+        !isUndoneMovement(m) &&
+        normalizeDeptName(m.fromDepartment) === "purchase" &&
+        normalizeDeptName(m.toDepartment) === "production"
+    );
+    if (hasActivePurchaseToProduction) {
+      const pendingPurchaseToProd = (movements || []).some(
+        (m) =>
+          m &&
+          jobCardMatchesMovement(job.jobCardNo, m) &&
+          !isDeletedMovement(m) &&
+          !isFullyRejectedMovement(m) &&
+          !isUndoneMovement(m) &&
+          normalizeDeptName(m.fromDepartment) === "purchase" &&
+          normalizeDeptName(m.toDepartment) === "production" &&
+          !m.accepted
+      );
+      if (pendingPurchaseToProd) return true;
+      return remainingAtDepartment(job, movements, "Production") > 0;
+    }
     return false;
   }
 
