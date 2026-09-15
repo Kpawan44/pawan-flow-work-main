@@ -171,5 +171,23 @@ service cloud.firestore {
       allow read: if isActiveUser();
       allow write: if false;
     }
+
+    // Isolated Dispatch → Store independent BAG/PCS/KG ledger (Admin SDK writes only).
+    match /mfr_store_unit_stock/{jobCardNo} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+    match /mfr_dispatch_store_requirements/{requirementId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+    match /mfr_dispatch_store_issues/{issueId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+    match /mfr_store_unit_openings/{openingId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
   }
 }

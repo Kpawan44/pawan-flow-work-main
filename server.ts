@@ -21,6 +21,8 @@ import {
 } from "./src/hardening/process1Purchase";
 import { createPurchaseJobInwardTx } from "./src/hardening/purchaseJobCardCreate";
 import { mountLedgerRoutes } from "./src/hardening/ledgerHttp";
+import { mountDispatchStoreRoutes } from "./src/hardening/dispatchStoreHttp";
+import { liveFactoryDeleteAllPurgeCollections, liveFactoryResetPurgeCollections } from "./src/hardening/factoryResetPolicy";
 import { runKeyedSerialized, runWithExclusiveLock } from "./src/hardening/movementSerialize";
 import { computeRmRuntimeStock } from "./src/hardening/rmSkuMaster";
 import { splitJobCardTx } from "./src/hardening/splitJobCard";
@@ -2006,20 +2008,7 @@ async function startServer() {
     };
     const preservedPinHash = storedPinHash;
 
-    const operationalCollections = [
-      "mfr_users",
-      "mfr_user_credentials",
-      "mfr_job_cards",
-      "mfr_movements",
-      "mfr_process_transfers",
-      "mfr_audit_logs",
-      "mfr_idempotency_keys",
-      "mfr_serialize_locks",
-      "mfr_notifications",
-      "mfr_items",
-      "mfr_outsource_orders",
-      "mfr_deleted_users"
-    ];
+    const operationalCollections = liveFactoryResetPurgeCollections();
 
     console.log(`[AUDIT] [FACTORY_RESET_PROCESSING] OpId: ${resetOpId}, Preserving Super Admin '${preservedSuperAdmin.userId}' and beginning purge of operational collections...`);
 
@@ -2036,6 +2025,11 @@ async function startServer() {
           resetOpId
         });
       }
+    }
+
+    for (const key of [...inMemoryLedgerDocs.keys()]) {
+      const col = key.split(":")[0];
+      if (operationalCollections.includes(col)) inMemoryLedgerDocs.delete(key);
     }
 
     // 2. RE-ESTABLISH PRESERVED SUPER ADMIN IN FIRESTORE & SERVER STORES
@@ -2977,18 +2971,7 @@ async function startServer() {
       }
 
       // Target collections to completely erase
-      const collectionsToPurge = [
-        "mfr_job_cards",
-        "mfr_movements",
-        "mfr_items",
-        "mfr_process_transfers",
-        "mfr_outsource_orders",
-        "mfr_notifications",
-        "mfr_deleted_job_cards",
-        "mfr_deleted_movements",
-        "mfr_idempotency_keys",
-        "mfr_serialize_locks"
-      ];
+      const collectionsToPurge = liveFactoryDeleteAllPurgeCollections();
 
       const deletedCollections: Record<string, number> = {};
       const dbAdmin = getFirestoreAdmin();
@@ -3045,6 +3028,7 @@ async function startServer() {
       inMemoryJobCards.clear();
       inMemoryMovements.clear();
       inMemoryDeletedJobCards.clear();
+      inMemoryLedgerDocs.clear();
 
       // 4. Verify post-purge document counts across all target collections
       let totalRemaining = 0;
@@ -3344,6 +3328,30 @@ async function startServer() {
         db: getFirestoreAdmin() || null,
         fallback: runKeyedSerialized
       });
+    },
+    async runTransaction<T>(fn: (tx: { get(collection: string, id: string): Promise<any | null>; set(collection: string, id: string, data: any): void }) => Promise<T>): Promise<T> {
+      const dbAdmin = getFirestoreAdmin();
+      if (!dbAdmin) {
+        throw new Error("Firestore Admin is required for atomic Dispatch → Store issue.");
+      }
+      const pending: Array<{ collection: string; id: string; data: any }> = [];
+      const result = await dbAdmin.runTransaction(async (t: any) => {
+        pending.length = 0;
+        return fn({
+          get: async (collection: string, id: string) => {
+            const snap = await t.get(dbAdmin.collection(collection).doc(id));
+            return snap.exists ? snap.data() : null;
+          },
+          set: (collection: string, id: string, data: any) => {
+            pending.push({ collection, id, data });
+            t.set(dbAdmin.collection(collection).doc(id), data);
+          }
+        });
+      });
+      for (const w of pending) {
+        inMemoryLedgerDocs.set(`${w.collection}:${w.id}`, w.data);
+      }
+      return result;
     }
     };
   }
@@ -3385,6 +3393,21 @@ async function startServer() {
         if (data?.jobCardNo) inMemoryJobCards.set(String(data.jobCardNo).toUpperCase(), data);
         broadcastRealtimeEvent("JOB_UPDATED", { jobCardNo: data?.jobCardNo || id, jobCard: data });
       }
+    }
+  });
+
+  mountDispatchStoreRoutes(app, {
+    requireAuth: requireFirebaseAuth,
+    getStore: createServerStore,
+    getActor: (req) => {
+      const authUid = (req as any).authUid;
+      const requester = (req as any).user;
+      if (!authUid || !requester) return null;
+      return actorFromRequester(authUid, requester);
+    },
+    onWrite: (collection, id, data) => {
+      inMemoryLedgerDocs.set(`${collection}:${id}`, data);
+      broadcastRealtimeEvent("DISPATCH_STORE_UPDATED", { collection, id, doc: data, jobCardNo: data?.jobCardNo });
     }
   });
 

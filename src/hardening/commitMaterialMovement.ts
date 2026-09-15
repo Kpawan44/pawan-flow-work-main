@@ -76,11 +76,18 @@ export interface MovementCommitResult {
   writes?: Array<{ collection: string; id: string; data: any }>;
 }
 
+export interface AtomicStoreTransaction {
+  get(collection: string, id: string): Promise<any | null>;
+  set(collection: string, id: string, data: any): void;
+}
+
 export interface SimpleStore {
   get(collection: string, id: string): Promise<any | null>;
   set(collection: string, id: string, data: any): Promise<void>;
   list(collection: string): Promise<any[]>;
   runSerialized?: <T>(key: string, fn: () => Promise<T>) => Promise<T>;
+  /** All-or-nothing multi-document commit. Writes must not be visible unless fn resolves. */
+  runTransaction?: <T>(fn: (tx: AtomicStoreTransaction) => Promise<T>) => Promise<T>;
 }
 
 function normalizeDept(d: string): string {

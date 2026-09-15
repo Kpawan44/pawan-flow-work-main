@@ -570,3 +570,62 @@ export interface ItemOtherRawMaterialLink {
   updatedBy: string;
 }
 
+/** Isolated Dispatch → Store physical units. No conversion between BAG, PCS, and KG. */
+export type StorePhysicalUnit = 'BAG' | 'PCS' | 'KG';
+export type DispatchStoreRequirementStatus = 'PENDING' | 'PARTIALLY_ISSUED' | 'COMPLETED';
+
+export interface StoreUnitStock {
+  jobCardNo: string;
+  itemCode?: string;
+  itemName?: string;
+  bagQty: number;
+  pcsQty: number;
+  kgQty: number;
+  version: number;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+export interface StoreUnitOpening {
+  id: string;
+  jobCardNo: string;
+  bagQty: number;
+  pcsQty: number;
+  kgQty: number;
+  kind: 'OPENING' | 'RECEIPT';
+  createdBy: string;
+  createdAt: string;
+  remarks?: string;
+}
+
+export interface DispatchStoreRequirement {
+  id: string;
+  jobCardNo: string;
+  itemCode?: string;
+  itemName?: string;
+  requestedQty: number;
+  requestedUnit: StorePhysicalUnit;
+  issuedQty: number;
+  remainingQty: number;
+  status: DispatchStoreRequirementStatus;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  remarks?: string;
+  version: number;
+}
+
+export interface DispatchStoreIssue {
+  id: string;
+  requirementId: string;
+  jobCardNo: string;
+  issuedBagQty: number;
+  issuedPcsQty: number;
+  issuedKgQty: number;
+  controllingUnit: StorePhysicalUnit;
+  controllingQty: number;
+  issuedBy: string;
+  issuedAt: string;
+  remarks?: string;
+}
+

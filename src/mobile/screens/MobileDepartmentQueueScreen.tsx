@@ -17,7 +17,7 @@ import { JobCard, MaterialMovement, UserProfile, Department } from '../../types'
 import SwipeableQueueItem from '../shared/SwipeableQueueItem';
 import ConfirmationBottomSheet from '../shared/ConfirmationBottomSheet';
 import { SplitJobModal } from '../../components/SplitJobModal';
-import { remainingAtDepartment, remainingAtProduction, unproducedOrderQty } from '../../hardening/process2Manufacturing';
+import { isVisibleInMobileDepartmentWip } from '../../hardening/process2Manufacturing';
 
 interface MobileDepartmentQueueScreenProps {
   department: Department;
@@ -68,15 +68,8 @@ export const MobileDepartmentQueueScreen: React.FC<MobileDepartmentQueueScreenPr
   // 2. Active WIP Jobs currently residing at this station
   const currentWipJobs = useMemo(() => {
     if (!Array.isArray(jobCards)) return [];
-    return jobCards.filter((j) => {
-      if (!j || j.status === 'Completed' || j.currentDepartment === 'Completed' || j.completed) return false;
-      if (String(j.currentDepartment || '').toLowerCase() === deptLower) return true;
-      if (deptLower === 'production') {
-        return unproducedOrderQty(j, movements) > 0 || remainingAtProduction(j, movements) > 0;
-      }
-      return remainingAtDepartment(j, movements, department) > 0;
-    });
-  }, [jobCards, deptLower, department, movements]);
+    return jobCards.filter((j) => isVisibleInMobileDepartmentWip(department, j, movements));
+  }, [jobCards, department, movements]);
 
   // Filtered lists based on search input
   const filteredIngress = useMemo(() => {
