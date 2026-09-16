@@ -2,9 +2,10 @@ import type { Express, Request, Response, NextFunction } from "express";
 import type { SimpleStore } from "./commitMaterialMovement";
 import type { LedgerActor } from "./ledgerHttp";
 import {
-  createDispatchStoreRequirementTx,
+  calculateStoreAuthoritativeItemStock,
   DISPATCH_STORE_ISSUE_COLLECTION,
   DISPATCH_STORE_REQUIREMENT_COLLECTION,
+  issueStoreItemToDispatchTx,
   issueStoreToDispatchTx,
   issueDispatchStoreRequirementTx
 } from "./dispatchStoreIssue";
@@ -33,9 +34,11 @@ export function mountDispatchStoreRoutes(app: Express, ctx: DispatchStoreHttpCon
       const operationId = String(body.operationId || headerOp || "").trim() || undefined;
 
       let result;
-      if (body.jobCardNo) {
-        result = await issueStoreToDispatchTx(ctx.getStore(), {
+      if (body.itemName || body.jobCardNo) {
+        result = await issueStoreItemToDispatchTx(ctx.getStore(), {
           operationId,
+          itemName: body.itemName,
+          itemCode: body.itemCode,
           jobCardNo: body.jobCardNo,
           issuedBagQty: body.issuedBagQty,
           issuedPcsQty: body.issuedPcsQty,
@@ -56,16 +59,52 @@ export function mountDispatchStoreRoutes(app: Express, ctx: DispatchStoreHttpCon
       }
 
       if (!result.success) return res.status(result.statusCode || 400).json({ success: false, error: result.error });
-      const { issue, movement } = result.data!;
+      const { issue, movements } = result.data as { issue: any; movements: any[] };
+      const movement = movements && movements.length > 0 ? movements[0] : (result.data as any).movement;
       if (ctx.onWrite) {
         ctx.onWrite(DISPATCH_STORE_ISSUE_COLLECTION, issue.id, issue);
-        if (movement) {
+        if (movements && Array.isArray(movements)) {
+          for (const m of movements) {
+            ctx.onWrite("mfr_movements", m.movementId, m);
+          }
+        } else if (movement) {
           ctx.onWrite("mfr_movements", movement.movementId, movement);
         }
       }
-      return res.json({ success: true, cached: Boolean(result.cached), issue, movement });
+      return res.json({ success: true, cached: Boolean(result.cached), issue, movements: movements || [movement], movement });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || "Failed to issue Store stock to Dispatch." });
+    }
+  });
+
+  app.get("/api/dispatch-store/item-stock", ctx.requireAuth, async (req, res) => {
+    try {
+      const store = ctx.getStore();
+      const itemName = String(req.query.itemName || "").trim();
+      const itemCode = String(req.query.itemCode || "").trim() || undefined;
+      const jobCards = await store.list("mfr_job_cards");
+      const movements = await store.list("mfr_movements");
+      const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+
+      if (itemName) {
+        const stock = calculateStoreAuthoritativeItemStock(itemName, jobCards, movements, issues, itemCode);
+        return res.json({ success: true, stock });
+      }
+
+      // If no itemName specified, return all items available in Store
+      const uniqueItems = new Set<string>();
+      for (const j of jobCards) {
+        if (j?.itemName && !j.completed && j.status !== "Completed" && !j.isDeleted) {
+          uniqueItems.add(j.itemName);
+        }
+      }
+      const allStocks = Array.from(uniqueItems).map((item) =>
+        calculateStoreAuthoritativeItemStock(item, jobCards, movements, issues)
+      ).filter((s) => s.availableKg > 0 || s.availableBags > 0 || s.availablePcs > 0);
+
+      return res.json({ success: true, items: allStocks });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || "Failed to retrieve Store item stock." });
     }
   });
 

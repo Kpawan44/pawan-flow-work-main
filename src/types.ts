@@ -591,11 +591,21 @@ export interface DispatchStoreRequirement {
   version: number;
 }
 
+export interface DispatchStoreIssueSourceAllocation {
+  jobCardNo: string;
+  allocatedBagQty: number;
+  allocatedPcsQty: number;
+  allocatedKgQty: number;
+  movementId: string;
+  nativeUnit?: string;
+  nativeDeductedQty?: number;
+}
+
 export interface DispatchStoreIssue {
   id: string;
-  jobCardNo: string;
+  jobCardNo?: string;
   itemCode?: string;
-  itemName?: string;
+  itemName: string;
   fromDepartment: 'Store';
   toDepartment: 'Dispatch';
   issuedBagQty: number;
@@ -606,6 +616,7 @@ export interface DispatchStoreIssue {
   remarks?: string;
   operationId?: string;
   movementId?: string;
+  sourceAllocations?: DispatchStoreIssueSourceAllocation[];
   nativeUnit?: string;
   nativeDeductedQty?: number;
 }

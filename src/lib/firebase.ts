@@ -1926,14 +1926,16 @@ export class DBService {
     return data.requirement as DispatchStoreRequirement;
   }
 
-  static async issueStoreToDispatch(input: {
-    jobCardNo: string;
+  static async issueStoreItemToDispatch(input: {
+    itemName: string;
+    itemCode?: string;
+    jobCardNo?: string;
     issuedBagQty?: number;
     issuedPcsQty?: number;
     issuedKgQty?: number;
     remarks?: string;
     operationId?: string;
-  }): Promise<{ issue: DispatchStoreIssue; movement?: MaterialMovement }> {
+  }): Promise<{ issue: DispatchStoreIssue; movements?: MaterialMovement[]; movement?: MaterialMovement }> {
     const apiBase = getApiBaseUrl();
     const payload = { ...input };
     const operationId = ensureDispatchStoreIssueOperationId(payload);
@@ -1952,9 +1954,42 @@ export class DBService {
       user?.uid || 'store',
       user?.displayName || 'Store',
       'DISPATCH_STORE_ISSUE',
-      `Direct issue for ${input.jobCardNo}: BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} to Dispatch.`
+      `Direct issue for item '${input.itemName}': BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} to Dispatch.`
     );
-    return { issue: data.issue, movement: data.movement };
+    return { issue: data.issue, movements: data.movements, movement: data.movement };
+  }
+
+  static async issueStoreToDispatch(input: {
+    jobCardNo?: string;
+    itemName?: string;
+    itemCode?: string;
+    issuedBagQty?: number;
+    issuedPcsQty?: number;
+    issuedKgQty?: number;
+    remarks?: string;
+    operationId?: string;
+  }): Promise<{ issue: DispatchStoreIssue; movement?: MaterialMovement; movements?: MaterialMovement[] }> {
+    const apiBase = getApiBaseUrl();
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/issues`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.issue) {
+      throw new Error(data.error || `Failed to issue Store stock to Dispatch (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'DISPATCH_STORE_ISSUE',
+      `Direct issue for ${input.itemName || input.jobCardNo}: BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} to Dispatch.`
+    );
+    return { issue: data.issue, movement: data.movement, movements: data.movements };
   }
 
   static async issueDispatchStoreRequirement(input: {

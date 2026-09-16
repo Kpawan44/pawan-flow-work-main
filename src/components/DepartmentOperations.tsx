@@ -79,6 +79,7 @@ import {
   jobCardMatchesSelectedItemName,
   uniqueJobCardItemNames
 } from '../hardening/departmentJobCardFilter';
+import { calculateStoreAuthoritativeItemStock } from '../hardening/dispatchStoreIssue';
 import { enterAdvancesField, shouldIgnoreDuplicateSubmit } from '../hardening/tallyEntry';
 import JobStatusBadge from './JobStatusBadge';
 import SwipeableCard from './SwipeableCard';
@@ -523,6 +524,9 @@ export default function DepartmentOperations({
   const [activeDispJob, setActiveDispJob] = useState<string | null>(null);
   const [dispatchStoreRequirements, setDispatchStoreRequirements] = useState<DispatchStoreRequirement[]>([]);
   const [dispatchStoreIssues, setDispatchStoreIssues] = useState<DispatchStoreIssue[]>([]);
+  const [directIssueItemName, setDirectIssueItemName] = useState<string>('');
+  const [directIssueItemCode, setDirectIssueItemCode] = useState<string>('');
+  const [itemSearchQuery, setItemSearchQuery] = useState<string>('');
   const [directIssueJobCardNo, setDirectIssueJobCardNo] = useState<string>('');
   const [directIssueBag, setDirectIssueBag] = useState<number>(0);
   const [directIssuePcs, setDirectIssuePcs] = useState<number>(0);
@@ -3074,12 +3078,33 @@ Please adjust the quantity or request additional raw material issue.`);
                     const isIssuedByStore = jobIssueRequests.some(m => m.accepted && m.issueStatus === 'Issued');
                     
                     const jobDirectIssues = dispatchStoreIssues.filter(
-                      (i) => i.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase()
+                      (i) =>
+                        (i.jobCardNo && i.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase()) ||
+                        (i.sourceAllocations &&
+                          i.sourceAllocations.some((a) => a.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase()))
                     );
                     const hasDirectIssues = jobDirectIssues.length > 0;
-                    const totalIssuedBag = jobDirectIssues.reduce((sum, i) => sum + (Number(i.issuedBagQty) || 0), 0);
-                    const totalIssuedPcs = jobDirectIssues.reduce((sum, i) => sum + (Number(i.issuedPcsQty) || 0), 0);
-                    const totalIssuedKg = jobDirectIssues.reduce((sum, i) => sum + (Number(i.issuedKgQty) || 0), 0);
+                    const totalIssuedBag = jobDirectIssues.reduce((sum, i) => {
+                      if (i.sourceAllocations && i.sourceAllocations.length > 0) {
+                        const alloc = i.sourceAllocations.find((a) => a.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase());
+                        return sum + (alloc ? Number(alloc.allocatedBagQty || 0) : 0);
+                      }
+                      return sum + (Number(i.issuedBagQty) || 0);
+                    }, 0);
+                    const totalIssuedPcs = jobDirectIssues.reduce((sum, i) => {
+                      if (i.sourceAllocations && i.sourceAllocations.length > 0) {
+                        const alloc = i.sourceAllocations.find((a) => a.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase());
+                        return sum + (alloc ? Number(alloc.allocatedPcsQty || 0) : 0);
+                      }
+                      return sum + (Number(i.issuedPcsQty) || 0);
+                    }, 0);
+                    const totalIssuedKg = jobDirectIssues.reduce((sum, i) => {
+                      if (i.sourceAllocations && i.sourceAllocations.length > 0) {
+                        const alloc = i.sourceAllocations.find((a) => a.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase());
+                        return sum + (alloc ? Number(alloc.allocatedKgQty || 0) : 0);
+                      }
+                      return sum + (Number(i.issuedKgQty) || 0);
+                    }, 0);
 
                     const canShip = (job.currentDepartment === 'Completed' || job.currentDepartment === 'Dispatch' || hasDirectIssues || (job.currentDepartment === 'Dispatch' && isIssuedByStore) || (job.currentDepartment === 'Dispatch' && jobIssueRequests.length === 0)) && job.status !== 'Rejected';
 
@@ -5358,217 +5383,355 @@ Please adjust the quantity or request additional raw material issue.`);
 
             {activeDept === 'Store' && (
               <div className="space-y-4">
-                {/* Direct Issue to Dispatch Card */}
+                {/* Item-Centric Issue to Dispatch Card */}
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                     <div>
                       <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
-                        <span>🏬 Issue Material to Dispatch</span>
+                        <span>🏬 Send Material to Dispatch (Item-Centric)</span>
                       </h3>
                       <p className="text-[11px] text-slate-400 font-sans mt-0.5">
-                        Direct material issue from Store to Dispatch. Native unit quantity is deducted from Store on-hand stock. Quantities are strictly independent with no unit conversion.
+                        Search by Item Name to view total authoritative Store stock in KG, Bags, and PCS across active Job Cards. Strict 3-unit stock validation with FIFO multi-Job-Card allocation.
                       </p>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                    <div className="md:col-span-1">
-                      <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                        Item / Job Card <span className="text-rose-500">*</span>
+                  {/* Item Search & Selection */}
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="md:col-span-2">
+                      <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1 flex items-center justify-between">
+                        <span>Search / Select Item Name <span className="text-rose-500">*</span></span>
+                        {directIssueItemName && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDirectIssueItemName('');
+                              setDirectIssueItemCode('');
+                              setItemSearchQuery('');
+                              setDirectIssueError('');
+                              setDirectIssueSuccess('');
+                            }}
+                            className="text-[9.5px] font-bold text-indigo-500 hover:text-indigo-600 uppercase cursor-pointer"
+                          >
+                            Clear Item
+                          </button>
+                        )}
                       </label>
-                      <select
-                        value={directIssueJobCardNo}
-                        onChange={(e) => {
-                          setDirectIssueJobCardNo(e.target.value);
-                          setDirectIssueError('');
-                          setDirectIssueSuccess('');
-                        }}
-                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 text-xs font-mono"
-                      >
-                        <option value="">Select Item / Job Card</option>
-                        {jobCards.map((j) => (
-                          <option key={j.jobCardNo} value={j.jobCardNo}>
-                            {j.jobCardNo} — {j.itemName} ({j.partyName})
-                          </option>
-                        ))}
-                      </select>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          placeholder="Type item name to search (e.g. M8 Bolt, Hex Nut)..."
+                          value={itemSearchQuery || directIssueItemName}
+                          onChange={(e) => {
+                            setItemSearchQuery(e.target.value);
+                            setDirectIssueItemName(e.target.value);
+                            setDirectIssueError('');
+                            setDirectIssueSuccess('');
+                          }}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-800 dark:text-white font-medium"
+                        />
+                      </div>
+
+                      {/* Matching Item Suggestions */}
+                      {(() => {
+                        const uniqueItemNames = Array.from(
+                          new Set(
+                            jobCards
+                              .filter((j) => !j.completed && j.status !== 'Completed' && j.currentDepartment !== 'Completed')
+                              .map((j) => String(j.itemName || '').trim())
+                              .filter(Boolean)
+                          )
+                        );
+                        const filtered = uniqueItemNames.filter((item) =>
+                          !directIssueItemName || item.toLowerCase().includes((itemSearchQuery || directIssueItemName).toLowerCase())
+                        ).slice(0, 8);
+
+                        if (filtered.length === 0 || directIssueItemName === filtered[0]) return null;
+
+                        return (
+                          <div className="mt-1.5 flex flex-wrap gap-1.5">
+                            <span className="text-[10px] text-slate-400 font-medium self-center">Suggestions:</span>
+                            {filtered.map((name) => (
+                              <button
+                                key={name}
+                                type="button"
+                                onClick={() => {
+                                  setDirectIssueItemName(name);
+                                  setItemSearchQuery(name);
+                                  setDirectIssueError('');
+                                  setDirectIssueSuccess('');
+                                }}
+                                className="px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 text-[10.5px] font-semibold hover:bg-indigo-100 dark:hover:bg-indigo-900/60 transition cursor-pointer"
+                              >
+                                {name}
+                              </button>
+                            ))}
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <div>
                       <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                        BAG Quantity
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        placeholder="0"
-                        value={directIssueBag || ''}
-                        onChange={(e) => {
-                          setDirectIssueBag(Math.max(0, parseInt(e.target.value, 10) || 0));
-                          setDirectIssueError('');
-                        }}
-                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 font-mono text-xs"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                        PCS Quantity
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        placeholder="0"
-                        value={directIssuePcs || ''}
-                        onChange={(e) => {
-                          setDirectIssuePcs(Math.max(0, parseInt(e.target.value, 10) || 0));
-                          setDirectIssueError('');
-                        }}
-                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 font-mono text-xs"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                        KG Quantity
+                        Item Code Filter (Optional)
                       </label>
                       <input
                         type="text"
-                        inputMode="decimal"
-                        placeholder="0.00"
-                        value={directIssueKg || ''}
+                        placeholder="E.g., IC-001..."
+                        value={directIssueItemCode}
                         onChange={(e) => {
-                          const clean = sanitizeDecimalInput(e.target.value);
-                          setDirectIssueKg(clean === '' ? 0 : (parseDecimalQuantity(clean) || 0));
+                          setDirectIssueItemCode(e.target.value);
                           setDirectIssueError('');
                         }}
-                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 font-mono text-xs"
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 text-xs font-mono text-slate-800 dark:text-white"
                       />
                     </div>
                   </div>
 
-                  <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
-                    <div className="md:col-span-3">
-                      <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                        Remarks (Optional)
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="E.g., Direct batch issue for dispatch..."
-                        value={directIssueRemarks}
-                        onChange={(e) => setDirectIssueRemarks(e.target.value)}
-                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-800 dark:text-white"
-                      />
-                    </div>
-
-                    <div>
-                      <button
-                        type="button"
-                        disabled={isSubmittingDirectIssue}
-                        onClick={async () => {
-                          setDirectIssueError('');
-                          setDirectIssueSuccess('');
-                          if (!directIssueJobCardNo) {
-                            setDirectIssueError('Please select an Item / Job Card.');
-                            return;
-                          }
-                          if (!(directIssueBag > 0 || directIssuePcs > 0 || directIssueKg > 0)) {
-                            setDirectIssueError('Enter at least one quantity (BAG, PCS, or KG) greater than 0.');
-                            return;
-                          }
-                          const selectedDirectJob = jobCards.find(
-                            (j) => j.jobCardNo.toUpperCase() === directIssueJobCardNo.toUpperCase()
-                          );
-                          const storeOnHand = selectedDirectJob
-                            ? storeAuthoritativeOnHand(selectedDirectJob, movements)
-                            : 0;
-                          const nativeUnit = selectedDirectJob?.unit || 'KG';
-                          const isPcsNative =
-                            nativeUnit.toUpperCase() === 'PCS' ||
-                            nativeUnit.toUpperCase() === 'PIECES' ||
-                            nativeUnit.toUpperCase() === 'NOS';
-                          const isBagNative =
-                            nativeUnit.toUpperCase() === 'BAG' ||
-                            nativeUnit.toUpperCase() === 'BAGS';
-                          const nativeQty = isPcsNative
-                            ? directIssuePcs
-                            : isBagNative
-                            ? directIssueBag
-                            : directIssueKg;
-
-                          if (nativeQty > storeOnHand) {
-                            setDirectIssueError(
-                              `Entered ${isPcsNative ? 'PCS' : isBagNative ? 'BAG' : 'KG'} quantity (${nativeQty}) exceeds available Store stock (${storeOnHand} ${nativeUnit}).`
-                            );
-                            return;
-                          }
-
-                          setIsSubmittingDirectIssue(true);
-                          try {
-                            const result = await DBService.issueStoreToDispatch({
-                              jobCardNo: directIssueJobCardNo,
-                              issuedBagQty: directIssueBag,
-                              issuedPcsQty: directIssuePcs,
-                              issuedKgQty: directIssueKg,
-                              remarks: directIssueRemarks
-                            });
-                            setDispatchStoreIssues((prev) => [result.issue, ...prev]);
-                            setDirectIssueSuccess(
-                              `Successfully issued to Dispatch: ${directIssueBag ? directIssueBag + ' BAG ' : ''}${directIssuePcs ? directIssuePcs + ' PCS ' : ''}${directIssueKg ? directIssueKg + ' KG ' : ''}for ${directIssueJobCardNo}.`
-                            );
-                            setDirectIssueBag(0);
-                            setDirectIssuePcs(0);
-                            setDirectIssueKg(0);
-                            setDirectIssueRemarks('');
-                          } catch (err) {
-                            setDirectIssueError(err instanceof Error ? err.message : 'Failed to issue material to Dispatch.');
-                          } finally {
-                            setIsSubmittingDirectIssue(false);
-                          }
-                        }}
-                        className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold py-2 px-3 rounded-md transition flex items-center justify-center gap-1 cursor-pointer"
-                      >
-                        {isSubmittingDirectIssue ? 'Issuing...' : 'ISSUE TO DISPATCH'}
-                      </button>
-                    </div>
-                  </div>
-
-                  {directIssueJobCardNo && (() => {
-                    const selectedDirectJob = jobCards.find(
-                      (j) => j.jobCardNo.toUpperCase() === directIssueJobCardNo.toUpperCase()
+                  {/* Authoritative 3-Unit Available Stock Summary & Candidate Job Cards */}
+                  {directIssueItemName && (() => {
+                    const stock = calculateStoreAuthoritativeItemStock(
+                      directIssueItemName,
+                      jobCards,
+                      movements,
+                      dispatchStoreIssues,
+                      directIssueItemCode || undefined
                     );
-                    const storeOnHand = selectedDirectJob
-                      ? storeAuthoritativeOnHand(selectedDirectJob, movements)
-                      : 0;
-                    const nativeUnit = selectedDirectJob?.unit || 'KG';
+
                     return (
-                      <div className="mt-3 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[11px] font-mono text-slate-600 dark:text-slate-300 flex items-center justify-between flex-wrap gap-2">
-                        <span>Store Authoritative On-Hand for <strong>{directIssueJobCardNo}</strong>:</span>
-                        <div className="flex gap-3 font-bold">
-                          <span className="text-emerald-600 dark:text-emerald-400">
-                            On-Hand: {storeOnHand.toLocaleString()} {nativeUnit}
-                          </span>
-                          <span className="text-slate-400">
-                            (Native Unit: {nativeUnit})
-                          </span>
+                      <div className="mt-4 space-y-3">
+                        {/* 3 Stock Summary Cards */}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div className="p-3.5 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200/80 dark:border-blue-900/60">
+                            <span className="block text-[10px] font-bold uppercase tracking-wider text-blue-600 dark:text-blue-400">
+                              ⚖️ Available KG
+                            </span>
+                            <div className="mt-1 text-lg font-mono font-extrabold text-blue-700 dark:text-blue-300">
+                              {stock.availableKg.toLocaleString()} <span className="text-xs font-normal text-blue-500">KG</span>
+                            </div>
+                          </div>
+
+                          <div className="p-3.5 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/60">
+                            <span className="block text-[10px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                              📦 Available Bags
+                            </span>
+                            <div className="mt-1 text-lg font-mono font-extrabold text-amber-700 dark:text-amber-300">
+                              {stock.availableBags.toLocaleString()} <span className="text-xs font-normal text-amber-500">BAGS</span>
+                            </div>
+                          </div>
+
+                          <div className="p-3.5 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-900/60">
+                            <span className="block text-[10px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                              🔢 Available Total PCS
+                            </span>
+                            <div className="mt-1 text-lg font-mono font-extrabold text-emerald-700 dark:text-emerald-300">
+                              {stock.availablePcs.toLocaleString()} <span className="text-xs font-normal text-emerald-500">PCS</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Eligible Job Cards Breakdown */}
+                        <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs">
+                          <div className="flex items-center justify-between font-bold text-[10.5px] text-slate-500 uppercase tracking-wider mb-2">
+                            <span>Applicable Store Job Cards ({stock.candidateJobCards.length})</span>
+                            <span className="font-mono text-slate-400">Deterministic FIFO Order</span>
+                          </div>
+                          {stock.candidateJobCards.length === 0 ? (
+                            <p className="text-slate-400 text-xs font-mono py-1">No active Job Cards holding stock in Store for '{directIssueItemName}'.</p>
+                          ) : (
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-left text-[11px] font-mono">
+                                <thead>
+                                  <tr className="border-b border-slate-200 dark:border-slate-800 text-[9.5px] uppercase text-slate-400">
+                                    <th className="pb-1">Job Card #</th>
+                                    <th className="pb-1">Customer / Party</th>
+                                    <th className="pb-1 text-right">Avail KG</th>
+                                    <th className="pb-1 text-right">Avail Bags</th>
+                                    <th className="pb-1 text-right">Avail PCS</th>
+                                    <th className="pb-1 text-right">Native Unit</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 dark:divide-slate-900">
+                                  {stock.candidateJobCards.map((c) => (
+                                    <tr key={c.jobCardNo} className="hover:bg-white dark:hover:bg-slate-900">
+                                      <td className="py-1 font-bold text-indigo-500">{c.jobCardNo}</td>
+                                      <td className="py-1 text-slate-700 dark:text-slate-300 font-sans">{c.partyName || '-'}</td>
+                                      <td className="py-1 text-right font-bold text-blue-600">{c.availableKg}</td>
+                                      <td className="py-1 text-right font-bold text-amber-600">{c.availableBags}</td>
+                                      <td className="py-1 text-right font-bold text-emerald-600">{c.availablePcs}</td>
+                                      <td className="py-1 text-right text-slate-400">{c.nativeUnit}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
                         </div>
                       </div>
                     );
                   })()}
 
+                  {/* Manual Issue Entry Fields */}
+                  <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200 mb-2.5">
+                      Issue Quantities (Physical breakdown)
+                    </h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
+                          BAG Quantity
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          placeholder="0"
+                          value={directIssueBag || ''}
+                          onChange={(e) => {
+                            setDirectIssueBag(Math.max(0, parseInt(e.target.value, 10) || 0));
+                            setDirectIssueError('');
+                          }}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2.5 py-2 font-mono text-xs font-bold"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
+                          PCS Quantity
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          placeholder="0"
+                          value={directIssuePcs || ''}
+                          onChange={(e) => {
+                            setDirectIssuePcs(Math.max(0, parseInt(e.target.value, 10) || 0));
+                            setDirectIssueError('');
+                          }}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2.5 py-2 font-mono text-xs font-bold"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
+                          KG Quantity
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          placeholder="0.00"
+                          value={directIssueKg || ''}
+                          onChange={(e) => {
+                            const clean = sanitizeDecimalInput(e.target.value);
+                            setDirectIssueKg(clean === '' ? 0 : (parseDecimalQuantity(clean) || 0));
+                            setDirectIssueError('');
+                          }}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2.5 py-2 font-mono text-xs font-bold"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                      <div className="md:col-span-3">
+                        <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
+                          Remarks (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="E.g., Batch release to dispatch for shipping..."
+                          value={directIssueRemarks}
+                          onChange={(e) => setDirectIssueRemarks(e.target.value)}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2.5 py-2 text-xs text-slate-800 dark:text-white"
+                        />
+                      </div>
+
+                      <div>
+                        <button
+                          type="button"
+                          disabled={isSubmittingDirectIssue}
+                          onClick={async () => {
+                            setDirectIssueError('');
+                            setDirectIssueSuccess('');
+                            if (!directIssueItemName) {
+                              setDirectIssueError('Please search and select an Item Name.');
+                              return;
+                            }
+                            if (!(directIssueBag > 0 || directIssuePcs > 0 || directIssueKg > 0)) {
+                              setDirectIssueError('Enter at least one quantity (BAG, PCS, or KG) greater than 0.');
+                              return;
+                            }
+
+                            const stock = calculateStoreAuthoritativeItemStock(
+                              directIssueItemName,
+                              jobCards,
+                              movements,
+                              dispatchStoreIssues,
+                              directIssueItemCode || undefined
+                            );
+
+                            if (directIssueBag > stock.availableBags) {
+                              setDirectIssueError(
+                                `Entered BAG quantity (${directIssueBag}) exceeds available Store stock (${stock.availableBags} BAG).`
+                              );
+                              return;
+                            }
+                            if (directIssuePcs > stock.availablePcs) {
+                              setDirectIssueError(
+                                `Entered PCS quantity (${directIssuePcs}) exceeds available Store stock (${stock.availablePcs} PCS).`
+                              );
+                              return;
+                            }
+                            if (directIssueKg > stock.availableKg) {
+                              setDirectIssueError(
+                                `Entered KG quantity (${directIssueKg}) exceeds available Store stock (${stock.availableKg} KG).`
+                              );
+                              return;
+                            }
+
+                            setIsSubmittingDirectIssue(true);
+                            try {
+                              const result = await DBService.issueStoreItemToDispatch({
+                                itemName: directIssueItemName,
+                                itemCode: directIssueItemCode || stock.itemCode,
+                                issuedBagQty: directIssueBag,
+                                issuedPcsQty: directIssuePcs,
+                                issuedKgQty: directIssueKg,
+                                remarks: directIssueRemarks
+                              });
+                              setDispatchStoreIssues((prev) => [result.issue, ...prev]);
+                              setDirectIssueSuccess(
+                                `Successfully issued to Dispatch: ${directIssueBag ? directIssueBag + ' BAG ' : ''}${directIssuePcs ? directIssuePcs + ' PCS ' : ''}${directIssueKg ? directIssueKg + ' KG ' : ''}for '${directIssueItemName}'.`
+                              );
+                              setDirectIssueBag(0);
+                              setDirectIssuePcs(0);
+                              setDirectIssueKg(0);
+                              setDirectIssueRemarks('');
+                            } catch (err) {
+                              setDirectIssueError(err instanceof Error ? err.message : 'Failed to issue material to Dispatch.');
+                            } finally {
+                              setIsSubmittingDirectIssue(false);
+                            }
+                          }}
+                          className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold py-2.5 px-3 rounded-md transition flex items-center justify-center gap-1 cursor-pointer"
+                        >
+                          {isSubmittingDirectIssue ? 'Issuing...' : 'ISSUE TO DISPATCH'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
                   {directIssueError && (
-                    <div className="mt-3 p-2 rounded bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-600 dark:text-rose-400 text-xs font-medium">
+                    <div className="mt-3 p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-600 dark:text-rose-400 text-xs font-medium">
                       ⚠️ {directIssueError}
                     </div>
                   )}
                   {directIssueSuccess && (
-                    <div className="mt-3 p-2 rounded bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-600 dark:text-emerald-400 text-xs font-medium">
+                    <div className="mt-3 p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-emerald-600 dark:text-emerald-400 text-xs font-medium">
                       ✅ {directIssueSuccess}
                     </div>
                   )}
                 </div>
 
-                {/* Recent Direct Issues to Dispatch Table */}
+                {/* Recent Store → Dispatch Material Issues Table */}
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                   <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-3 flex items-center gap-2">
                     <span>📋 Recent Store → Dispatch Material Issues</span>
@@ -5585,8 +5748,9 @@ Please adjust the quantity or request additional raw material issue.`);
                         <thead>
                           <tr className="border-b border-slate-200 dark:border-slate-800 text-[10px] font-bold uppercase text-slate-400">
                             <th className="pb-2">Issue ID</th>
-                            <th className="pb-2">Job Card</th>
                             <th className="pb-2">Item Name</th>
+                            <th className="pb-2">Item Code</th>
+                            <th className="pb-2">Source Job Cards</th>
                             <th className="pb-2 text-right">BAG</th>
                             <th className="pb-2 text-right">PCS</th>
                             <th className="pb-2 text-right">KG</th>
@@ -5596,21 +5760,29 @@ Please adjust the quantity or request additional raw material issue.`);
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 dark:divide-slate-850">
-                          {dispatchStoreIssues.slice(0, 20).map((issue) => (
-                            <tr key={issue.id} className="hover:bg-slate-50 dark:hover:bg-slate-950/40">
-                              <td className="py-2 font-mono text-[11px] font-bold text-indigo-500">{issue.id}</td>
-                              <td className="py-2 font-mono text-[11px] font-bold">{issue.jobCardNo}</td>
-                              <td className="py-2 text-slate-700 dark:text-slate-300">{issue.itemName || '-'}</td>
-                              <td className="py-2 font-mono text-right font-bold text-slate-800 dark:text-slate-100">{issue.issuedBagQty || 0}</td>
-                              <td className="py-2 font-mono text-right font-bold text-slate-800 dark:text-slate-100">{issue.issuedPcsQty || 0}</td>
-                              <td className="py-2 font-mono text-right font-bold text-slate-800 dark:text-slate-100">{issue.issuedKgQty || 0}</td>
-                              <td className="py-2 text-slate-500">{issue.issuedBy}</td>
-                              <td className="py-2 font-mono text-[10px] text-slate-400">
-                                {issue.issuedAt ? new Date(issue.issuedAt).toLocaleString() : '-'}
-                              </td>
-                              <td className="py-2 text-slate-500 text-[11px]">{issue.remarks || '-'}</td>
-                            </tr>
-                          ))}
+                          {dispatchStoreIssues.slice(0, 20).map((issue) => {
+                            const sourceJobCards =
+                              issue.sourceAllocations && issue.sourceAllocations.length > 0
+                                ? issue.sourceAllocations.map((a) => a.jobCardNo).join(', ')
+                                : issue.jobCardNo || '-';
+
+                            return (
+                              <tr key={issue.id} className="hover:bg-slate-50 dark:hover:bg-slate-950/40">
+                                <td className="py-2 font-mono text-[11px] font-bold text-indigo-500">{issue.id}</td>
+                                <td className="py-2 font-bold text-slate-800 dark:text-slate-100">{issue.itemName || '-'}</td>
+                                <td className="py-2 font-mono text-slate-500 text-[11px]">{issue.itemCode || '-'}</td>
+                                <td className="py-2 font-mono text-[11px] font-bold text-indigo-600 dark:text-indigo-400">{sourceJobCards}</td>
+                                <td className="py-2 font-mono text-right font-bold text-amber-600">{issue.issuedBagQty || 0}</td>
+                                <td className="py-2 font-mono text-right font-bold text-emerald-600">{issue.issuedPcsQty || 0}</td>
+                                <td className="py-2 font-mono text-right font-bold text-blue-600">{issue.issuedKgQty || 0}</td>
+                                <td className="py-2 text-slate-500">{issue.issuedBy}</td>
+                                <td className="py-2 font-mono text-[10px] text-slate-400">
+                                  {issue.issuedAt ? new Date(issue.issuedAt).toLocaleString() : '-'}
+                                </td>
+                                <td className="py-2 text-slate-500 text-[11px]">{issue.remarks || '-'}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -7283,43 +7455,13 @@ Please adjust the quantity or request additional raw material issue.`);
                                   </div>
                                 </div>
 
-                                {job.processType === 'Purchase' && (
-                                  <div className="bg-slate-100 dark:bg-slate-900 p-3 rounded-lg space-y-2 border border-slate-200">
-                                    <label className="block text-slate-500 font-extrabold uppercase text-[9px] tracking-wider">Routing Option (Next Destination)</label>
-                                    <div className="flex gap-2">
-                                      <button
-                                        type="button"
-                                        onClick={() => setStoreTargetDept('Packing')}
-                                        className={`flex-1 py-1.5 rounded font-bold border transition text-xs cursor-pointer ${
-                                          storeTargetDept === 'Packing' 
-                                            ? 'bg-indigo-600 text-white border-indigo-700' 
-                                            : 'bg-white hover:bg-slate-50 dark:bg-slate-800 text-slate-500 border-slate-200'
-                                        }`}
-                                      >
-                                        📦 Send to Packing Line
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => setStoreTargetDept('Dispatch')}
-                                        className={`flex-1 py-1.5 rounded font-bold border transition text-xs cursor-pointer ${
-                                          storeTargetDept === 'Dispatch' 
-                                            ? 'bg-indigo-600 text-white border-indigo-700' 
-                                            : 'bg-white hover:bg-slate-50 dark:bg-slate-800 text-slate-500 border-slate-200'
-                                        }`}
-                                      >
-                                        🚚 Send to Direct Dispatch
-                                      </button>
-                                    </div>
-                                  </div>
-                                )}
-
                                 <div className="bg-slate-100 dark:bg-slate-900 p-3 rounded-lg grid grid-cols-3 gap-3 text-[11px] font-mono border border-slate-200 dark:border-slate-800">
                                   <div>
                                     <span className="text-slate-455 block uppercase text-[8.5px]">Qty Received:</span>
                                     <strong className="text-blue-600">{storeQtyReceived} KG</strong>
                                   </div>
                                   <div>
-                                    <span className="text-indigo-600 block uppercase text-[8.5px]">Route to {job.processType === 'Purchase' ? storeTargetDept : 'Dispatch'}:</span>
+                                    <span className="text-indigo-600 block uppercase text-[8.5px]">Route to Dispatch:</span>
                                     <input
                                       type="text"
                                       inputMode="numeric"
@@ -7350,10 +7492,13 @@ Please adjust the quantity or request additional raw material issue.`);
                                   </button>
                                   <button
                                     type="button"
-                                    onClick={() => handleCompleteStore(job)}
-                                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded text-xs uppercase cursor-pointer"
+                                    onClick={() => {
+                                      setStoreTargetDept('Dispatch');
+                                      handleCompleteStore(job);
+                                    }}
+                                    className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded text-xs uppercase cursor-pointer flex items-center gap-1.5"
                                   >
-                                    Verify Stock & Send to {job.processType === 'Purchase' ? storeTargetDept : 'Dispatch'}
+                                    <span>🚚 SEND TO DISPATCH</span>
                                   </button>
                                 </div>
                               </div>
