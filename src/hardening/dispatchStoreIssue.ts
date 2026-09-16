@@ -2,7 +2,7 @@ import { runKeyedSerialized } from "./movementSerialize";
 import type { SimpleStore } from "./commitMaterialMovement";
 import { storeAuthoritativeOnHand, creditedInboundQty, isDeletedMovement } from "./process2Manufacturing";
 import { normalizeDeptName } from "./process1Purchase";
-import type { DispatchStoreIssueSourceAllocation } from "../types";
+import type { DispatchStoreIssueSourceAllocation, ProcessTransfer } from "../types";
 
 export const DISPATCH_STORE_REQUIREMENT_COLLECTION = "mfr_dispatch_store_requirements";
 export const DISPATCH_STORE_ISSUE_COLLECTION = "mfr_dispatch_store_issues";
@@ -176,6 +176,48 @@ export function createDispatchStoreIssueFingerprint(input: {
   ].join("|");
 }
 
+export function createStoreProcessTransferFingerprint(input: {
+  toProcess: string;
+  jobCardNo?: string;
+  itemName?: string;
+  itemCode?: string;
+  issuedBagQty: number;
+  issuedPcsQty: number;
+  issuedKgQty: number;
+}): string {
+  return [
+    String(input.toProcess || "").trim().toUpperCase(),
+    normalizeItemName(input.itemName || ""),
+    normalizeJobCardNo(input.jobCardNo || ""),
+    String(input.itemCode || "").trim().toUpperCase(),
+    String(input.issuedBagQty),
+    String(input.issuedPcsQty),
+    String(input.issuedKgQty)
+  ].join("|");
+}
+
+function parseStrictPositiveKgQty(val: unknown): { ok: true; qty: number } | { ok: false; error: string } {
+  if (val === undefined || val === null || val === "" || String(val).trim() === "") {
+    return { ok: false, error: "KG to send is mandatory and must be greater than 0." };
+  }
+  const n = Number(val);
+  if (!Number.isFinite(n) || n <= 0) {
+    return { ok: false, error: "KG to send must be a valid number greater than 0." };
+  }
+  return { ok: true, qty: n };
+}
+
+function parseOptionalNonNegativeQty(val: unknown): { ok: true; qty: number } | { ok: false; error: string } {
+  if (val === undefined || val === null || val === "" || String(val).trim() === "") {
+    return { ok: true, qty: 0 };
+  }
+  const n = Number(val);
+  if (!Number.isFinite(n) || n < 0) {
+    return { ok: false, error: "Optional physical quantities (BAG, PCS) must be non-negative numbers (or left blank)." };
+  }
+  return { ok: true, qty: n };
+}
+
 function newId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`.toUpperCase();
 }
@@ -213,7 +255,8 @@ async function writeAudit(
 export function calculateStoreJobCardAvailableStock(
   job: any,
   movements: any[] = [],
-  dispatchIssues: any[] = []
+  dispatchIssues: any[] = [],
+  processTransfers: any[] = []
 ): { availableKg: number; availableBags: number; availablePcs: number; nativeUnit: string; onHandNative: number } {
   const jcNo = normalizeJobCardNo(job?.jobCardNo);
   const nativeUnit = normalizeNativeUnit(job?.unit);
@@ -305,6 +348,40 @@ export function calculateStoreJobCardAvailableStock(
     }
   }
 
+  for (const transfer of processTransfers || []) {
+    if (transfer?.status === "Returned to Store" || transfer?.isDeleted) continue;
+    if (transfer?.sourceAllocations && Array.isArray(transfer.sourceAllocations) && transfer.sourceAllocations.length > 0) {
+      const match = transfer.sourceAllocations.find((a: any) => normalizeJobCardNo(a?.jobCardNo) === jcNo);
+      if (match) {
+        outboundBags += Number(match.allocatedBagQty ?? match.allocatedBags ?? 0);
+        outboundPcs += Number(match.allocatedPcsQty ?? match.allocatedPcs ?? 0);
+        outboundKg += Number(match.allocatedKgQty ?? match.allocatedKg ?? 0);
+      }
+    } else if (normalizeJobCardNo(transfer?.jobCardNo) === jcNo) {
+      outboundBags += Number(transfer.issuedBagQty || 0);
+      outboundPcs += Number(transfer.issuedPcsQty || 0);
+      outboundKg += Number(transfer.issuedKgQty || 0);
+    }
+  }
+
+  for (const m of movements || []) {
+    if (
+      m &&
+      normalizeJobCardNo(m.jobCardNo) === jcNo &&
+      normalizeDeptName(m.fromDepartment) === "store" &&
+      !isDeletedMovement(m)
+    ) {
+      const isHandledByDoc =
+        m.processDetails?.directStoreIssueId ||
+        m.processDetails?.processTransferId;
+      if (!isHandledByDoc) {
+        if (m.processDetails?.issuedBagQty) outboundBags += Number(m.processDetails.issuedBagQty);
+        if (m.processDetails?.issuedPcsQty) outboundPcs += Number(m.processDetails.issuedPcsQty);
+        if (m.processDetails?.issuedKgQty) outboundKg += Number(m.processDetails.issuedKgQty);
+      }
+    }
+  }
+
   let availableBags = Math.max(0, inboundBags - outboundBags);
   let availablePcs = Math.max(0, inboundPcs - outboundPcs);
   let availableKg = Math.max(0, inboundKg - outboundKg);
@@ -356,7 +433,8 @@ export function calculateStoreAuthoritativeItemStock(
   jobCards: any[] = [],
   movements: any[] = [],
   dispatchIssues: any[] = [],
-  itemCodeFilter?: string
+  itemCodeFilter?: string,
+  processTransfers: any[] = []
 ): AuthoritativeItemStockSummary {
   const targetItem = normalizeItemName(itemName);
   const targetCode = String(itemCodeFilter || "").trim().toUpperCase();
@@ -373,7 +451,7 @@ export function calculateStoreAuthoritativeItemStock(
     const jCode = String(job.itemCode || "").trim().toUpperCase();
     if (targetCode && jCode && jCode !== targetCode) continue;
 
-    const stock = calculateStoreJobCardAvailableStock(job, movements, dispatchIssues);
+    const stock = calculateStoreJobCardAvailableStock(job, movements, dispatchIssues, processTransfers);
     const inStore = normalizeDeptName(job.currentDepartment) === "store";
 
     if (stock.availableKg > 0 || stock.availableBags > 0 || stock.availablePcs > 0 || (inStore && stock.onHandNative > 0)) {
@@ -822,5 +900,305 @@ export async function issueDispatchStoreRequirementTx(
     remarks: input.remarks,
     actor: input.actor,
     nowIso: input.nowIso
+  });
+}
+
+/**
+ * Server-side authoritative Store → Process Transfer (Repacking & Replating) transaction.
+ */
+export async function issueStoreProcessTransferTx(
+  store: SimpleStore,
+  input: {
+    operationId?: string;
+    toProcess: "Repacking" | "Replating";
+    itemName?: string;
+    itemCode?: string;
+    jobCardNo?: string;
+    issuedKgQty: unknown;
+    issuedPcsQty?: unknown;
+    issuedBagQty?: unknown;
+    remarks?: string;
+    actor: ActorLike;
+    nowIso?: string;
+  }
+): Promise<DispatchStoreTxResult<{ transfer: ProcessTransfer; movements: any[] }>> {
+  const opKey = String(input.operationId || "").trim();
+  if (!opKey) {
+    return {
+      success: false,
+      statusCode: 400,
+      error: "operationId is required. Retry with the identical operationId to avoid duplicate deductions."
+    };
+  }
+  if (!store.runTransaction) {
+    return { success: false, statusCode: 500, error: "Atomic transaction store is required for Store process transfer." };
+  }
+
+  const toProcess = input.toProcess;
+  if (toProcess !== "Repacking" && toProcess !== "Replating") {
+    return {
+      success: false,
+      statusCode: 400,
+      error: "Process destination must be either 'Repacking' or 'Replating'."
+    };
+  }
+
+  const kg = parseStrictPositiveKgQty(input.issuedKgQty);
+  if (kg.ok === false) return { success: false, statusCode: 400, error: kg.error };
+
+  const pcs = parseOptionalNonNegativeQty(input.issuedPcsQty);
+  if (pcs.ok === false) return { success: false, statusCode: 400, error: pcs.error };
+
+  const bag = parseOptionalNonNegativeQty(input.issuedBagQty);
+  if (bag.ok === false) return { success: false, statusCode: 400, error: bag.error };
+
+  if (!canIssueDispatchStoreStock(input.actor)) {
+    return { success: false, statusCode: 403, error: "Only Store (or admin) can issue material for process transfers." };
+  }
+
+  const serializeKey = dispatchStoreSerializeKey(input.itemName || input.jobCardNo || `process_${toProcess.toLowerCase()}`);
+
+  return runSerialized(store, serializeKey, () =>
+    store.runTransaction!(async (tx) => {
+      const now = input.nowIso || new Date().toISOString();
+
+      let targetItemName = String(input.itemName || "").trim();
+      let targetItemCode = String(input.itemCode || "").trim();
+
+      const allJobCards = await store.list("mfr_job_cards");
+      const allMovements = await store.list("mfr_movements");
+      const allIssues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+      const allTransfers = await store.list("mfr_process_transfers");
+
+      if (!targetItemName && input.jobCardNo) {
+        const jcNo = normalizeJobCardNo(input.jobCardNo);
+        const j = allJobCards.find((card: any) => normalizeJobCardNo(card?.jobCardNo) === jcNo);
+        if (j) {
+          targetItemName = String(j.itemName || "");
+          if (!targetItemCode && j.itemCode) targetItemCode = String(j.itemCode);
+        } else {
+          return { success: false, statusCode: 404, error: `Job Card '${input.jobCardNo}' not found.` };
+        }
+      }
+
+      if (!targetItemName) {
+        return { success: false, statusCode: 400, error: "Item Name (or Job Card) is required." };
+      }
+
+      const requestFingerprint = createStoreProcessTransferFingerprint({
+        toProcess,
+        itemName: targetItemName,
+        itemCode: targetItemCode,
+        jobCardNo: input.jobCardNo,
+        issuedBagQty: bag.qty,
+        issuedPcsQty: pcs.qty,
+        issuedKgQty: kg.qty
+      });
+
+      const existing = await tx.get("mfr_idempotency_keys", opKey);
+      if (existing?.requestFingerprint && existing.requestFingerprint !== requestFingerprint) {
+        return {
+          success: false,
+          statusCode: 409,
+          error: "operationId was already used for a different Store process transfer. Use a new operationId for a distinct issue."
+        };
+      }
+      if (existing?.result?.transfer && existing?.result?.movements) {
+        return {
+          success: true,
+          cached: true,
+          data: {
+            transfer: existing.result.transfer,
+            movements: existing.result.movements
+          }
+        };
+      }
+
+      let itemStock: AuthoritativeItemStockSummary;
+      if (input.jobCardNo) {
+        const jcNo = normalizeJobCardNo(input.jobCardNo);
+        const singleJob = allJobCards.find((c: any) => normalizeJobCardNo(c?.jobCardNo) === jcNo);
+        if (!singleJob) {
+          return { success: false, statusCode: 404, error: `Job Card '${input.jobCardNo}' not found.` };
+        }
+        const singleStock = calculateStoreJobCardAvailableStock(singleJob, allMovements, allIssues, allTransfers);
+        itemStock = {
+          itemName: singleJob.itemName,
+          itemCode: singleJob.itemCode,
+          availableKg: singleStock.availableKg,
+          availableBags: singleStock.availableBags,
+          availablePcs: singleStock.availablePcs,
+          candidateJobCards: [
+            {
+              jobCardNo: jcNo,
+              itemCode: singleJob.itemCode,
+              itemName: singleJob.itemName,
+              partyName: singleJob.partyName,
+              createdAt: singleJob.createdAt,
+              availableKg: singleStock.availableKg,
+              availableBags: singleStock.availableBags,
+              availablePcs: singleStock.availablePcs,
+              nativeUnit: singleStock.nativeUnit,
+              onHandNative: singleStock.onHandNative
+            }
+          ]
+        };
+      } else {
+        itemStock = calculateStoreAuthoritativeItemStock(
+          targetItemName,
+          allJobCards,
+          allMovements,
+          allIssues,
+          targetItemCode,
+          allTransfers
+        );
+      }
+
+      // Strict validation: every unit requested must be <= available stock for that unit
+      if (kg.qty > itemStock.availableKg) {
+        return {
+          success: false,
+          statusCode: 409,
+          error: `Entered KG quantity (${kg.qty}) exceeds available Store stock (${itemStock.availableKg} KG) for '${targetItemName}'.`
+        };
+      }
+      if (pcs.qty > itemStock.availablePcs) {
+        return {
+          success: false,
+          statusCode: 409,
+          error: `Entered PCS quantity (${pcs.qty}) exceeds available Store stock (${itemStock.availablePcs} PCS) for '${targetItemName}'.`
+        };
+      }
+      if (bag.qty > itemStock.availableBags) {
+        return {
+          success: false,
+          statusCode: 409,
+          error: `Entered BAG quantity (${bag.qty}) exceeds available Store stock (${itemStock.availableBags} BAG) for '${targetItemName}'.`
+        };
+      }
+
+      // Allocate across candidate Job Cards
+      const allocationResult = allocateItemStockAcrossJobCards(
+        itemStock.candidateJobCards,
+        kg.qty,
+        bag.qty,
+        pcs.qty
+      );
+      if (!allocationResult.success) {
+        return {
+          success: false,
+          statusCode: 409,
+          error: (allocationResult as { success: false; error: string }).error
+        };
+      }
+
+      const allocations = allocationResult.allocations;
+      const transferId = newId("STP");
+      let nextNum = 1;
+      for (const t of allTransfers || []) {
+        if (t?.transferNo && typeof t.transferNo === "string" && t.transferNo.startsWith("STP-")) {
+          const numPart = parseInt(t.transferNo.replace("STP-", ""), 10);
+          if (!isNaN(numPart) && numPart >= nextNum) {
+            nextNum = numPart + 1;
+          }
+        }
+      }
+      const transferNo = `STP-${String(nextNum).padStart(6, "0")}`;
+
+      const primaryJobCardNo = allocations[0]?.jobCardNo || input.jobCardNo || "";
+      const primaryPartyName = allocations[0]?.jobCardNo
+        ? allJobCards.find((c: any) => normalizeJobCardNo(c?.jobCardNo) === normalizeJobCardNo(allocations[0].jobCardNo))?.partyName
+        : "Internal Store Stock";
+
+      const destinationDept = toProcess === "Repacking" ? "Packing" : "Plating";
+      const initialStatus = toProcess === "Repacking" ? "Sent to Repacking" : "Sent to Replating";
+
+      const createdMovements: any[] = [];
+      for (const alloc of allocations) {
+        const mov = {
+          movementId: alloc.movementId,
+          jobCardNo: alloc.jobCardNo,
+          fromDepartment: "Store",
+          toDepartment: destinationDept,
+          quantity: alloc.allocatedKgQty,
+          unit: "KG",
+          initiatedBy: input.actor.userId,
+          initiatedByUserName: input.actor.userName || input.actor.userId,
+          accepted: false,
+          acceptedQty: 0,
+          rejectedQty: 0,
+          transactionType: "TRANSFER",
+          operationId: opKey,
+          isIssueRequest: false,
+          remarks:
+            input.remarks ||
+            `Store ${toProcess} transfer for ${targetItemName}: ${alloc.allocatedKgQty} KG (${alloc.allocatedBagQty} BAG, ${alloc.allocatedPcsQty} PCS)`,
+          processDetails: {
+            processTransferId: transferId,
+            transferNo,
+            toProcess,
+            isProcessTransfer: true,
+            itemName: targetItemName,
+            itemCode: targetItemCode || itemStock.itemCode,
+            issuedBagQty: alloc.allocatedBagQty,
+            issuedPcsQty: alloc.allocatedPcsQty,
+            issuedKgQty: alloc.allocatedKgQty,
+            nativeUnit: alloc.nativeUnit || "KG",
+            nativeDeductedQty: alloc.nativeDeductedQty || alloc.allocatedKgQty
+          },
+          createdAt: now
+        };
+        tx.set("mfr_movements", mov.movementId, mov);
+        createdMovements.push(mov);
+      }
+
+      const transferRecord: ProcessTransfer = {
+        transferId,
+        transferNo,
+        jobCardNo: primaryJobCardNo,
+        customer: primaryPartyName || "Internal Store Stock",
+        itemName: targetItemName,
+        itemCode: targetItemCode || itemStock.itemCode,
+        quantity: kg.qty,
+        unit: "KGS",
+        fromLocation: "Store",
+        toProcess,
+        status: initialStatus,
+        transferDate: new Date(now).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
+        transferTime: new Date(now).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }),
+        createdBy: input.actor.userName || input.actor.userId,
+        createdByUserId: input.actor.userId,
+        remarks: input.remarks ? String(input.remarks) : undefined,
+        idempotencyKey: opKey,
+        issuedKgQty: kg.qty,
+        issuedBagQty: bag.qty,
+        issuedPcsQty: pcs.qty,
+        sourceAllocations: allocations,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      tx.set("mfr_process_transfers", transferRecord.transferId, transferRecord);
+      tx.set("mfr_idempotency_keys", opKey, {
+        operationId: opKey,
+        requestFingerprint,
+        result: { transfer: transferRecord, movements: createdMovements }
+      });
+
+      return { success: true, data: { transfer: transferRecord, movements: createdMovements } };
+    })
+  ).then(async (result) => {
+    if (result.success && !result.cached && result.data) {
+      const { transfer } = result.data;
+      const jobList = (transfer.sourceAllocations || []).map((a) => a.jobCardNo).join(", ");
+      await writeAudit(
+        store,
+        input.actor,
+        "STORE_PROCESS_TRANSFER",
+        `Store sent material to ${transfer.toProcess} for item '${transfer.itemName}' (Job Cards: ${jobList}): ${transfer.quantity} KG (Physical deductions: BAG ${transfer.issuedBagQty || 0}, PCS ${transfer.issuedPcsQty || 0}, KG ${transfer.issuedKgQty || 0}).`,
+        transfer.createdAt
+      );
+    }
+    return result;
   });
 }

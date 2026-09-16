@@ -8937,17 +8937,19 @@ Please adjust the quantity or request additional raw material issue.`);
           movements={movements}
           processTransfers={processTransfers || []}
           currentUser={currentUser}
-          preselectedJobCardNo={preselectedStoreJobNo}
           onSubmit={async (data) => {
             if (onCreateProcessTransfer) {
               await onCreateProcessTransfer(data);
             } else {
-              await DBService.createProcessTransfer({
-                ...data,
-                createdBy: currentUser.name,
-                createdByUserId: currentUser.userId,
-                fromLocation: 'Store'
-              }, currentUser.userId, currentUser.name);
+              await DBService.issueStoreProcessTransfer({
+                toProcess: data.toProcess,
+                itemName: data.itemName,
+                itemCode: data.itemCode,
+                issuedKgQty: data.issuedKgQty,
+                issuedPcsQty: data.issuedPcsQty,
+                issuedBagQty: data.issuedBagQty,
+                remarks: data.remarks
+              });
             }
           }}
         />

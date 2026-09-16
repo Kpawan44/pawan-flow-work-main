@@ -7,7 +7,8 @@ import {
   DISPATCH_STORE_REQUIREMENT_COLLECTION,
   issueStoreItemToDispatchTx,
   issueStoreToDispatchTx,
-  issueDispatchStoreRequirementTx
+  issueDispatchStoreRequirementTx,
+  issueStoreProcessTransferTx
 } from "./dispatchStoreIssue";
 
 export interface DispatchStoreHttpContext {
@@ -77,6 +78,43 @@ export function mountDispatchStoreRoutes(app: Express, ctx: DispatchStoreHttpCon
     }
   });
 
+  app.post("/api/store-process/transfers", ctx.requireAuth, async (req, res) => {
+    try {
+      const actor = ctx.getActor(req);
+      if (!actor) return res.status(401).json({ success: false, error: "Unauthorized: Missing authoritative user profile." });
+      const body = req.body || {};
+      const headerOp = String(req.get("x-operation-id") || "").trim();
+      const operationId = String(body.operationId || headerOp || "").trim() || undefined;
+
+      const result = await issueStoreProcessTransferTx(ctx.getStore(), {
+        operationId,
+        toProcess: body.toProcess,
+        itemName: body.itemName,
+        itemCode: body.itemCode,
+        jobCardNo: body.jobCardNo,
+        issuedKgQty: body.issuedKgQty,
+        issuedPcsQty: body.issuedPcsQty,
+        issuedBagQty: body.issuedBagQty,
+        remarks: body.remarks,
+        actor
+      });
+
+      if (!result.success) return res.status(result.statusCode || 400).json({ success: false, error: result.error });
+      const { transfer, movements } = result.data as { transfer: any; movements: any[] };
+      if (ctx.onWrite) {
+        ctx.onWrite("mfr_process_transfers", transfer.transferId, transfer);
+        if (movements && Array.isArray(movements)) {
+          for (const m of movements) {
+            ctx.onWrite("mfr_movements", m.movementId, m);
+          }
+        }
+      }
+      return res.json({ success: true, cached: Boolean(result.cached), transfer, movements });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || "Failed to issue Store process transfer." });
+    }
+  });
+
   app.get("/api/dispatch-store/item-stock", ctx.requireAuth, async (req, res) => {
     try {
       const store = ctx.getStore();
@@ -85,9 +123,10 @@ export function mountDispatchStoreRoutes(app: Express, ctx: DispatchStoreHttpCon
       const jobCards = await store.list("mfr_job_cards");
       const movements = await store.list("mfr_movements");
       const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+      const transfers = await store.list("mfr_process_transfers");
 
       if (itemName) {
-        const stock = calculateStoreAuthoritativeItemStock(itemName, jobCards, movements, issues, itemCode);
+        const stock = calculateStoreAuthoritativeItemStock(itemName, jobCards, movements, issues, itemCode, transfers);
         return res.json({ success: true, stock });
       }
 
@@ -99,7 +138,7 @@ export function mountDispatchStoreRoutes(app: Express, ctx: DispatchStoreHttpCon
         }
       }
       const allStocks = Array.from(uniqueItems).map((item) =>
-        calculateStoreAuthoritativeItemStock(item, jobCards, movements, issues)
+        calculateStoreAuthoritativeItemStock(item, jobCards, movements, issues, undefined, transfers)
       ).filter((s) => s.availableKg > 0 || s.availableBags > 0 || s.availablePcs > 0);
 
       return res.json({ success: true, items: allStocks });
@@ -123,6 +162,15 @@ export function mountDispatchStoreRoutes(app: Express, ctx: DispatchStoreHttpCon
       return res.json({ success: true, issues: rows });
     } catch (err: any) {
       return res.status(500).json({ success: false, error: err.message || "Failed to list issues." });
+    }
+  });
+
+  app.get("/api/store-process/transfers", ctx.requireAuth, async (_req, res) => {
+    try {
+      const rows = await ctx.getStore().list("mfr_process_transfers");
+      return res.json({ success: true, transfers: rows });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || "Failed to list process transfers." });
     }
   });
 }

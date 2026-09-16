@@ -428,6 +428,10 @@ export interface ProcessTransfer {
 
   remarks?: string;
   idempotencyKey?: string;
+  issuedKgQty?: number;
+  issuedBagQty?: number;
+  issuedPcsQty?: number;
+  sourceAllocations?: DispatchStoreIssueSourceAllocation[];
   createdAt: string;
   updatedAt: string;
 }

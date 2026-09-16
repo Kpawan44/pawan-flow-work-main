@@ -2011,6 +2011,40 @@ export class DBService {
     });
   }
 
+  static async issueStoreProcessTransfer(input: {
+    toProcess: 'Repacking' | 'Replating';
+    itemName: string;
+    itemCode?: string;
+    jobCardNo?: string;
+    issuedKgQty: number;
+    issuedPcsQty?: number;
+    issuedBagQty?: number;
+    remarks?: string;
+    operationId?: string;
+  }): Promise<{ transfer: ProcessTransfer; movements: MaterialMovement[] }> {
+    const apiBase = getApiBaseUrl();
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/store-process/transfers`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.transfer) {
+      throw new Error(data.error || `Failed to issue Store process transfer (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'STORE_PROCESS_TRANSFER',
+      `Store sent material to ${input.toProcess} for '${input.itemName}': ${input.issuedKgQty} KG (Physical deductions: BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty}).`
+    );
+    return { transfer: data.transfer, movements: data.movements };
+  }
+
   // --- NOTIFICATIONS ---
   static async getNotifications(): Promise<AppNotification[]> {
     // 1. Authoritative Cloud Run API Fetch FIRST
