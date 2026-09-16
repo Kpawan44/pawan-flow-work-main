@@ -617,15 +617,20 @@ export interface DispatchStoreRequirement {
 
 export interface DispatchStoreIssue {
   id: string;
-  requirementId: string;
   jobCardNo: string;
+  itemCode?: string;
+  itemName?: string;
+  fromDepartment?: 'Store';
+  toDepartment?: 'Dispatch';
   issuedBagQty: number;
   issuedPcsQty: number;
   issuedKgQty: number;
-  controllingUnit: StorePhysicalUnit;
-  controllingQty: number;
   issuedBy: string;
   issuedAt: string;
   remarks?: string;
+  operationId?: string;
+  requirementId?: string;
+  controllingUnit?: StorePhysicalUnit;
+  controllingQty?: number;
 }
 

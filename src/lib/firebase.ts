@@ -1936,15 +1936,8 @@ export class DBService {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.success || !data.requirement) {
-      throw new Error(data.error || `Failed to create Dispatch → Store requirement (status ${res.status}).`);
+      throw new Error(data.error || `Dispatch → Store requirement creation is removed. Use direct Store → Dispatch issue.`);
     }
-    const user = auth?.currentUser;
-    await this.logAction(
-      user?.uid || 'dispatch',
-      user?.displayName || 'Dispatch',
-      'DISPATCH_STORE_REQUIREMENT',
-      `Requested ${input.requestedQty} ${input.requestedUnit} for ${input.jobCardNo}.`
-    );
     return data.requirement as DispatchStoreRequirement;
   }
 
@@ -1977,14 +1970,14 @@ export class DBService {
     return data.stock as StoreUnitStock;
   }
 
-  static async issueDispatchStoreRequirement(input: {
-    requirementId: string;
+  static async issueStoreToDispatch(input: {
+    jobCardNo: string;
     issuedBagQty?: number;
     issuedPcsQty?: number;
     issuedKgQty?: number;
     remarks?: string;
     operationId?: string;
-  }): Promise<{ requirement: DispatchStoreRequirement; issue: DispatchStoreIssue; stock: StoreUnitStock }> {
+  }): Promise<{ issue: DispatchStoreIssue; stock: StoreUnitStock }> {
     const apiBase = getApiBaseUrl();
     const payload = { ...input };
     const operationId = ensureDispatchStoreIssueOperationId(payload);
@@ -1995,16 +1988,51 @@ export class DBService {
       body: JSON.stringify({ ...payload, operationId })
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success || !data.requirement || !data.issue || !data.stock) {
-      throw new Error(data.error || `Failed to issue independent unit stock (status ${res.status}).`);
+    if (!res.ok || !data.success || !data.issue || !data.stock) {
+      throw new Error(data.error || `Failed to issue Store stock to Dispatch (status ${res.status}).`);
     }
     const user = auth?.currentUser;
     await this.logAction(
       user?.uid || 'store',
       user?.displayName || 'Store',
       'DISPATCH_STORE_ISSUE',
-      `Issued BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} against ${input.requirementId}.`
+      `Direct issue for ${input.jobCardNo}: BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} to Dispatch.`
     );
+    return { issue: data.issue, stock: data.stock };
+  }
+
+  static async issueDispatchStoreRequirement(input: {
+    requirementId?: string;
+    jobCardNo?: string;
+    issuedBagQty?: number;
+    issuedPcsQty?: number;
+    issuedKgQty?: number;
+    remarks?: string;
+    operationId?: string;
+  }): Promise<{ requirement?: DispatchStoreRequirement; issue: DispatchStoreIssue; stock: StoreUnitStock }> {
+    if (input.jobCardNo) {
+      return this.issueStoreToDispatch({
+        jobCardNo: input.jobCardNo,
+        issuedBagQty: input.issuedBagQty,
+        issuedPcsQty: input.issuedPcsQty,
+        issuedKgQty: input.issuedKgQty,
+        remarks: input.remarks,
+        operationId: input.operationId
+      });
+    }
+    const apiBase = getApiBaseUrl();
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/issues`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.issue || !data.stock) {
+      throw new Error(data.error || `Failed to issue independent unit stock (status ${res.status}).`);
+    }
     return { requirement: data.requirement, issue: data.issue, stock: data.stock };
   }
 
