@@ -1,10 +1,8 @@
 import { OPERATIONAL_RESET_COLLECTIONS } from "./constants";
 
 export const DISPATCH_STORE_UNIT_LEDGER_COLLECTIONS = [
-  "mfr_store_unit_stock",
   "mfr_dispatch_store_requirements",
-  "mfr_dispatch_store_issues",
-  "mfr_store_unit_openings"
+  "mfr_dispatch_store_issues"
 ] as const;
 
 export const LIVE_FACTORY_RESET_EXTRA_COLLECTIONS = [

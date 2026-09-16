@@ -574,30 +574,6 @@ export interface ItemOtherRawMaterialLink {
 export type StorePhysicalUnit = 'BAG' | 'PCS' | 'KG';
 export type DispatchStoreRequirementStatus = 'PENDING' | 'PARTIALLY_ISSUED' | 'COMPLETED';
 
-export interface StoreUnitStock {
-  jobCardNo: string;
-  itemCode?: string;
-  itemName?: string;
-  bagQty: number;
-  pcsQty: number;
-  kgQty: number;
-  version: number;
-  updatedAt: string;
-  updatedBy: string;
-}
-
-export interface StoreUnitOpening {
-  id: string;
-  jobCardNo: string;
-  bagQty: number;
-  pcsQty: number;
-  kgQty: number;
-  kind: 'OPENING' | 'RECEIPT';
-  createdBy: string;
-  createdAt: string;
-  remarks?: string;
-}
-
 export interface DispatchStoreRequirement {
   id: string;
   jobCardNo: string;
@@ -620,8 +596,8 @@ export interface DispatchStoreIssue {
   jobCardNo: string;
   itemCode?: string;
   itemName?: string;
-  fromDepartment?: 'Store';
-  toDepartment?: 'Dispatch';
+  fromDepartment: 'Store';
+  toDepartment: 'Dispatch';
   issuedBagQty: number;
   issuedPcsQty: number;
   issuedKgQty: number;
@@ -629,8 +605,7 @@ export interface DispatchStoreIssue {
   issuedAt: string;
   remarks?: string;
   operationId?: string;
-  requirementId?: string;
-  controllingUnit?: StorePhysicalUnit;
-  controllingQty?: number;
+  movementId?: string;
+  nativeUnit?: string;
+  nativeDeductedQty?: number;
 }
-

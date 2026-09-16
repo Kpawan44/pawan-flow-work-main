@@ -21,8 +21,8 @@ import {
   runTransaction
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink, DispatchStoreRequirement, DispatchStoreIssue, StoreUnitStock, StorePhysicalUnit } from '../types';
-import { 
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink, DispatchStoreRequirement, DispatchStoreIssue, StorePhysicalUnit } from '../types';
+import {
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
   logMaterialMovementToSheets, 
@@ -1890,21 +1890,6 @@ export class DBService {
     return [];
   }
 
-  static async getStoreUnitStock(): Promise<StoreUnitStock[]> {
-    const apiBase = getApiBaseUrl();
-    try {
-      const headers = await this.getAuthHeaders();
-      const res = await fetch(`${apiBase}/api/dispatch-store/stock`, { headers });
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && Array.isArray(data.stock)) return data.stock;
-    } catch (_) {}
-    if (useRealFirebase && db) {
-      const snap = await getDocs(collection(db, 'mfr_store_unit_stock'));
-      return snap.docs.map((d) => d.data() as StoreUnitStock);
-    }
-    return [];
-  }
-
   static async getDispatchStoreIssues(): Promise<DispatchStoreIssue[]> {
     const apiBase = getApiBaseUrl();
     try {
@@ -1941,35 +1926,6 @@ export class DBService {
     return data.requirement as DispatchStoreRequirement;
   }
 
-  static async applyStoreUnitOpening(input: {
-    jobCardNo: string;
-    bagQty?: number;
-    pcsQty?: number;
-    kgQty?: number;
-    remarks?: string;
-  }): Promise<StoreUnitStock> {
-    const apiBase = getApiBaseUrl();
-    const operationId = `dso-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
-    const res = await fetch(`${apiBase}/api/dispatch-store/openings`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ ...input, kind: 'OPENING', operationId })
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success || !data.stock) {
-      throw new Error(data.error || `Failed to apply independent unit opening (status ${res.status}).`);
-    }
-    const user = auth?.currentUser;
-    await this.logAction(
-      user?.uid || 'store',
-      user?.displayName || 'Store',
-      'STORE_UNIT_OPENING',
-      `Opening BAG ${input.bagQty || 0}, PCS ${input.pcsQty || 0}, KG ${input.kgQty || 0} for ${input.jobCardNo}.`
-    );
-    return data.stock as StoreUnitStock;
-  }
-
   static async issueStoreToDispatch(input: {
     jobCardNo: string;
     issuedBagQty?: number;
@@ -1977,7 +1933,7 @@ export class DBService {
     issuedKgQty?: number;
     remarks?: string;
     operationId?: string;
-  }): Promise<{ issue: DispatchStoreIssue; stock: StoreUnitStock }> {
+  }): Promise<{ issue: DispatchStoreIssue; movement?: MaterialMovement }> {
     const apiBase = getApiBaseUrl();
     const payload = { ...input };
     const operationId = ensureDispatchStoreIssueOperationId(payload);
@@ -1988,7 +1944,7 @@ export class DBService {
       body: JSON.stringify({ ...payload, operationId })
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success || !data.issue || !data.stock) {
+    if (!res.ok || !data.success || !data.issue) {
       throw new Error(data.error || `Failed to issue Store stock to Dispatch (status ${res.status}).`);
     }
     const user = auth?.currentUser;
@@ -1998,7 +1954,7 @@ export class DBService {
       'DISPATCH_STORE_ISSUE',
       `Direct issue for ${input.jobCardNo}: BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} to Dispatch.`
     );
-    return { issue: data.issue, stock: data.stock };
+    return { issue: data.issue, movement: data.movement };
   }
 
   static async issueDispatchStoreRequirement(input: {
@@ -2009,31 +1965,15 @@ export class DBService {
     issuedKgQty?: number;
     remarks?: string;
     operationId?: string;
-  }): Promise<{ requirement?: DispatchStoreRequirement; issue: DispatchStoreIssue; stock: StoreUnitStock }> {
-    if (input.jobCardNo) {
-      return this.issueStoreToDispatch({
-        jobCardNo: input.jobCardNo,
-        issuedBagQty: input.issuedBagQty,
-        issuedPcsQty: input.issuedPcsQty,
-        issuedKgQty: input.issuedKgQty,
-        remarks: input.remarks,
-        operationId: input.operationId
-      });
-    }
-    const apiBase = getApiBaseUrl();
-    const payload = { ...input };
-    const operationId = ensureDispatchStoreIssueOperationId(payload);
-    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
-    const res = await fetch(`${apiBase}/api/dispatch-store/issues`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ ...payload, operationId })
+  }): Promise<{ requirement?: DispatchStoreRequirement; issue: DispatchStoreIssue; movement?: MaterialMovement }> {
+    return this.issueStoreToDispatch({
+      jobCardNo: input.jobCardNo || input.requirementId || '',
+      issuedBagQty: input.issuedBagQty,
+      issuedPcsQty: input.issuedPcsQty,
+      issuedKgQty: input.issuedKgQty,
+      remarks: input.remarks,
+      operationId: input.operationId
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.success || !data.issue || !data.stock) {
-      throw new Error(data.error || `Failed to issue independent unit stock (status ${res.status}).`);
-    }
-    return { requirement: data.requirement, issue: data.issue, stock: data.stock };
   }
 
   // --- NOTIFICATIONS ---

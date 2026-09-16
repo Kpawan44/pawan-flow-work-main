@@ -34,7 +34,7 @@ import {
   Send,
   RotateCcw
 } from 'lucide-react';
-import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer, RawMaterialKind, ItemOtherRawMaterialLink, DispatchStoreRequirement, DispatchStoreIssue, StoreUnitStock, StorePhysicalUnit } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile, SavedItem, CompanyConfig, OutsourceOrder, OutsourceMaterialType, AssemblyComponent, AssemblyRecord, ProcessTransfer, RawMaterialKind, ItemOtherRawMaterialLink, DispatchStoreRequirement, DispatchStoreIssue, StorePhysicalUnit } from '../types';
 import { DBService } from '../lib/firebase';
 import RawMaterialRequestModal, { INVENTORY_RAW_MATERIALS, getDynamicRawMaterialsStock } from './RawMaterialRequestModal';
 import IssueOtherRawMaterialModal from './IssueOtherRawMaterialModal';
@@ -380,24 +380,20 @@ export default function DepartmentOperations({
   useEffect(() => {
     const loadDispatchStoreLedger = async () => {
       try {
-        const [reqs, stock, issues] = await Promise.all([
+        const [reqs, issues] = await Promise.all([
           DBService.getDispatchStoreRequirements(),
-          DBService.getStoreUnitStock(),
           DBService.getDispatchStoreIssues()
         ]);
         setDispatchStoreRequirements(reqs);
-        setStoreUnitStock(stock);
         setDispatchStoreIssues(issues);
       } catch (err) {
-        console.error("Failed to load independent Dispatch → Store ledger:", err);
+        console.error("Failed to load Dispatch → Store ledger:", err);
       }
     };
     loadDispatchStoreLedger();
     const unsubs = [
       DBService.subscribeToUpdates('mfr_dispatch_store_requirements', loadDispatchStoreLedger),
-      DBService.subscribeToUpdates('mfr_store_unit_stock', loadDispatchStoreLedger),
-      DBService.subscribeToUpdates('mfr_dispatch_store_issues', loadDispatchStoreLedger),
-      DBService.subscribeToUpdates('mfr_store_unit_openings', loadDispatchStoreLedger)
+      DBService.subscribeToUpdates('mfr_dispatch_store_issues', loadDispatchStoreLedger)
     ];
     return () => {
       unsubs.forEach((u) => u());
@@ -526,7 +522,6 @@ export default function DepartmentOperations({
   const [dispQty, setDispQty] = useState<number>(0);
   const [activeDispJob, setActiveDispJob] = useState<string | null>(null);
   const [dispatchStoreRequirements, setDispatchStoreRequirements] = useState<DispatchStoreRequirement[]>([]);
-  const [storeUnitStock, setStoreUnitStock] = useState<StoreUnitStock[]>([]);
   const [dispatchStoreIssues, setDispatchStoreIssues] = useState<DispatchStoreIssue[]>([]);
   const [directIssueJobCardNo, setDirectIssueJobCardNo] = useState<string>('');
   const [directIssueBag, setDirectIssueBag] = useState<number>(0);
@@ -536,11 +531,6 @@ export default function DepartmentOperations({
   const [directIssueError, setDirectIssueError] = useState<string>('');
   const [directIssueSuccess, setDirectIssueSuccess] = useState<string>('');
   const [isSubmittingDirectIssue, setIsSubmittingDirectIssue] = useState<boolean>(false);
-  const [openingJobCardNo, setOpeningJobCardNo] = useState<string>('');
-  const [openingBag, setOpeningBag] = useState<number>(0);
-  const [openingPcs, setOpeningPcs] = useState<number>(0);
-  const [openingKg, setOpeningKg] = useState<number>(0);
-  const [openingError, setOpeningError] = useState<string>('');
   const [activeResendJob, setActiveResendJob] = useState<string | null>(null);
   const [resendQty, setResendQty] = useState<number>(0);
   const [resendRemarks, setResendRemarks] = useState<string>('');
@@ -2019,14 +2009,6 @@ Please adjust the quantity or request additional raw material issue.`);
   const pendingDispatchStoreRequirements = dispatchStoreRequirements.filter(
     (r) => r.status !== 'COMPLETED'
   );
-
-  const stockByJob = useMemo(() => {
-    const map = new Map<string, StoreUnitStock>();
-    for (const row of storeUnitStock) {
-      map.set(String(row.jobCardNo || '').toUpperCase(), row);
-    }
-    return map;
-  }, [storeUnitStock]);
 
   const pendingRawMaterialRequests = movements.filter(m => {
     return m.isIssueRequest && 
@@ -5375,80 +5357,6 @@ Please adjust the quantity or request additional raw material issue.`);
             )}
 
             {activeDept === 'Store' && (
-              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
-                <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider mb-1 text-emerald-700 dark:text-emerald-400">
-                  Independent unit stock (BAG / PCS / KG)
-                </h3>
-                <p className="text-[11px] text-slate-500 mb-4">
-                  Opening balances are entered independently. Units with no opening or receipt have 0 available for this workflow. Not derived from packing or the existing Store quantity.
-                </p>
-                <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 text-xs">
-                  <div className="sm:col-span-2">
-                    <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Job card</label>
-                    <select
-                      value={openingJobCardNo}
-                      onChange={(e) => setOpeningJobCardNo(e.target.value)}
-                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 font-mono"
-                    >
-                      <option value="">Select job card</option>
-                      {jobCards.map((j) => (
-                        <option key={j.jobCardNo} value={j.jobCardNo}>{j.jobCardNo} — {j.itemName}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Opening BAG</label>
-                    <input type="number" min={0} value={openingBag || ''} onChange={(e) => setOpeningBag(Number(e.target.value) || 0)} className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 font-mono" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Opening PCS</label>
-                    <input type="number" min={0} value={openingPcs || ''} onChange={(e) => setOpeningPcs(Number(e.target.value) || 0)} className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 font-mono" />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">Opening KG</label>
-                    <input type="number" min={0} value={openingKg || ''} onChange={(e) => setOpeningKg(Number(e.target.value) || 0)} className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1.5 font-mono" />
-                  </div>
-                </div>
-                {openingError && <p className="text-[11px] text-rose-600 mt-2">{openingError}</p>}
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setOpeningError('');
-                    if (!openingJobCardNo) {
-                      setOpeningError('Select a job card.');
-                      return;
-                    }
-                    try {
-                      const stock = await DBService.applyStoreUnitOpening({
-                        jobCardNo: openingJobCardNo,
-                        bagQty: openingBag,
-                        pcsQty: openingPcs,
-                        kgQty: openingKg
-                      });
-                      setStoreUnitStock((prev) => {
-                        const rest = prev.filter((s) => s.jobCardNo.toUpperCase() !== stock.jobCardNo.toUpperCase());
-                        return [stock, ...rest];
-                      });
-                      setOpeningBag(0);
-                      setOpeningPcs(0);
-                      setOpeningKg(0);
-                    } catch (err) {
-                      setOpeningError(err instanceof Error ? err.message : 'Opening failed');
-                    }
-                  }}
-                  className="mt-3 bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold py-2 px-3 rounded-md"
-                >
-                  Add opening / receipt
-                </button>
-                {openingJobCardNo && (
-                  <p className="text-[11px] font-mono text-slate-500 mt-2">
-                    Available now — BAG {stockByJob.get(openingJobCardNo.toUpperCase())?.bagQty || 0} · PCS {stockByJob.get(openingJobCardNo.toUpperCase())?.pcsQty || 0} · KG {stockByJob.get(openingJobCardNo.toUpperCase())?.kgQty || 0}
-                  </p>
-                )}
-              </div>
-            )}
-
-            {activeDept === 'Store' && (
               <div className="space-y-4">
                 {/* Direct Issue to Dispatch Card */}
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
@@ -5458,7 +5366,7 @@ Please adjust the quantity or request additional raw material issue.`);
                         <span>🏬 Issue Material to Dispatch</span>
                       </h3>
                       <p className="text-[11px] text-slate-400 font-sans mt-0.5">
-                        Direct material issue without requirements. Quantities are strictly independent with no unit conversion.
+                        Direct material issue from Store to Dispatch. Native unit quantity is deducted from Store on-hand stock. Quantities are strictly independent with no unit conversion.
                       </p>
                     </div>
                   </div>
@@ -5568,21 +5476,30 @@ Please adjust the quantity or request additional raw material issue.`);
                             setDirectIssueError('Enter at least one quantity (BAG, PCS, or KG) greater than 0.');
                             return;
                           }
-                          const available = stockByJob.get(directIssueJobCardNo.toUpperCase());
-                          const curBag = available?.bagQty || 0;
-                          const curPcs = available?.pcsQty || 0;
-                          const curKg = available?.kgQty || 0;
+                          const selectedDirectJob = jobCards.find(
+                            (j) => j.jobCardNo.toUpperCase() === directIssueJobCardNo.toUpperCase()
+                          );
+                          const storeOnHand = selectedDirectJob
+                            ? storeAuthoritativeOnHand(selectedDirectJob, movements)
+                            : 0;
+                          const nativeUnit = selectedDirectJob?.unit || 'KG';
+                          const isPcsNative =
+                            nativeUnit.toUpperCase() === 'PCS' ||
+                            nativeUnit.toUpperCase() === 'PIECES' ||
+                            nativeUnit.toUpperCase() === 'NOS';
+                          const isBagNative =
+                            nativeUnit.toUpperCase() === 'BAG' ||
+                            nativeUnit.toUpperCase() === 'BAGS';
+                          const nativeQty = isPcsNative
+                            ? directIssuePcs
+                            : isBagNative
+                            ? directIssueBag
+                            : directIssueKg;
 
-                          if (directIssueBag > curBag) {
-                            setDirectIssueError(`BAG quantity (${directIssueBag}) exceeds available stock (${curBag} BAG).`);
-                            return;
-                          }
-                          if (directIssuePcs > curPcs) {
-                            setDirectIssueError(`PCS quantity (${directIssuePcs}) exceeds available stock (${curPcs} PCS).`);
-                            return;
-                          }
-                          if (directIssueKg > curKg) {
-                            setDirectIssueError(`KG quantity (${directIssueKg}) exceeds available stock (${curKg} KG).`);
+                          if (nativeQty > storeOnHand) {
+                            setDirectIssueError(
+                              `Entered ${isPcsNative ? 'PCS' : isBagNative ? 'BAG' : 'KG'} quantity (${nativeQty}) exceeds available Store stock (${storeOnHand} ${nativeUnit}).`
+                            );
                             return;
                           }
 
@@ -5595,12 +5512,10 @@ Please adjust the quantity or request additional raw material issue.`);
                               issuedKgQty: directIssueKg,
                               remarks: directIssueRemarks
                             });
-                            setStoreUnitStock((prev) => {
-                              const rest = prev.filter((s) => s.jobCardNo.toUpperCase() !== result.stock.jobCardNo.toUpperCase());
-                              return [result.stock, ...rest];
-                            });
                             setDispatchStoreIssues((prev) => [result.issue, ...prev]);
-                            setDirectIssueSuccess(`Successfully issued to Dispatch: ${directIssueBag ? directIssueBag + ' BAG ' : ''}${directIssuePcs ? directIssuePcs + ' PCS ' : ''}${directIssueKg ? directIssueKg + ' KG ' : ''}for ${directIssueJobCardNo}.`);
+                            setDirectIssueSuccess(
+                              `Successfully issued to Dispatch: ${directIssueBag ? directIssueBag + ' BAG ' : ''}${directIssuePcs ? directIssuePcs + ' PCS ' : ''}${directIssueKg ? directIssueKg + ' KG ' : ''}for ${directIssueJobCardNo}.`
+                            );
                             setDirectIssueBag(0);
                             setDirectIssuePcs(0);
                             setDirectIssueKg(0);
@@ -5618,22 +5533,28 @@ Please adjust the quantity or request additional raw material issue.`);
                     </div>
                   </div>
 
-                  {directIssueJobCardNo && (
-                    <div className="mt-3 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[11px] font-mono text-slate-600 dark:text-slate-300 flex items-center justify-between flex-wrap gap-2">
-                      <span>Available Store Stock for {directIssueJobCardNo}:</span>
-                      <div className="flex gap-3 font-bold">
-                        <span className={stockByJob.get(directIssueJobCardNo.toUpperCase())?.bagQty ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}>
-                          BAG: {stockByJob.get(directIssueJobCardNo.toUpperCase())?.bagQty || 0}
-                        </span>
-                        <span className={stockByJob.get(directIssueJobCardNo.toUpperCase())?.pcsQty ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}>
-                          PCS: {stockByJob.get(directIssueJobCardNo.toUpperCase())?.pcsQty || 0}
-                        </span>
-                        <span className={stockByJob.get(directIssueJobCardNo.toUpperCase())?.kgQty ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400'}>
-                          KG: {stockByJob.get(directIssueJobCardNo.toUpperCase())?.kgQty || 0}
-                        </span>
+                  {directIssueJobCardNo && (() => {
+                    const selectedDirectJob = jobCards.find(
+                      (j) => j.jobCardNo.toUpperCase() === directIssueJobCardNo.toUpperCase()
+                    );
+                    const storeOnHand = selectedDirectJob
+                      ? storeAuthoritativeOnHand(selectedDirectJob, movements)
+                      : 0;
+                    const nativeUnit = selectedDirectJob?.unit || 'KG';
+                    return (
+                      <div className="mt-3 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[11px] font-mono text-slate-600 dark:text-slate-300 flex items-center justify-between flex-wrap gap-2">
+                        <span>Store Authoritative On-Hand for <strong>{directIssueJobCardNo}</strong>:</span>
+                        <div className="flex gap-3 font-bold">
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            On-Hand: {storeOnHand.toLocaleString()} {nativeUnit}
+                          </span>
+                          <span className="text-slate-400">
+                            (Native Unit: {nativeUnit})
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {directIssueError && (
                     <div className="mt-3 p-2 rounded bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-600 dark:text-rose-400 text-xs font-medium">

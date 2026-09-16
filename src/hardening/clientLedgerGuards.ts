@@ -26,10 +26,8 @@ export const LEDGER_SYNC_QUEUE_BLOCKED_COLLECTIONS = [
   "mfr_idempotency_keys",
   "mfr_purchase_invoice_claims",
   "mfr_serialize_locks",
-  "mfr_store_unit_stock",
   "mfr_dispatch_store_requirements",
-  "mfr_dispatch_store_issues",
-  "mfr_store_unit_openings"
+  "mfr_dispatch_store_issues"
 ] as const;
 
 export function isLedgerCollectionBlockedFromClientSync(collection: string): boolean {
