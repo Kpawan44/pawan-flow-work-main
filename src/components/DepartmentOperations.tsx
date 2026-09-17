@@ -8935,8 +8935,14 @@ Please adjust the quantity or request additional raw material issue.`);
           }}
           jobCards={jobCards}
           movements={movements}
+          dispatchStoreIssues={dispatchStoreIssues}
           processTransfers={processTransfers || []}
           currentUser={currentUser}
+          preselectedItemName={
+            preselectedStoreJobNo
+              ? jobCards.find((j) => j.jobCardNo === preselectedStoreJobNo)?.itemName
+              : undefined
+          }
           onSubmit={async (data) => {
             if (onCreateProcessTransfer) {
               await onCreateProcessTransfer(data);

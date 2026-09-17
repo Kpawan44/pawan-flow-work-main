@@ -1,19 +1,19 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  X, 
-  Send, 
-  PackageCheck, 
-  Sparkles, 
-  AlertTriangle, 
-  CheckCircle2, 
-  Search, 
-  Warehouse, 
+import {
+  X,
+  Send,
+  PackageCheck,
+  Sparkles,
+  AlertTriangle,
+  CheckCircle2,
+  Warehouse,
   Scale,
   ShoppingBag,
   Hash
 } from 'lucide-react';
 import { JobCard, MaterialMovement, ProcessTransfer, ProcessTransferType, UserProfile, DispatchStoreIssue } from '../types';
 import { calculateStoreAuthoritativeItemStock, AuthoritativeItemStockSummary } from '../hardening/dispatchStoreIssue';
+import { uniqueJobCardItemNames } from '../hardening/departmentJobCardFilter';
 import { DBService } from '../lib/firebase';
 
 interface StoreProcessTransferModalProps {
@@ -42,8 +42,6 @@ export default function StoreProcessTransferModal({
   onSuccess
 }: StoreProcessTransferModalProps) {
   const [toProcess, setToProcess] = useState<ProcessTransferType>('Repacking');
-  const [searchItemName, setSearchItemName] = useState<string>('');
-  const [searchItemCode, setSearchItemCode] = useState<string>('');
   const [selectedItemName, setSelectedItemName] = useState<string>('');
   const [selectedItemCode, setSelectedItemCode] = useState<string>('');
 
@@ -56,50 +54,28 @@ export default function StoreProcessTransferModal({
   const [error, setError] = useState<string>('');
   const [success, setSuccess] = useState<string>('');
 
-  // Extract all distinct active items in Store
-  const availableStoreItems = useMemo(() => {
-    const itemsMap = new Map<string, { itemName: string; itemCode?: string; totalKg: number; totalBags: number; totalPcs: number }>();
+  // Extract all distinct items available in Store using established uniqueJobCardItemNames helper
+  const availableItemNames = useMemo(() => {
+    const activeJobs = (jobCards || []).filter(
+      (j) => !j.completed && j.status !== 'Completed' && j.currentDepartment !== 'Completed'
+    );
+    const allNames = uniqueJobCardItemNames(activeJobs);
 
-    for (const job of jobCards || []) {
-      if (!job || job.isDeleted || job.completed || job.status === 'Completed' || job.currentDepartment === 'Completed') {
-        continue;
-      }
-      const rawName = String(job.itemName || '').trim();
-      if (!rawName) continue;
-
+    // Keep items that have positive stock in Store (or include all active store items if none found)
+    const itemsWithStock = allNames.filter((name) => {
       const stock = calculateStoreAuthoritativeItemStock(
-        rawName,
+        name,
         jobCards,
         movements,
         dispatchStoreIssues,
         undefined,
         processTransfers
       );
-
-      if (stock.availableKg > 0 || stock.availableBags > 0 || stock.availablePcs > 0) {
-        itemsMap.set(rawName.toLowerCase(), {
-          itemName: rawName,
-          itemCode: job.itemCode,
-          totalKg: stock.availableKg,
-          totalBags: stock.availableBags,
-          totalPcs: stock.availablePcs
-        });
-      }
-    }
-
-    return Array.from(itemsMap.values());
-  }, [jobCards, movements, dispatchStoreIssues, processTransfers]);
-
-  // Filtered item list for search suggestions
-  const filteredItems = useMemo(() => {
-    const query = searchItemName.trim().toLowerCase();
-    const codeQuery = searchItemCode.trim().toLowerCase();
-    return availableStoreItems.filter(item => {
-      const matchName = !query || item.itemName.toLowerCase().includes(query);
-      const matchCode = !codeQuery || (item.itemCode && item.itemCode.toLowerCase().includes(codeQuery));
-      return matchName && matchCode;
+      return stock.availableKg > 0 || stock.availableBags > 0 || stock.availablePcs > 0;
     });
-  }, [availableStoreItems, searchItemName, searchItemCode]);
+
+    return itemsWithStock.length > 0 ? itemsWithStock : allNames;
+  }, [jobCards, movements, dispatchStoreIssues, processTransfers]);
 
   // Authoritative stock for the currently selected item
   const selectedItemStock: AuthoritativeItemStockSummary | null = useMemo(() => {
@@ -114,7 +90,7 @@ export default function StoreProcessTransferModal({
     );
   }, [selectedItemName, selectedItemCode, jobCards, movements, dispatchStoreIssues, processTransfers]);
 
-  // Initial load
+  // Initial load / synchronization
   useEffect(() => {
     if (isOpen) {
       setError('');
@@ -125,27 +101,24 @@ export default function StoreProcessTransferModal({
       setSendPcsQty('');
       setSendBagQty('');
 
-      if (preselectedItemName) {
+      if (preselectedItemName && availableItemNames.includes(preselectedItemName)) {
         setSelectedItemName(preselectedItemName);
-        setSearchItemName(preselectedItemName);
-      } else if (availableStoreItems.length > 0) {
-        setSelectedItemName(availableStoreItems[0].itemName);
-        setSelectedItemCode(availableStoreItems[0].itemCode || '');
-        setSearchItemName(availableStoreItems[0].itemName);
+      } else if (preselectedItemName) {
+        setSelectedItemName(preselectedItemName);
+      } else if (availableItemNames.length === 1) {
+        setSelectedItemName(availableItemNames[0]);
       } else {
         setSelectedItemName('');
-        setSelectedItemCode('');
-        setSearchItemName('');
       }
     }
-  }, [isOpen, preselectedItemName, availableStoreItems]);
+  }, [isOpen, preselectedItemName, availableItemNames]);
 
-  const handleSelectItem = (item: { itemName: string; itemCode?: string }) => {
-    setSelectedItemName(item.itemName);
-    setSelectedItemCode(item.itemCode || '');
-    setSearchItemName(item.itemName);
-    setError('');
-  };
+  // When selectedItemStock changes, sync itemCode if available
+  useEffect(() => {
+    if (selectedItemStock && selectedItemStock.itemCode) {
+      setSelectedItemCode(selectedItemStock.itemCode);
+    }
+  }, [selectedItemStock]);
 
   // Quantity parsing & validation
   const parsedKg = parseFloat(sendKgQty) || 0;
@@ -227,7 +200,7 @@ export default function StoreProcessTransferModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/70 backdrop-blur-xs animate-fade-in overflow-y-auto">
       <div className="relative w-full max-w-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden my-auto max-h-[94vh] flex flex-col font-sans">
-        
+
         {/* Modal Header */}
         <div className="px-6 py-4.5 bg-gradient-to-r from-emerald-600 to-teal-700 text-white flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
@@ -254,7 +227,7 @@ export default function StoreProcessTransferModal({
 
         {/* Modal Body */}
         <form onSubmit={handleSubmit} className="p-6 space-y-5 overflow-y-auto flex-1">
-          
+
           {/* Alerts */}
           {error && (
             <div className="p-3.5 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/40 rounded-xl text-red-700 dark:text-red-300 text-xs flex items-center gap-2 font-semibold">
@@ -316,58 +289,36 @@ export default function StoreProcessTransferModal({
             </div>
           </div>
 
-          {/* 2. Item Name Search & Selection */}
-          <div className="space-y-2">
-            <label className="block text-xs font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">
-              Search & Select Item Name <span className="text-red-500">*</span>
+          {/* 2. Existing Item Name List / Selector */}
+          <div className="space-y-1.5">
+            <label htmlFor="store-process-item-select" className="block text-xs font-extrabold uppercase tracking-wider text-slate-700 dark:text-slate-200">
+              Select Item Name <span className="text-red-500">*</span>
             </label>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-                <input
-                  type="text"
-                  value={searchItemName}
-                  onChange={e => setSearchItemName(e.target.value)}
-                  placeholder="Search by Item Name..."
-                  className="w-full pl-9 pr-3 py-2.5 bg-[#F8FAFC] dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-medium text-slate-800 dark:text-white focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-              <div>
-                <input
-                  type="text"
-                  value={searchItemCode}
-                  onChange={e => setSearchItemCode(e.target.value)}
-                  placeholder="Filter by Item Code (optional)..."
-                  className="w-full px-3 py-2.5 bg-[#F8FAFC] dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-medium text-slate-800 dark:text-white focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-            </div>
-
-            {/* Suggestions list */}
-            {filteredItems.length > 0 && (
-              <div className="max-h-36 overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl bg-slate-50 dark:bg-slate-950 divide-y divide-slate-200 dark:divide-slate-800">
-                {filteredItems.map(item => (
-                  <button
-                    key={item.itemName}
-                    type="button"
-                    onClick={() => handleSelectItem(item)}
-                    className={`w-full text-left px-3.5 py-2 text-xs flex items-center justify-between transition cursor-pointer ${
-                      selectedItemName.toLowerCase() === item.itemName.toLowerCase()
-                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-900 dark:text-emerald-200 font-bold'
-                        : 'hover:bg-slate-100 dark:hover:bg-slate-850 text-slate-700 dark:text-slate-300'
-                    }`}
-                  >
-                    <div>
-                      <span className="font-bold">{item.itemName}</span>
-                      {item.itemCode && <span className="ml-2 text-[10px] text-slate-400">({item.itemCode})</span>}
-                    </div>
-                    <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                      {item.totalKg} KG | {item.totalBags} BAGS | {item.totalPcs} PCS
-                    </div>
-                  </button>
+            <div className="relative">
+              <select
+                id="store-process-item-select"
+                value={selectedItemName}
+                onChange={(e) => {
+                  setSelectedItemName(e.target.value);
+                  setSendKgQty('');
+                  setSendPcsQty('');
+                  setSendBagQty('');
+                  setError('');
+                }}
+                className="w-full min-h-[44px] bg-[#F8FAFC] dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-bold text-slate-800 dark:text-white focus:outline-none focus:border-emerald-500 cursor-pointer"
+              >
+                <option value="">
+                  {availableItemNames.length === 0
+                    ? '-- No active items found in Store --'
+                    : `-- Select Item Name from Store (${availableItemNames.length} available) --`}
+                </option>
+                {availableItemNames.map((name) => (
+                  <option key={name} value={name}>
+                    📦 {name}
+                  </option>
                 ))}
-              </div>
-            )}
+              </select>
+            </div>
           </div>
 
           {/* 3. 3-Unit Available Stock Cards */}
@@ -427,10 +378,31 @@ export default function StoreProcessTransferModal({
                   </span>
                 </div>
               </div>
+
+              {/* Candidate Job Cards FIFO Preview */}
+              {selectedItemStock.candidateJobCards.length > 0 && (
+                <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+                  <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">
+                    <span>Store Job Cards FIFO Breakdown</span>
+                    <span>{selectedItemStock.candidateJobCards.length} Batch(es)</span>
+                  </div>
+                  <div className="max-h-24 overflow-y-auto space-y-1 text-[11px] font-mono">
+                    {selectedItemStock.candidateJobCards.map((c) => (
+                      <div key={c.jobCardNo} className="flex items-center justify-between px-2 py-1 bg-white dark:bg-slate-900 rounded border border-slate-150 dark:border-slate-800">
+                        <span className="font-bold text-indigo-500">{c.jobCardNo}</span>
+                        <span className="text-slate-500 dark:text-slate-400 font-sans">{c.partyName || '-'}</span>
+                        <span className="text-slate-700 dark:text-slate-200 font-semibold">
+                          {c.availableKg} KG | {c.availablePcs} PCS | {c.availableBags} Bags
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
-            <div className="p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/30 rounded-xl text-amber-800 dark:text-amber-300 text-xs">
-              Please select an item above to view available Store stock.
+            <div className="p-4 bg-slate-50 dark:bg-slate-850/40 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-500 dark:text-slate-400 text-xs text-center font-medium">
+              Please select an item from the Store list above to view available stock.
             </div>
           )}
 
