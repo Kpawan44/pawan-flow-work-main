@@ -624,3 +624,19 @@ export interface DispatchStoreIssue {
   nativeUnit?: string;
   nativeDeductedQty?: number;
 }
+
+export interface StoreBatchItemIssueEntry {
+  itemName: string;
+  itemCode?: string;
+  jobCardNo?: string;
+  issuedBagQty?: number;
+  issuedPcsQty?: number;
+  issuedKgQty?: number;
+  remarks?: string;
+}
+
+export interface StoreBatchIssueInput {
+  items: StoreBatchItemIssueEntry[];
+  remarks?: string;
+  operationId?: string;
+}

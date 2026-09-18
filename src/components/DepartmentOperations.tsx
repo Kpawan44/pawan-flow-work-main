@@ -535,6 +535,15 @@ export default function DepartmentOperations({
   const [directIssueError, setDirectIssueError] = useState<string>('');
   const [directIssueSuccess, setDirectIssueSuccess] = useState<string>('');
   const [isSubmittingDirectIssue, setIsSubmittingDirectIssue] = useState<boolean>(false);
+  const [dispatchBatchItems, setDispatchBatchItems] = useState<Array<{
+    id: string;
+    itemName: string;
+    itemCode?: string;
+    bag: number;
+    pcs: number;
+    kg: number;
+    remarks?: string;
+  }>>([]);
   const [activeResendJob, setActiveResendJob] = useState<string | null>(null);
   const [resendQty, setResendQty] = useState<number>(0);
   const [resendRemarks, setResendRemarks] = useState<string>('');
@@ -5383,17 +5392,22 @@ Please adjust the quantity or request additional raw material issue.`);
 
             {activeDept === 'Store' && (
               <div className="space-y-4">
-                {/* Item-Centric Issue to Dispatch Card */}
+                {/* Item-Centric Multi-Item Issue to Dispatch Card */}
                 <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4">
                     <div>
                       <h3 className="font-sans font-bold text-sm text-slate-800 dark:text-white uppercase tracking-wider flex items-center gap-2 text-indigo-600 dark:text-indigo-400">
-                        <span>🏬 Send Material to Dispatch (Item-Centric)</span>
+                        <span>🏬 Send Material to Dispatch (Multi-Item Batch Support)</span>
                       </h3>
                       <p className="text-[11px] text-slate-400 font-sans mt-0.5">
-                        Search by Item Name to view total authoritative Store stock in KG, Bags, and PCS across active Job Cards. Strict 3-unit stock validation with FIFO multi-Job-Card allocation.
+                        Configure one or more items to issue to Dispatch in a single atomic transaction. Independent KG / PCS / Bags tracking with 100% zero conversion and atomic rollback.
                       </p>
                     </div>
+                    {dispatchBatchItems.length > 0 && (
+                      <span className="px-2.5 py-1 rounded-full bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 border border-indigo-200 dark:border-indigo-800 font-bold text-xs font-mono">
+                        {dispatchBatchItems.length} Item(s) in Batch
+                      </span>
+                    )}
                   </div>
 
                   {/* Item Search & Selection */}
@@ -5574,7 +5588,7 @@ Please adjust the quantity or request additional raw material issue.`);
                   {/* Manual Issue Entry Fields */}
                   <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
                     <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200 mb-2.5">
-                      Issue Quantities (Physical breakdown)
+                      Configure Item Quantities (Physical breakdown)
                     </h4>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       <div>
@@ -5631,13 +5645,13 @@ Please adjust the quantity or request additional raw material issue.`);
                     </div>
 
                     <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
-                      <div className="md:col-span-3">
+                      <div className="md:col-span-2">
                         <label className="block text-[10px] font-bold uppercase text-slate-400 mb-1">
-                          Remarks (Optional)
+                          Item Remarks (Optional)
                         </label>
                         <input
                           type="text"
-                          placeholder="E.g., Batch release to dispatch for shipping..."
+                          placeholder="E.g., Lot release to dispatch for shipping..."
                           value={directIssueRemarks}
                           onChange={(e) => setDirectIssueRemarks(e.target.value)}
                           className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2.5 py-2 text-xs text-slate-800 dark:text-white"
@@ -5647,12 +5661,11 @@ Please adjust the quantity or request additional raw material issue.`);
                       <div>
                         <button
                           type="button"
-                          disabled={isSubmittingDirectIssue}
-                          onClick={async () => {
+                          onClick={() => {
                             setDirectIssueError('');
                             setDirectIssueSuccess('');
                             if (!directIssueItemName) {
-                              setDirectIssueError('Please search and select an Item Name.');
+                              setDirectIssueError('Please search and select an Item Name before adding to batch.');
                               return;
                             }
                             if (!(directIssueBag > 0 || directIssuePcs > 0 || directIssueKg > 0)) {
@@ -5669,42 +5682,114 @@ Please adjust the quantity or request additional raw material issue.`);
                             );
 
                             if (directIssueBag > stock.availableBags) {
-                              setDirectIssueError(
-                                `Entered BAG quantity (${directIssueBag}) exceeds available Store stock (${stock.availableBags} BAG).`
-                              );
+                              setDirectIssueError(`Entered BAG quantity (${directIssueBag}) exceeds available Store stock (${stock.availableBags} BAG).`);
                               return;
                             }
                             if (directIssuePcs > stock.availablePcs) {
-                              setDirectIssueError(
-                                `Entered PCS quantity (${directIssuePcs}) exceeds available Store stock (${stock.availablePcs} PCS).`
-                              );
+                              setDirectIssueError(`Entered PCS quantity (${directIssuePcs}) exceeds available Store stock (${stock.availablePcs} PCS).`);
                               return;
                             }
                             if (directIssueKg > stock.availableKg) {
-                              setDirectIssueError(
-                                `Entered KG quantity (${directIssueKg}) exceeds available Store stock (${stock.availableKg} KG).`
-                              );
+                              setDirectIssueError(`Entered KG quantity (${directIssueKg}) exceeds available Store stock (${stock.availableKg} KG).`);
+                              return;
+                            }
+
+                            setDispatchBatchItems((prev) => [
+                              ...prev,
+                              {
+                                id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                                itemName: directIssueItemName,
+                                itemCode: directIssueItemCode || stock.itemCode,
+                                bag: directIssueBag,
+                                pcs: directIssuePcs,
+                                kg: directIssueKg,
+                                remarks: directIssueRemarks
+                              }
+                            ]);
+
+                            setDirectIssueItemName('');
+                            setDirectIssueItemCode('');
+                            setItemSearchQuery('');
+                            setDirectIssueBag(0);
+                            setDirectIssuePcs(0);
+                            setDirectIssueKg(0);
+                            setDirectIssueRemarks('');
+                          }}
+                          className="w-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold py-2.5 px-3 rounded-md transition flex items-center justify-center gap-1 cursor-pointer"
+                        >
+                          ➕ Add to Batch
+                        </button>
+                      </div>
+
+                      <div>
+                        <button
+                          type="button"
+                          disabled={isSubmittingDirectIssue}
+                          onClick={async () => {
+                            setDirectIssueError('');
+                            setDirectIssueSuccess('');
+
+                            // If batch items exist, issue the entire batch; otherwise issue current single item
+                            const itemsToIssue = dispatchBatchItems.length > 0
+                              ? dispatchBatchItems.map((it) => ({
+                                  itemName: it.itemName,
+                                  itemCode: it.itemCode,
+                                  issuedBagQty: it.bag,
+                                  issuedPcsQty: it.pcs,
+                                  issuedKgQty: it.kg,
+                                  remarks: it.remarks
+                                }))
+                              : directIssueItemName
+                              ? [
+                                  {
+                                    itemName: directIssueItemName,
+                                    itemCode: directIssueItemCode || undefined,
+                                    issuedBagQty: directIssueBag,
+                                    issuedPcsQty: directIssuePcs,
+                                    issuedKgQty: directIssueKg,
+                                    remarks: directIssueRemarks
+                                  }
+                                ]
+                              : [];
+
+                            if (itemsToIssue.length === 0) {
+                              setDirectIssueError('Add at least one item to batch or fill item quantities above.');
                               return;
                             }
 
                             setIsSubmittingDirectIssue(true);
                             try {
-                              const result = await DBService.issueStoreItemToDispatch({
-                                itemName: directIssueItemName,
-                                itemCode: directIssueItemCode || stock.itemCode,
-                                issuedBagQty: directIssueBag,
-                                issuedPcsQty: directIssuePcs,
-                                issuedKgQty: directIssueKg,
-                                remarks: directIssueRemarks
-                              });
-                              setDispatchStoreIssues((prev) => [result.issue, ...prev]);
-                              setDirectIssueSuccess(
-                                `Successfully issued to Dispatch: ${directIssueBag ? directIssueBag + ' BAG ' : ''}${directIssuePcs ? directIssuePcs + ' PCS ' : ''}${directIssueKg ? directIssueKg + ' KG ' : ''}for '${directIssueItemName}'.`
-                              );
-                              setDirectIssueBag(0);
-                              setDirectIssuePcs(0);
-                              setDirectIssueKg(0);
-                              setDirectIssueRemarks('');
+                              if (itemsToIssue.length === 1 && dispatchBatchItems.length === 0) {
+                                const single = itemsToIssue[0];
+                                const result = await DBService.issueStoreItemToDispatch({
+                                  itemName: single.itemName,
+                                  itemCode: single.itemCode,
+                                  issuedBagQty: single.issuedBagQty,
+                                  issuedPcsQty: single.issuedPcsQty,
+                                  issuedKgQty: single.issuedKgQty,
+                                  remarks: single.remarks
+                                });
+                                setDispatchStoreIssues((prev) => [result.issue, ...prev]);
+                                setDirectIssueSuccess(
+                                  `Successfully issued to Dispatch: ${single.issuedBagQty ? single.issuedBagQty + ' BAG ' : ''}${single.issuedPcsQty ? single.issuedPcsQty + ' PCS ' : ''}${single.issuedKgQty ? single.issuedKgQty + ' KG ' : ''}for '${single.itemName}'.`
+                                );
+                                setDirectIssueItemName('');
+                                setDirectIssueItemCode('');
+                                setItemSearchQuery('');
+                                setDirectIssueBag(0);
+                                setDirectIssuePcs(0);
+                                setDirectIssueKg(0);
+                                setDirectIssueRemarks('');
+                              } else {
+                                const result = await DBService.issueStoreBatchItemsToDispatch({
+                                  items: itemsToIssue
+                                });
+                                setDispatchStoreIssues((prev) => [...result.issues, ...prev]);
+                                setDirectIssueSuccess(
+                                  `Successfully issued ${result.issues.length} items to Dispatch in one atomic transaction!`
+                                );
+                                setDispatchBatchItems([]);
+                              }
                             } catch (err) {
                               setDirectIssueError(err instanceof Error ? err.message : 'Failed to issue material to Dispatch.');
                             } finally {
@@ -5713,11 +5798,77 @@ Please adjust the quantity or request additional raw material issue.`);
                           }}
                           className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold py-2.5 px-3 rounded-md transition flex items-center justify-center gap-1 cursor-pointer"
                         >
-                          {isSubmittingDirectIssue ? 'Issuing...' : 'ISSUE TO DISPATCH'}
+                          {isSubmittingDirectIssue ? 'Issuing...' : dispatchBatchItems.length > 0 ? `ISSUE BATCH (${dispatchBatchItems.length} ITEMS)` : 'ISSUE TO DISPATCH'}
                         </button>
                       </div>
                     </div>
                   </div>
+
+                  {/* Multi-Item Batch Manifest Table */}
+                  {dispatchBatchItems.length > 0 && (
+                    <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
+                      <div className="flex items-center justify-between mb-2">
+                        <h4 className="text-xs font-bold uppercase tracking-wider text-slate-700 dark:text-slate-200">
+                          📦 Current Dispatch Manifest ({dispatchBatchItems.length} items ready to issue)
+                        </h4>
+                        <button
+                          type="button"
+                          onClick={() => setDispatchBatchItems([])}
+                          className="text-[10px] text-rose-500 font-bold uppercase hover:underline cursor-pointer"
+                        >
+                          Clear Batch
+                        </button>
+                      </div>
+
+                      <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-slate-50 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 text-[10px] uppercase font-bold text-slate-400">
+                            <tr>
+                              <th className="p-2.5">Item Name</th>
+                              <th className="p-2.5">Code</th>
+                              <th className="p-2.5 text-right">BAG</th>
+                              <th className="p-2.5 text-right">PCS</th>
+                              <th className="p-2.5 text-right">KG</th>
+                              <th className="p-2.5">Remarks</th>
+                              <th className="p-2.5 text-center">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono text-xs">
+                            {dispatchBatchItems.map((item, idx) => (
+                              <tr key={item.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-800/50">
+                                <td className="p-2.5 font-bold text-slate-800 dark:text-white font-sans">{item.itemName}</td>
+                                <td className="p-2.5 text-slate-400">{item.itemCode || '-'}</td>
+                                <td className="p-2.5 text-right font-bold text-amber-600">{item.bag || 0}</td>
+                                <td className="p-2.5 text-right font-bold text-emerald-600">{item.pcs || 0}</td>
+                                <td className="p-2.5 text-right font-bold text-blue-600">{item.kg || 0}</td>
+                                <td className="p-2.5 text-slate-500 text-[11px] font-sans">{item.remarks || '-'}</td>
+                                <td className="p-2.5 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => setDispatchBatchItems((prev) => prev.filter((_, i) => i !== idx))}
+                                    className="p-1 rounded text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-xs font-bold cursor-pointer"
+                                    title="Remove item from batch"
+                                  >
+                                    ✕
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Batch Totals Summary */}
+                      <div className="mt-2.5 p-3 rounded-xl bg-indigo-50/60 dark:bg-indigo-950/30 border border-indigo-200/60 dark:border-indigo-900/40 flex flex-wrap items-center justify-between text-xs font-bold text-indigo-900 dark:text-indigo-200">
+                        <span>Batch Totals ({dispatchBatchItems.length} items):</span>
+                        <div className="flex gap-4 font-mono">
+                          <span>📦 {dispatchBatchItems.reduce((s, it) => s + (it.bag || 0), 0)} BAGS</span>
+                          <span>🔢 {dispatchBatchItems.reduce((s, it) => s + (it.pcs || 0), 0)} PCS</span>
+                          <span>⚖️ {dispatchBatchItems.reduce((s, it) => s + (it.kg || 0), 0).toFixed(2)} KG</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {directIssueError && (
                     <div className="mt-3 p-2.5 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-600 dark:text-rose-400 text-xs font-medium">

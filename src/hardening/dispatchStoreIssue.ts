@@ -156,6 +156,30 @@ export function ensureDispatchStoreIssueOperationId(payload: { operationId?: str
   return minted;
 }
 
+export function createDispatchStoreBatchIssueFingerprint(input: {
+  items: Array<{
+    jobCardNo?: string;
+    itemName?: string;
+    itemCode?: string;
+    issuedBagQty?: unknown;
+    issuedPcsQty?: unknown;
+    issuedKgQty?: unknown;
+  }>;
+  remarks?: string;
+}): string {
+  const itemStrings = (input.items || []).map((it) =>
+    [
+      normalizeItemName(it.itemName || ""),
+      normalizeJobCardNo(it.jobCardNo || ""),
+      String(it.itemCode || "").trim().toUpperCase(),
+      String(Number(it.issuedBagQty) || 0),
+      String(Number(it.issuedPcsQty) || 0),
+      String(Number(it.issuedKgQty) || 0)
+    ].join("|")
+  );
+  return [String(input.remarks || "").trim(), ...itemStrings].join("::");
+}
+
 export function createDispatchStoreIssueFingerprint(input: {
   jobCardNo?: string;
   itemName?: string;
@@ -567,6 +591,352 @@ export async function createDispatchStoreRequirementTx(
 /**
  * Server-side authoritative Item-Centric Store → Dispatch issue transaction.
  */
+/**
+ * Server-side authoritative Multi-Item Store → Dispatch batch issue transaction.
+ * Executes in ONE single atomic transaction with complete rollback if even one item fails.
+ */
+export async function issueStoreBatchItemsToDispatchTx(
+  store: SimpleStore,
+  input: {
+    operationId?: string;
+    items: Array<{
+      itemName?: string;
+      itemCode?: string;
+      jobCardNo?: string;
+      issuedBagQty?: unknown;
+      issuedPcsQty?: unknown;
+      issuedKgQty?: unknown;
+      remarks?: string;
+    }>;
+    remarks?: string;
+    actor: ActorLike;
+    nowIso?: string;
+  }
+): Promise<DispatchStoreTxResult<{ issues: DispatchStoreIssueRecord[]; movements: any[] }>> {
+  const opKey = String(input.operationId || "").trim();
+  if (!opKey) {
+    return {
+      success: false,
+      statusCode: 400,
+      error: "operationId is required. Retry the same issue with the identical operationId to avoid duplicate deductions."
+    };
+  }
+  if (!store.runTransaction) {
+    return { success: false, statusCode: 500, error: "Atomic transaction store is required for Store → Dispatch issue." };
+  }
+
+  if (!Array.isArray(input.items) || input.items.length === 0) {
+    return { success: false, statusCode: 400, error: "items array must be non-empty for batch Store → Dispatch issue." };
+  }
+
+  if (!canIssueDispatchStoreStock(input.actor)) {
+    return { success: false, statusCode: 403, error: "Only Store (or admin) can issue material to Dispatch." };
+  }
+
+  // Pre-validate parsed items
+  const parsedItems: Array<{
+    targetItemName: string;
+    targetItemCode: string;
+    jobCardNo?: string;
+    bag: number;
+    pcs: number;
+    kg: number;
+    remarks?: string;
+  }> = [];
+
+  for (let i = 0; i < input.items.length; i++) {
+    const item = input.items[i];
+    const bagRes = parseNonNegativeQty(item.issuedBagQty);
+    const pcsRes = parseNonNegativeQty(item.issuedPcsQty);
+    const kgRes = parseNonNegativeQty(item.issuedKgQty);
+
+    if (bagRes.ok === false) return { success: false, statusCode: 400, error: `Item ${i + 1}: ${bagRes.error}` };
+    if (pcsRes.ok === false) return { success: false, statusCode: 400, error: `Item ${i + 1}: ${pcsRes.error}` };
+    if (kgRes.ok === false) return { success: false, statusCode: 400, error: `Item ${i + 1}: ${kgRes.error}` };
+
+    if (!(bagRes.qty > 0 || pcsRes.qty > 0 || kgRes.qty > 0)) {
+      return {
+        success: false,
+        statusCode: 400,
+        error: `Item ${i + 1} ('${item.itemName || item.jobCardNo || "unnamed"}'): At least one of BAG, PCS, or KG must be greater than 0.`
+      };
+    }
+
+    parsedItems.push({
+      targetItemName: String(item.itemName || "").trim(),
+      targetItemCode: String(item.itemCode || "").trim(),
+      jobCardNo: item.jobCardNo ? String(item.jobCardNo).trim() : undefined,
+      bag: bagRes.qty,
+      pcs: pcsRes.qty,
+      kg: kgRes.qty,
+      remarks: item.remarks ? String(item.remarks) : undefined
+    });
+  }
+
+  const serializeKey = dispatchStoreSerializeKey("batch_issue");
+
+  return runSerialized(store, serializeKey, () =>
+    store.runTransaction!(async (tx) => {
+      const now = input.nowIso || new Date().toISOString();
+
+      const allJobCards = await store.list("mfr_job_cards");
+      const allMovements = await store.list("mfr_movements");
+      const allIssues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+      const allProcessTransfers = await store.list("mfr_process_transfers");
+
+      const requestFingerprint = createDispatchStoreBatchIssueFingerprint({
+        items: input.items,
+        remarks: input.remarks
+      });
+
+      const existing = await tx.get("mfr_idempotency_keys", opKey);
+      if (existing?.requestFingerprint && existing.requestFingerprint !== requestFingerprint) {
+        return {
+          success: false,
+          statusCode: 409,
+          error: "operationId was already used for a different Store → Dispatch issue batch. Use a new operationId for a distinct issue."
+        };
+      }
+      if (existing?.result?.issues && existing?.result?.movements) {
+        return {
+          success: true,
+          cached: true,
+          data: {
+            issues: existing.result.issues,
+            movements: existing.result.movements
+          }
+        };
+      }
+
+      // First pass: Validate every item in the batch against stock
+      const currentIssues = [...allIssues];
+      const batchPlannedAllocations: Array<{
+        targetItemName: string;
+        targetItemCode: string;
+        bag: number;
+        pcs: number;
+        kg: number;
+        remarks?: string;
+        allocations: DispatchStoreIssueSourceAllocation[];
+        itemStock: AuthoritativeItemStockSummary;
+      }> = [];
+
+      for (let i = 0; i < parsedItems.length; i++) {
+        const pItem = parsedItems[i];
+        let targetItemName = pItem.targetItemName;
+        let targetItemCode = pItem.targetItemCode;
+
+        if (!targetItemName && pItem.jobCardNo) {
+          const jcNo = normalizeJobCardNo(pItem.jobCardNo);
+          const j = allJobCards.find((card: any) => normalizeJobCardNo(card?.jobCardNo) === jcNo);
+          if (j) {
+            targetItemName = String(j.itemName || "");
+            if (!targetItemCode && j.itemCode) targetItemCode = String(j.itemCode);
+          } else {
+            return { success: false, statusCode: 404, error: `Job Card '${pItem.jobCardNo}' not found.` };
+          }
+        }
+
+        if (!targetItemName) {
+          return { success: false, statusCode: 400, error: `Item ${i + 1}: Item Name (or Job Card) is required.` };
+        }
+
+        // Calculate authoritative stock taking into account prior issues and simulated batch issues
+        let itemStock: AuthoritativeItemStockSummary;
+        if (pItem.jobCardNo) {
+          const jcNo = normalizeJobCardNo(pItem.jobCardNo);
+          const singleJob = allJobCards.find((c: any) => normalizeJobCardNo(c?.jobCardNo) === jcNo);
+          if (!singleJob) {
+            return { success: false, statusCode: 404, error: `Job Card '${pItem.jobCardNo}' not found.` };
+          }
+          const singleStock = calculateStoreJobCardAvailableStock(singleJob, allMovements, currentIssues, allProcessTransfers);
+          itemStock = {
+            itemName: singleJob.itemName,
+            itemCode: singleJob.itemCode,
+            availableKg: singleStock.availableKg,
+            availableBags: singleStock.availableBags,
+            availablePcs: singleStock.availablePcs,
+            candidateJobCards: [
+              {
+                jobCardNo: jcNo,
+                itemCode: singleJob.itemCode,
+                itemName: singleJob.itemName,
+                partyName: singleJob.partyName,
+                createdAt: singleJob.createdAt,
+                availableKg: singleStock.availableKg,
+                availableBags: singleStock.availableBags,
+                availablePcs: singleStock.availablePcs,
+                nativeUnit: singleStock.nativeUnit,
+                onHandNative: singleStock.onHandNative
+              }
+            ]
+          };
+        } else {
+          itemStock = calculateStoreAuthoritativeItemStock(
+            targetItemName,
+            allJobCards,
+            allMovements,
+            currentIssues,
+            targetItemCode || undefined,
+            allProcessTransfers
+          );
+        }
+
+        // Strict validation: every unit requested must be <= available stock for that unit
+        if (pItem.bag > itemStock.availableBags) {
+          return {
+            success: false,
+            statusCode: 409,
+            error: `Entered BAG quantity (${pItem.bag}) exceeds available Store stock (${itemStock.availableBags} BAG) for '${targetItemName}'.`
+          };
+        }
+        if (pItem.pcs > itemStock.availablePcs) {
+          return {
+            success: false,
+            statusCode: 409,
+            error: `Entered PCS quantity (${pItem.pcs}) exceeds available Store stock (${itemStock.availablePcs} PCS) for '${targetItemName}'.`
+          };
+        }
+        if (pItem.kg > itemStock.availableKg) {
+          return {
+            success: false,
+            statusCode: 409,
+            error: `Entered KG quantity (${pItem.kg}) exceeds available Store stock (${itemStock.availableKg} KG) for '${targetItemName}'.`
+          };
+        }
+
+        // Allocate across candidate Job Cards
+        const allocationResult = allocateItemStockAcrossJobCards(
+          itemStock.candidateJobCards,
+          pItem.kg,
+          pItem.bag,
+          pItem.pcs
+        );
+        if (!allocationResult.success) {
+          return {
+            success: false,
+            statusCode: 409,
+            error: (allocationResult as { success: false; error: string }).error
+          };
+        }
+
+        // Simulate deduction in currentIssues
+        const simIssue: any = {
+          id: `sim-${i}`,
+          itemName: targetItemName,
+          itemCode: targetItemCode,
+          issuedBagQty: pItem.bag,
+          issuedPcsQty: pItem.pcs,
+          issuedKgQty: pItem.kg,
+          sourceAllocations: allocationResult.allocations
+        };
+        currentIssues.push(simIssue);
+
+        batchPlannedAllocations.push({
+          targetItemName,
+          targetItemCode: targetItemCode || itemStock.itemCode || "",
+          bag: pItem.bag,
+          pcs: pItem.pcs,
+          kg: pItem.kg,
+          remarks: pItem.remarks,
+          allocations: allocationResult.allocations,
+          itemStock
+        });
+      }
+
+      // If all items passed validation, commit all mutations atomically
+      const createdIssues: DispatchStoreIssueRecord[] = [];
+      const createdMovements: any[] = [];
+
+      for (const planned of batchPlannedAllocations) {
+        const issueId = newId("DSI");
+        const primaryJobCardNo = planned.allocations[0]?.jobCardNo || "";
+        const primaryMovementId = planned.allocations[0]?.movementId || newId("MOV");
+
+        const issueRecord: DispatchStoreIssueRecord = {
+          id: issueId,
+          jobCardNo: primaryJobCardNo,
+          itemName: planned.targetItemName,
+          itemCode: planned.targetItemCode || planned.itemStock.itemCode,
+          fromDepartment: "Store",
+          toDepartment: "Dispatch",
+          issuedBagQty: planned.bag,
+          issuedPcsQty: planned.pcs,
+          issuedKgQty: planned.kg,
+          issuedBy: input.actor.userName || input.actor.userId,
+          issuedAt: now,
+          remarks: planned.remarks ? String(planned.remarks) : (input.remarks ? String(input.remarks) : undefined),
+          operationId: opKey,
+          movementId: primaryMovementId,
+          sourceAllocations: planned.allocations,
+          nativeUnit: planned.allocations[0]?.nativeUnit || "KG",
+          nativeDeductedQty: planned.allocations.reduce((s, a) => s + (a.nativeDeductedQty || 0), 0)
+        };
+
+        for (const alloc of planned.allocations) {
+          const mov = {
+            movementId: alloc.movementId,
+            jobCardNo: alloc.jobCardNo,
+            fromDepartment: "Store",
+            toDepartment: "Dispatch",
+            quantity: alloc.nativeDeductedQty || 0,
+            unit: alloc.nativeUnit || "KG",
+            initiatedBy: input.actor.userId,
+            initiatedByUserName: input.actor.userName || input.actor.userId,
+            accepted: false,
+            acceptedQty: 0,
+            rejectedQty: 0,
+            transactionType: "TRANSFER",
+            operationId: opKey,
+            isIssueRequest: false,
+            remarks:
+              planned.remarks ||
+              input.remarks ||
+              `Direct Store → Dispatch issue for ${planned.targetItemName}: ${alloc.allocatedBagQty} BAG, ${alloc.allocatedPcsQty} PCS, ${alloc.allocatedKgQty} KG`,
+            processDetails: {
+              directStoreIssueId: issueId,
+              itemName: planned.targetItemName,
+              itemCode: planned.targetItemCode || planned.itemStock.itemCode,
+              issuedBagQty: alloc.allocatedBagQty,
+              issuedPcsQty: alloc.allocatedPcsQty,
+              issuedKgQty: alloc.allocatedKgQty,
+              nativeUnit: alloc.nativeUnit || "KG",
+              nativeDeductedQty: alloc.nativeDeductedQty || 0
+            },
+            createdAt: now
+          };
+          tx.set("mfr_movements", mov.movementId, mov);
+          createdMovements.push(mov);
+        }
+
+        tx.set(DISPATCH_STORE_ISSUE_COLLECTION, issueRecord.id, issueRecord);
+        createdIssues.push(issueRecord);
+      }
+
+      tx.set("mfr_idempotency_keys", opKey, {
+        operationId: opKey,
+        requestFingerprint,
+        result: { issues: createdIssues, movements: createdMovements }
+      });
+
+      return { success: true, data: { issues: createdIssues, movements: createdMovements } };
+    })
+  ).then(async (result) => {
+    if (result.success && !result.cached && result.data) {
+      const { issues } = result.data;
+      const itemListStr = issues.map((iss) => `'${iss.itemName}' (${iss.issuedKgQty} KG, ${iss.issuedPcsQty} PCS, ${iss.issuedBagQty} BAG)`).join("; ");
+      await writeAudit(
+        store,
+        input.actor,
+        "DISPATCH_STORE_BATCH_ISSUE",
+        `Direct batch issue from Store to Dispatch for ${issues.length} item(s): ${itemListStr}.`,
+        issues[0]?.issuedAt || new Date().toISOString()
+      );
+    }
+    return result;
+  });
+}
+
 export async function issueStoreItemToDispatchTx(
   store: SimpleStore,
   input: {

@@ -21,7 +21,7 @@ import {
   runTransaction
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink, DispatchStoreRequirement, DispatchStoreIssue, StorePhysicalUnit } from '../types';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink, DispatchStoreRequirement, DispatchStoreIssue, StorePhysicalUnit, StoreBatchIssueInput } from '../types';
 import {
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
@@ -1924,6 +1924,33 @@ export class DBService {
       throw new Error(data.error || `Dispatch → Store requirement creation is removed. Use direct Store → Dispatch issue.`);
     }
     return data.requirement as DispatchStoreRequirement;
+  }
+
+  static async issueStoreBatchItemsToDispatch(input: StoreBatchIssueInput): Promise<{ issues: DispatchStoreIssue[]; movements: MaterialMovement[] }> {
+    const apiBase = getApiBaseUrl();
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/batch-issues`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.issues) {
+      throw new Error(data.error || `Failed to batch issue Store stock to Dispatch (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    const itemListStr = (data.issues as DispatchStoreIssue[])
+      .map((iss) => `'${iss.itemName}' (${iss.issuedKgQty} KG, ${iss.issuedPcsQty} PCS, ${iss.issuedBagQty} BAG)`)
+      .join('; ');
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'DISPATCH_STORE_BATCH_ISSUE',
+      `Batch issue from Store to Dispatch for ${data.issues.length} item(s): ${itemListStr}.`
+    );
+    return { issues: data.issues, movements: data.movements || [] };
   }
 
   static async issueStoreItemToDispatch(input: {

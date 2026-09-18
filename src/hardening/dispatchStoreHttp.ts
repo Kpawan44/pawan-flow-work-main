@@ -6,6 +6,7 @@ import {
   DISPATCH_STORE_ISSUE_COLLECTION,
   DISPATCH_STORE_REQUIREMENT_COLLECTION,
   issueStoreItemToDispatchTx,
+  issueStoreBatchItemsToDispatchTx,
   issueStoreToDispatchTx,
   issueDispatchStoreRequirementTx,
   issueStoreProcessTransferTx
@@ -26,6 +27,41 @@ export function mountDispatchStoreRoutes(app: Express, ctx: DispatchStoreHttpCon
     });
   });
 
+    app.post("/api/dispatch-store/batch-issues", ctx.requireAuth, async (req, res) => {
+    try {
+      const actor = ctx.getActor(req);
+      if (!actor) return res.status(401).json({ success: false, error: "Unauthorized: Missing authoritative user profile." });
+      const body = req.body || {};
+      const headerOp = String(req.get("x-operation-id") || "").trim();
+      const operationId = String(body.operationId || headerOp || "").trim() || undefined;
+
+      const result = await issueStoreBatchItemsToDispatchTx(ctx.getStore(), {
+        operationId,
+        items: body.items,
+        remarks: body.remarks,
+        actor
+      });
+
+      if (!result.success) return res.status(result.statusCode || 400).json({ success: false, error: result.error });
+      const { issues, movements } = result.data as { issues: any[]; movements: any[] };
+      if (ctx.onWrite) {
+        if (Array.isArray(issues)) {
+          for (const iss of issues) {
+            ctx.onWrite(DISPATCH_STORE_ISSUE_COLLECTION, iss.id, iss);
+          }
+        }
+        if (Array.isArray(movements)) {
+          for (const m of movements) {
+            ctx.onWrite("mfr_movements", m.movementId, m);
+          }
+        }
+      }
+      return res.json({ success: true, cached: Boolean(result.cached), issues, movements });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message || "Failed to batch issue Store stock to Dispatch." });
+    }
+  });
+
   app.post("/api/dispatch-store/issues", ctx.requireAuth, async (req, res) => {
     try {
       const actor = ctx.getActor(req);
@@ -33,6 +69,30 @@ export function mountDispatchStoreRoutes(app: Express, ctx: DispatchStoreHttpCon
       const body = req.body || {};
       const headerOp = String(req.get("x-operation-id") || "").trim();
       const operationId = String(body.operationId || headerOp || "").trim() || undefined;
+
+      if (Array.isArray(body.items)) {
+        const batchRes = await issueStoreBatchItemsToDispatchTx(ctx.getStore(), {
+          operationId,
+          items: body.items,
+          remarks: body.remarks,
+          actor
+        });
+        if (!batchRes.success) return res.status(batchRes.statusCode || 400).json({ success: false, error: batchRes.error });
+        const { issues, movements } = batchRes.data as { issues: any[]; movements: any[] };
+        if (ctx.onWrite) {
+          if (Array.isArray(issues)) {
+            for (const iss of issues) {
+              ctx.onWrite(DISPATCH_STORE_ISSUE_COLLECTION, iss.id, iss);
+            }
+          }
+          if (Array.isArray(movements)) {
+            for (const m of movements) {
+              ctx.onWrite("mfr_movements", m.movementId, m);
+            }
+          }
+        }
+        return res.json({ success: true, cached: Boolean(batchRes.cached), issues, movements });
+      }
 
       let result;
       if (body.itemName || body.jobCardNo) {

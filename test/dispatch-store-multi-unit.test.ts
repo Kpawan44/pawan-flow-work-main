@@ -9,6 +9,8 @@ import {
   createDispatchStoreRequirementTx,
   issueStoreToDispatchTx,
   issueStoreItemToDispatchTx,
+  issueStoreBatchItemsToDispatchTx,
+  createDispatchStoreBatchIssueFingerprint,
   issueDispatchStoreRequirementTx,
   calculateStoreAuthoritativeItemStock,
   calculateStoreJobCardAvailableStock,
@@ -1531,6 +1533,372 @@ async function run() {
     assert(
       "Scenario 52: Returned process transfer is not counted as outbound Store deduction (KG: 80, PCS: 800, Bags: 8)",
       stock.availableKg === 80 && stock.availablePcs === 800 && stock.availableBags === 8
+    );
+  }
+
+
+  // =========================================================================
+  // MULTI-ITEM STORE → DISPATCH ATOMIC BATCH TRANSACTION SCENARIOS
+  // =========================================================================
+
+  // Scenario 53: Multi-item batch (Item A: 50 KG, Item B: 20 KG) issues atomically in ONE transaction
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-BAT-1", { itemName: "Item Alpha", itemCode: "IA-01", currentQty: 100, unit: "KG" });
+    await seedJob(store, "JC-BAT-2", { itemName: "Item Beta", itemCode: "IB-01", currentQty: 80, unit: "KG" });
+
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [
+        { itemName: "Item Alpha", issuedKgQty: 50 },
+        { itemName: "Item Beta", issuedKgQty: 20 }
+      ],
+      remarks: "Batch transfer to dispatch",
+      actor: storeActor(),
+      operationId: nextIssueOp("scen53")
+    });
+
+    assert(
+      "Scenario 53: Multi-item batch (Item A: 50 KG, Item B: 20 KG) issues atomically in ONE transaction",
+      res.success === true &&
+        res.data?.issues.length === 2 &&
+        res.data.issues[0].issuedKgQty === 50 &&
+        res.data.issues[1].issuedKgQty === 20 &&
+        res.data.movements.length === 2
+    );
+  }
+
+  // Scenario 54: Multi-item batch with independent units (Item A: 10 Bags, Item B: 500 PCS, Item C: 25 KG)
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-MIX-1", { itemName: "Item Bags", currentQty: 100, unit: "KG", boxCount: 20, totalPcs: 200 });
+    await seedJob(store, "JC-MIX-2", { itemName: "Item Pcs", currentQty: 50, unit: "KG", boxCount: 10, totalPcs: 1000 });
+    await seedJob(store, "JC-MIX-3", { itemName: "Item Kg", currentQty: 100, unit: "KG", boxCount: 10, totalPcs: 1000 });
+
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [
+        { itemName: "Item Bags", issuedBagQty: 10 },
+        { itemName: "Item Pcs", issuedPcsQty: 500 },
+        { itemName: "Item Kg", issuedKgQty: 25 }
+      ],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen54")
+    });
+
+    const jobCards = await store.list("mfr_job_cards");
+    const movements = await store.list("mfr_movements");
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+
+    const stock1 = calculateStoreAuthoritativeItemStock("Item Bags", jobCards, movements, issues);
+    const stock2 = calculateStoreAuthoritativeItemStock("Item Pcs", jobCards, movements, issues);
+    const stock3 = calculateStoreAuthoritativeItemStock("Item Kg", jobCards, movements, issues);
+
+    assert(
+      "Scenario 54: Multi-item batch with independent units (Item A: 10 Bags, Item B: 500 PCS, Item C: 25 KG) succeeds with zero conversion",
+      res.success === true &&
+        res.data?.issues.length === 3 &&
+        stock1.availableBags === 10 &&
+        stock2.availablePcs === 500 &&
+        stock3.availableKg === 75
+    );
+  }
+
+  // Scenario 55: Complete atomic rollback when Item 2 of 3 exceeds available KG
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-RB-1", { itemName: "Alpha", currentQty: 50, unit: "KG" });
+    await seedJob(store, "JC-RB-2", { itemName: "Beta", currentQty: 30, unit: "KG" });
+    await seedJob(store, "JC-RB-3", { itemName: "Gamma", currentQty: 40, unit: "KG" });
+
+    // Item Beta requests 50 KG but only 30 KG available
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [
+        { itemName: "Alpha", issuedKgQty: 20 },
+        { itemName: "Beta", issuedKgQty: 50 },
+        { itemName: "Gamma", issuedKgQty: 10 }
+      ],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen55")
+    });
+
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+    const movements = await store.list("mfr_movements");
+    // Only the 3 seed movements should exist; 0 new movements
+    const storeMovements = movements.filter((m: any) => m.fromDepartment === "Store" && m.toDepartment === "Dispatch");
+
+    assert(
+      "Scenario 55: Complete atomic rollback when Item 2 exceeds available KG (0 issues, 0 outbound movements)",
+      res.success === false &&
+        res.statusCode === 409 &&
+        issues.length === 0 &&
+        storeMovements.length === 0
+    );
+  }
+
+  // Scenario 56: Complete atomic rollback when Item 1 exceeds available Bags
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-RBB-1", { itemName: "Alpha Bags", currentQty: 50, unit: "KG", boxCount: 5, totalPcs: 100 });
+    await seedJob(store, "JC-RBB-2", { itemName: "Beta Standard", currentQty: 100, unit: "KG" });
+
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [
+        { itemName: "Alpha Bags", issuedBagQty: 10 }, // exceeds 5 available
+        { itemName: "Beta Standard", issuedKgQty: 20 }
+      ],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen56")
+    });
+
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+
+    assert(
+      "Scenario 56: Complete atomic rollback when Item 1 exceeds available Bags (409 Conflict, 0 mutations)",
+      res.success === false && res.statusCode === 409 && issues.length === 0
+    );
+  }
+
+  // Scenario 57: Complete atomic rollback when Item 2 exceeds available PCS
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-RBP-1", { itemName: "Item 1", currentQty: 50, unit: "KG" });
+    await seedJob(store, "JC-RBP-2", { itemName: "Item 2", currentQty: 40, unit: "KG", boxCount: 2, totalPcs: 200 });
+
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [
+        { itemName: "Item 1", issuedKgQty: 10 },
+        { itemName: "Item 2", issuedPcsQty: 500 } // exceeds 200 available
+      ],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen57")
+    });
+
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+
+    assert(
+      "Scenario 57: Complete atomic rollback when Item 2 exceeds available PCS (409 Conflict, 0 mutations)",
+      res.success === false && res.statusCode === 409 && issues.length === 0
+    );
+  }
+
+  // Scenario 58: Batch with empty items array rejected with 400 Bad Request
+  {
+    const store = new MemoryStore();
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen58")
+    });
+
+    assert(
+      "Scenario 58: Batch with empty items array rejected with 400 Bad Request",
+      res.success === false && res.statusCode === 400
+    );
+  }
+
+  // Scenario 59: Batch with negative or non-numeric quantity rejected with 400 Bad Request
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-INV-1", { itemName: "Nut", currentQty: 50, unit: "KG" });
+
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [{ itemName: "Nut", issuedKgQty: -10 }],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen59")
+    });
+
+    assert(
+      "Scenario 59: Batch with negative quantity rejected with 400 Bad Request",
+      res.success === false && res.statusCode === 400
+    );
+  }
+
+  // Scenario 60: Batch FIFO allocation across multiple Job Cards for multiple items simultaneously
+  {
+    const store = new MemoryStore();
+    // Item A has two Job Cards
+    await seedJob(store, "JC-F-A1", { itemName: "Item A", currentQty: 30, unit: "KG", createdAt: "2026-01-01T00:00:00Z" });
+    await seedJob(store, "JC-F-A2", { itemName: "Item A", currentQty: 40, unit: "KG", createdAt: "2026-01-02T00:00:00Z" });
+    // Item B has two Job Cards
+    await seedJob(store, "JC-F-B1", { itemName: "Item B", currentQty: 25, unit: "KG", createdAt: "2026-01-01T00:00:00Z" });
+    await seedJob(store, "JC-F-B2", { itemName: "Item B", currentQty: 35, unit: "KG", createdAt: "2026-01-02T00:00:00Z" });
+
+    // Request 50 KG of Item A (drains A1 30 KG + A2 20 KG) and 40 KG of Item B (drains B1 25 KG + B2 15 KG)
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [
+        { itemName: "Item A", issuedKgQty: 50 },
+        { itemName: "Item B", issuedKgQty: 40 }
+      ],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen60")
+    });
+
+    const allocA = res.data?.issues[0]?.sourceAllocations;
+    const allocB = res.data?.issues[1]?.sourceAllocations;
+
+    assert(
+      "Scenario 60: Batch FIFO allocation drains oldest Job Cards first across both items (A: 30+20, B: 25+15)",
+      res.success === true &&
+        allocA?.length === 2 &&
+        allocA[0].jobCardNo === "JC-F-A1" &&
+        allocA[0].allocatedKgQty === 30 &&
+        allocA[1].jobCardNo === "JC-F-A2" &&
+        allocA[1].allocatedKgQty === 20 &&
+        allocB?.length === 2 &&
+        allocB[0].jobCardNo === "JC-F-B1" &&
+        allocB[0].allocatedKgQty === 25 &&
+        allocB[1].jobCardNo === "JC-F-B2" &&
+        allocB[1].allocatedKgQty === 15
+    );
+  }
+
+  // Scenario 61: Batch replay with same operationId returns cached result without duplicate deductions
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-IDEM-1", { itemName: "Bolt", currentQty: 100, unit: "KG" });
+
+    const opId = nextIssueOp("scen61");
+    const res1 = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [{ itemName: "Bolt", issuedKgQty: 30 }],
+      actor: storeActor(),
+      operationId: opId
+    });
+
+    const res2 = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [{ itemName: "Bolt", issuedKgQty: 30 }],
+      actor: storeActor(),
+      operationId: opId
+    });
+
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+    const jobCards = await store.list("mfr_job_cards");
+    const movements = await store.list("mfr_movements");
+    const stock = calculateStoreAuthoritativeItemStock("Bolt", jobCards, movements, issues);
+
+    assert(
+      "Scenario 61: Batch replay with same operationId returns cached result without duplicate deduction (avail: 70 KG)",
+      res1.success === true &&
+        res2.success === true &&
+        res2.cached === true &&
+        issues.length === 1 &&
+        stock.availableKg === 70
+    );
+  }
+
+  // Scenario 62: Batch idempotency mismatch returns 409 Conflict
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-IDEM-2", { itemName: "Screw", currentQty: 100, unit: "KG" });
+
+    const opId = nextIssueOp("scen62");
+    await issueStoreBatchItemsToDispatchTx(store, {
+      items: [{ itemName: "Screw", issuedKgQty: 20 }],
+      actor: storeActor(),
+      operationId: opId
+    });
+
+    // Mismatched payload with same operationId
+    const res2 = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [{ itemName: "Screw", issuedKgQty: 40 }],
+      actor: storeActor(),
+      operationId: opId
+    });
+
+    assert(
+      "Scenario 62: Batch idempotency mismatch returns 409 Conflict",
+      res2.success === false && res2.statusCode === 409
+    );
+  }
+
+  // Scenario 63: Non-Store actor attempting batch issue rejected with 403 Forbidden
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-AUTH-1", { itemName: "Pin", currentQty: 50, unit: "KG" });
+
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [{ itemName: "Pin", issuedKgQty: 10 }],
+      actor: dispatchActor(), // Dispatch user, not Store
+      operationId: nextIssueOp("scen63")
+    });
+
+    assert(
+      "Scenario 63: Non-Store actor attempting batch issue rejected with 403 Forbidden",
+      res.success === false && res.statusCode === 403
+    );
+  }
+
+  // Scenario 64: Single-item issueStoreItemToDispatchTx backward compatibility remains operational
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-BC-1", { itemName: "Collar", currentQty: 80, unit: "KG" });
+
+    const res = await issueStoreItemToDispatchTx(store, {
+      itemName: "Collar",
+      issuedKgQty: 25,
+      actor: storeActor(),
+      operationId: nextIssueOp("scen64")
+    });
+
+    assert(
+      "Scenario 64: Single-item issueStoreItemToDispatchTx backward compatibility remains operational",
+      res.success === true && res.data?.issue?.issuedKgQty === 25
+    );
+  }
+
+  // Scenario 65: Audit log recorded with action DISPATCH_STORE_BATCH_ISSUE
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-AUD-1", { itemName: "Washer A", currentQty: 50, unit: "KG" });
+    await seedJob(store, "JC-AUD-2", { itemName: "Washer B", currentQty: 50, unit: "KG" });
+
+    await issueStoreBatchItemsToDispatchTx(store, {
+      items: [
+        { itemName: "Washer A", issuedKgQty: 15 },
+        { itemName: "Washer B", issuedKgQty: 20 }
+      ],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen65")
+    });
+
+    const audits = await store.list("mfr_audit_logs");
+    const batchAudit = audits.find((a: any) => a.action === "DISPATCH_STORE_BATCH_ISSUE");
+
+    assert(
+      "Scenario 65: Audit log recorded with action DISPATCH_STORE_BATCH_ISSUE and detailed item summary",
+      Boolean(batchAudit && batchAudit.details.includes("Washer A") && batchAudit.details.includes("Washer B"))
+    );
+  }
+
+  // Scenario 66: 5 items in one batch transaction succeed atomically
+  {
+    const store = new MemoryStore();
+    await seedJob(store, "JC-5-1", { itemName: "Item 1", currentQty: 100, unit: "KG" });
+    await seedJob(store, "JC-5-2", { itemName: "Item 2", currentQty: 200, unit: "KG" });
+    await seedJob(store, "JC-5-3", { itemName: "Item 3", currentQty: 300, unit: "KG" });
+    await seedJob(store, "JC-5-4", { itemName: "Item 4", currentQty: 400, unit: "KG" });
+    await seedJob(store, "JC-5-5", { itemName: "Item 5", currentQty: 500, unit: "KG" });
+
+    const res = await issueStoreBatchItemsToDispatchTx(store, {
+      items: [
+        { itemName: "Item 1", issuedKgQty: 10 },
+        { itemName: "Item 2", issuedKgQty: 20 },
+        { itemName: "Item 3", issuedKgQty: 30 },
+        { itemName: "Item 4", issuedKgQty: 40 },
+        { itemName: "Item 5", issuedKgQty: 50 }
+      ],
+      actor: storeActor(),
+      operationId: nextIssueOp("scen66")
+    });
+
+    const issues = await store.list(DISPATCH_STORE_ISSUE_COLLECTION);
+    const movements = await store.list("mfr_movements");
+    const outbound = movements.filter((m: any) => m.fromDepartment === "Store" && m.toDepartment === "Dispatch");
+
+    assert(
+      "Scenario 66: 5 items in one batch transaction succeed atomically (5 issues, 5 movements)",
+      res.success === true &&
+        res.data?.issues.length === 5 &&
+        issues.length === 5 &&
+        outbound.length === 5
     );
   }
 
