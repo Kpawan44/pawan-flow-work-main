@@ -1,3 +1,4 @@
+import { purchaseSendAvailableQty, process2SendAvailableQty, remainingAtDepartment } from "../src/hardening/process2Manufacturing";
 import { MemoryStore } from "../src/hardening/memoryStore";
 import { commitMaterialMovementTx, applyAcceptanceDepartment } from "../src/hardening/commitMaterialMovement";
 import { computeRmRuntimeStock } from "../src/hardening/rmSkuMaster";
@@ -284,6 +285,214 @@ async function run() {
     completed: false
   };
   assert("TEST Incoming Store does not show jobs already in Plating", isHeldInIncomingStore(ghost) === false);
+
+
+  // =========================================================================
+  // DIRECT PURCHASE RECEIPT & NON-PHYSICAL PURCHASE STOCK TESTS
+  // =========================================================================
+
+  // TEST 1 & 2 & 3 & 4 — Purchase Inward 1000 KG direct receipt to Raw Material Store
+  {
+    const store = new MemoryStore();
+    const job = {
+      jobCardNo: "PUR-DIR-1000",
+      itemCode: "RM-WIRE-10MM",
+      itemName: "Wire 10mm Coil",
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: "Purchase",
+      processType: "Purchase",
+      materialType: "Raw Material",
+      isWire: true,
+      unit: "KGS",
+      purchaseDetails: {
+        supplierName: "Apex Steels",
+        billNo: "INV-APEX-1000",
+        receivedQty: 1000
+      },
+      version: 1
+    };
+    await store.set("mfr_job_cards", job.jobCardNo, job);
+
+    // TEST 1: Purchase stock is not physical, transferable is 1000 KG
+    const initialTransferable = purchaseSendAvailableQty(job, []);
+    assert("TEST 1 transferable purchase quantity authorized as 1000 KG", initialTransferable === 1000);
+
+    const mov1 = await commitMaterialMovementTx(store, {
+      operationId: "op-pur-1000",
+      jobCardNo: "PUR-DIR-1000",
+      fromDepartment: "Purchase",
+      toDepartment: RAW_MATERIAL_STORE,
+      quantity: 1000,
+      processDetails: { billNo: "INV-APEX-1000", supplierName: "Apex Steels", rawMaterialCode: "RM-WIRE-10MM", isWire: true },
+      extra: { itemCode: "RM-WIRE-10MM", itemName: "Wire 10mm Coil", materialType: "Raw Material", isWire: true, unit: "KGS" },
+      actor: actor()
+    });
+
+    assert("TEST 1 Purchase → Raw Material Store 1000 KG succeeds", mov1.success === true && mov1.movement?.quantity === 1000);
+
+    // TEST 2: Purchase physical stock remains 0
+    const movementsAfter1 = await store.list("mfr_movements");
+    const purAvailAfter1 = purchaseSendAvailableQty(job, movementsAfter1);
+    assert("TEST 2 Purchase remaining transferable is now 0 KG (no artificial stock)", purAvailAfter1 === 0);
+
+    // TEST 3: Raw Material Store sees 1000 KG as Pending Acceptance
+    const rmUnacceptedStock = computeRmRuntimeStock(0, movementsAfter1, "RM-WIRE-10MM");
+    assert("TEST 3 Raw Material Store sees 1000 KG as Pending Acceptance (unaccepted stock = 0)", rmUnacceptedStock === 0);
+    assert("TEST 3 movement in RM Store has accepted: false", mov1.movement?.accepted === false);
+
+    // TEST 4: After acceptance, Raw Material Store available stock = 1000 KG
+    const acceptedMov = { ...mov1.movement, accepted: true };
+    await store.set("mfr_movements", mov1.movement.movementId, acceptedMov);
+    const movementsAccepted = await store.list("mfr_movements");
+    const rmAcceptedStock = computeRmRuntimeStock(0, movementsAccepted, "RM-WIRE-10MM");
+    assert("TEST 4 After acceptance, Raw Material Store available stock = 1000 KG", rmAcceptedStock === 1000);
+  }
+
+  // TEST 5 — Over-issue protection (attempt to transfer 1001 KG on 1000 KG inward)
+  {
+    const store = new MemoryStore();
+    const job = {
+      jobCardNo: "PUR-OVER-1",
+      itemCode: "RM-WIRE-8MM",
+      itemName: "Wire 8mm",
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: "Purchase",
+      processType: "Purchase",
+      materialType: "Raw Material",
+      isWire: true,
+      unit: "KGS",
+      version: 1
+    };
+    await store.set("mfr_job_cards", job.jobCardNo, job);
+
+    const overSend = await commitMaterialMovementTx(store, {
+      operationId: "op-pur-over",
+      jobCardNo: "PUR-OVER-1",
+      fromDepartment: "Purchase",
+      toDepartment: RAW_MATERIAL_STORE,
+      quantity: 1001,
+      actor: actor()
+    });
+
+    assert("TEST 5 Attempt to transfer 1001 KG on 1000 KG inward rejected (400)", overSend.success === false && overSend.statusCode === 400);
+  }
+
+  // TEST 6 & 7 & 8 — Partial transfer: 600 KG then 400 KG then 1 KG
+  {
+    const store = new MemoryStore();
+    const job = {
+      jobCardNo: "PUR-PART-1",
+      itemCode: "RM-WIRE-6MM",
+      itemName: "Wire 6mm",
+      orderQty: 1000,
+      currentQty: 1000,
+      currentDepartment: "Purchase",
+      processType: "Purchase",
+      materialType: "Raw Material",
+      isWire: true,
+      unit: "KGS",
+      purchaseDetails: {
+        billNo: "INV-PART-1-A",
+        supplierName: "Wire Mills",
+        receivedQty: 1000
+      },
+      version: 1
+    };
+    await store.set("mfr_job_cards", job.jobCardNo, job);
+
+    // Leg 1: Transfer 600 KG
+    const leg1 = await commitMaterialMovementTx(store, {
+      operationId: "op-pur-leg1",
+      jobCardNo: "PUR-PART-1",
+      fromDepartment: "Purchase",
+      toDepartment: RAW_MATERIAL_STORE,
+      quantity: 600,
+      processDetails: { billNo: "INV-PART-1-A", supplierName: "Wire Mills", rawMaterialCode: "RM-WIRE-6MM", isWire: true },
+      extra: { itemCode: "RM-WIRE-6MM", itemName: "Wire 6mm", materialType: "Raw Material", isWire: true, unit: "KGS" },
+      actor: actor()
+    });
+
+    assert("TEST 6 Leg 1 (600 KG) succeeds", leg1.success === true && leg1.movement?.quantity === 600);
+
+    const movsAfterLeg1 = await store.list("mfr_movements");
+    const remainingAfterLeg1 = purchaseSendAvailableQty(job, movsAfterLeg1);
+    assert("TEST 6 Remaining transferable Purchase quantity = 400 KG", remainingAfterLeg1 === 400);
+
+    // Leg 2: Transfer remaining 400 KG
+    const leg2 = await commitMaterialMovementTx(store, {
+      operationId: "op-pur-leg2",
+      jobCardNo: "PUR-PART-1",
+      fromDepartment: "Purchase",
+      toDepartment: RAW_MATERIAL_STORE,
+      quantity: 400,
+      processDetails: { billNo: "INV-PART-1-B", supplierName: "Wire Mills", rawMaterialCode: "RM-WIRE-6MM", isWire: true },
+      extra: { itemCode: "RM-WIRE-6MM", itemName: "Wire 6mm", materialType: "Raw Material", isWire: true, unit: "KGS" },
+      actor: actor()
+    });
+
+    assert("TEST 7 Leg 2 (remaining 400 KG) succeeds", leg2.success === true && leg2.movement?.quantity === 400);
+
+    const movsAfterLeg2 = await store.list("mfr_movements");
+    const remainingAfterLeg2 = purchaseSendAvailableQty(job, movsAfterLeg2);
+    assert("TEST 7 Remaining transferable Purchase quantity = 0 KG", remainingAfterLeg2 === 0);
+
+    // TEST 8: Attempt another 1 KG
+    const leg3 = await commitMaterialMovementTx(store, {
+      operationId: "op-pur-leg3",
+      jobCardNo: "PUR-PART-1",
+      fromDepartment: "Purchase",
+      toDepartment: RAW_MATERIAL_STORE,
+      quantity: 1,
+      processDetails: { billNo: "INV-PART-1-C", supplierName: "Wire Mills", rawMaterialCode: "RM-WIRE-6MM", isWire: true },
+      extra: { itemCode: "RM-WIRE-6MM", itemName: "Wire 6mm", materialType: "Raw Material", isWire: true, unit: "KGS" },
+      actor: actor()
+    });
+
+    assert("TEST 8 Attempt another 1 KG fails with 400", leg3.success === false && leg3.statusCode === 400);
+  }
+
+  // TEST 9 — Multi-inward tracking: 1500 KG total inward, 1200 KG transferred, 300 KG remaining
+  {
+    const store = new MemoryStore();
+    const job = {
+      jobCardNo: "PUR-MULTI-1",
+      itemCode: "RM-ROD-12MM",
+      itemName: "Steel Rod 12mm",
+      orderQty: 1500,
+      currentQty: 1500,
+      currentDepartment: "Purchase",
+      processType: "Purchase",
+      materialType: "Raw Material",
+      isWire: true,
+      unit: "KGS",
+      purchaseDetails: {
+        billNo: "INV-MULTI-1200",
+        supplierName: "Steel Corp",
+        receivedQty: 1500
+      },
+      version: 1
+    };
+    await store.set("mfr_job_cards", job.jobCardNo, job);
+
+    const movMulti = await commitMaterialMovementTx(store, {
+      operationId: "op-pur-multi-1200",
+      jobCardNo: "PUR-MULTI-1",
+      fromDepartment: "Purchase",
+      toDepartment: RAW_MATERIAL_STORE,
+      quantity: 1200,
+      processDetails: { billNo: "INV-MULTI-1200", supplierName: "Steel Corp", rawMaterialCode: "RM-ROD-12MM", isWire: true },
+      extra: { itemCode: "RM-ROD-12MM", itemName: "Steel Rod 12mm", materialType: "Raw Material", isWire: true, unit: "KGS" },
+      actor: actor()
+    });
+
+    assert("TEST 9 Transfer 1200 KG on 1500 KG total inward succeeds", movMulti.success === true && movMulti.movement?.quantity === 1200);
+
+    const movsMulti = await store.list("mfr_movements");
+    const remainingMulti = purchaseSendAvailableQty(job, movsMulti);
+    assert("TEST 9 Remaining transferable Purchase quantity = 300 KG", remainingMulti === 300);
+  }
 
   console.log(`\nProcess 1 tests: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);

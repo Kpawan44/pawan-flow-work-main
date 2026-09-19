@@ -36,9 +36,9 @@ function actor(dept: string) {
 }
 
 async function run() {
-  assert("single-size packing 5×100=500", finalizePackingBagLines([{ bags: 5, pcsPerBag: 100 }], 5000).ok === true
-    && (finalizePackingBagLines([{ bags: 5, pcsPerBag: 100 }], 5000) as any).grandTotal === 500
-    && (finalizePackingBagLines([{ bags: 5, pcsPerBag: 100 }], 5000) as any).pcsPerBagOrBox === 100);
+  assert("single-size packing 5×100=500", finalizePackingBagLines([{ bags: 5, pcsPerBag: 100 }]).ok === true
+    && (finalizePackingBagLines([{ bags: 5, pcsPerBag: 100 }]) as any).grandTotal === 500
+    && (finalizePackingBagLines([{ bags: 5, pcsPerBag: 100 }]) as any).pcsPerBagOrBox === 100);
 
   const mixed = finalizePackingBagLines(
     [
@@ -46,7 +46,6 @@ async function run() {
       { bags: 5000, pcsPerBag: 1 },
       { bags: 2500, pcsPerBag: 1 }
     ],
-    19500
   );
   assert("mixed-size packing grand total 19500", mixed.ok === true && mixed.ok && mixed.grandTotal === 19500);
   assert("mixed-size rollup boxCount", mixed.ok && mixed.boxCount === 13500);
@@ -54,8 +53,23 @@ async function run() {
   assert("mixed-size example line 6000×2=12000", mixed.ok && mixed.lines[0].lineTotal === 12000);
   assert("lineTotal helper", lineTotalBagsTimesPcs(6000, 2) === 12000);
 
-  const over = finalizePackingBagLines([{ bags: 10, pcsPerBag: 100 }], 500);
-  assert("over-quantity packing rejected", over.ok === false);
+  const independentOfOrder = finalizePackingBagLines([{ bags: 300, pcsPerBag: 200 }]);
+  assert(
+    "packing PCS independent of order/process qty 300×200=60000",
+    independentOfOrder.ok === true
+      && independentOfOrder.ok
+      && independentOfOrder.grandTotal === 60000
+      && independentOfOrder.totalPcs === 60000
+  );
+
+  const empty = finalizePackingBagLines([]);
+  assert("empty bag lines rejected", empty.ok === false);
+  const badBags = finalizePackingBagLines([{ bags: 0, pcsPerBag: 200 }]);
+  assert("zero bags rejected", badBags.ok === false);
+  const badPcs = finalizePackingBagLines([{ bags: 300, pcsPerBag: -1 }]);
+  assert("non-positive PCS per bag rejected", badPcs.ok === false);
+  const badDecimal = finalizePackingBagLines([{ bags: 1.5, pcsPerBag: 10 }]);
+  assert("non-integer bags rejected", badDecimal.ok === false);
 
   const rollup = packingDetailsFromBagLines(mixed as any);
   assert("print rollup keeps totalPcs", rollup.totalPcs === 19500 && rollup.bagLines.length === 3);

@@ -1,5 +1,6 @@
 /**
  * Process 205 — packing: Bags × PCS per row, mixed bag sizes, grand total.
+ * Packing total PCS is independent of orderQty / currentQty / process remaining / Packing WIP.
  * Rollup fields (boxCount, pcsPerBagOrBox, totalPcs) stay for print / QR / Set Packing.
  */
 
@@ -42,7 +43,6 @@ export function parsePositiveInt(raw: unknown): number | null {
 
 export function finalizePackingBagLines(
   rawLines: Array<{ bags?: unknown; pcsPerBag?: unknown }>,
-  availableQty: number,
 ): PackingBagLinesOk | PackingBagLinesFail {
   if (!Array.isArray(rawLines) || rawLines.length === 0) {
     return { ok: false, error: "Add at least one bag-size row (No. of Bags × Quantity per Bag)." };
@@ -64,16 +64,6 @@ export function finalizePackingBagLines(
     lines.push({ bags, pcsPerBag, lineTotal });
   }
   const grandTotal = lines.reduce((s, l) => s + l.lineTotal, 0);
-  const cap = Number(availableQty);
-  if (!Number.isFinite(cap) || cap <= 0) {
-    return { ok: false, error: "Job quantity is unavailable for packing." };
-  }
-  if (grandTotal > cap) {
-    return {
-      ok: false,
-      error: `Grand total ${grandTotal} PCS exceeds available/job quantity ${cap}.`,
-    };
-  }
   const boxCount = lines.reduce((s, l) => s + l.bags, 0);
   const distinctSizes = new Set(lines.map((l) => l.pcsPerBag));
   const pcsPerBagOrBox = distinctSizes.size === 1 ? lines[0].pcsPerBag : 0;

@@ -428,6 +428,10 @@ export interface ProcessTransfer {
 
   remarks?: string;
   idempotencyKey?: string;
+  issuedKgQty?: number;
+  issuedBagQty?: number;
+  issuedPcsQty?: number;
+  sourceAllocations?: DispatchStoreIssueSourceAllocation[];
   createdAt: string;
   updatedAt: string;
 }
@@ -570,3 +574,69 @@ export interface ItemOtherRawMaterialLink {
   updatedBy: string;
 }
 
+/** Isolated Dispatch → Store physical units. No conversion between BAG, PCS, and KG. */
+export type StorePhysicalUnit = 'BAG' | 'PCS' | 'KG';
+export type DispatchStoreRequirementStatus = 'PENDING' | 'PARTIALLY_ISSUED' | 'COMPLETED';
+
+export interface DispatchStoreRequirement {
+  id: string;
+  jobCardNo: string;
+  itemCode?: string;
+  itemName?: string;
+  requestedQty: number;
+  requestedUnit: StorePhysicalUnit;
+  issuedQty: number;
+  remainingQty: number;
+  status: DispatchStoreRequirementStatus;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  remarks?: string;
+  version: number;
+}
+
+export interface DispatchStoreIssueSourceAllocation {
+  jobCardNo: string;
+  allocatedBagQty: number;
+  allocatedPcsQty: number;
+  allocatedKgQty: number;
+  movementId: string;
+  nativeUnit?: string;
+  nativeDeductedQty?: number;
+}
+
+export interface DispatchStoreIssue {
+  id: string;
+  jobCardNo?: string;
+  itemCode?: string;
+  itemName: string;
+  fromDepartment: 'Store';
+  toDepartment: 'Dispatch';
+  issuedBagQty: number;
+  issuedPcsQty: number;
+  issuedKgQty: number;
+  issuedBy: string;
+  issuedAt: string;
+  remarks?: string;
+  operationId?: string;
+  movementId?: string;
+  sourceAllocations?: DispatchStoreIssueSourceAllocation[];
+  nativeUnit?: string;
+  nativeDeductedQty?: number;
+}
+
+export interface StoreBatchItemIssueEntry {
+  itemName: string;
+  itemCode?: string;
+  jobCardNo?: string;
+  issuedBagQty?: number;
+  issuedPcsQty?: number;
+  issuedKgQty?: number;
+  remarks?: string;
+}
+
+export interface StoreBatchIssueInput {
+  items: StoreBatchItemIssueEntry[];
+  remarks?: string;
+  operationId?: string;
+}

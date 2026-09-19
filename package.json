@@ -14,7 +14,7 @@
     "migrate:pins": "node migrate-remove-plaintext-pins.js",
     "clean": "rm -rf dist dist-electron release",
     "lint": "tsc --noEmit",
-    "test": "tsx test/envGuard.test.ts && tsx test/hardening.test.ts",
+    "test": "tsx test/envGuard.test.ts && tsx test/hardening.test.ts && tsx test/dispatch-store-multi-unit.test.ts",
     "test:staging:process147": "tsx test/stagingProcess147.test.ts",
     "test:staging:process312": "tsx test/stagingProcess312.test.ts"
   },

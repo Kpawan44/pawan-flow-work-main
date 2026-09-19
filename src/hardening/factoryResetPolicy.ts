@@ -1,7 +1,41 @@
 import { OPERATIONAL_RESET_COLLECTIONS } from "./constants";
 
+export const DISPATCH_STORE_UNIT_LEDGER_COLLECTIONS = [
+  "mfr_dispatch_store_requirements",
+  "mfr_dispatch_store_issues"
+] as const;
+
+export const LIVE_FACTORY_RESET_EXTRA_COLLECTIONS = [
+  "mfr_users",
+  "mfr_user_credentials",
+  "mfr_audit_logs",
+  "mfr_deleted_users"
+] as const;
+
+function uniqueStrings(items: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    if (!seen.has(item)) {
+      seen.add(item);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
 export function operationalCollectionsForFactoryReset(): string[] {
   return [...OPERATIONAL_RESET_COLLECTIONS];
+}
+
+/** POST /api/admin/factory-reset — extras (users/audit) plus authoritative operational collections. */
+export function liveFactoryResetPurgeCollections(): string[] {
+  return uniqueStrings([...LIVE_FACTORY_RESET_EXTRA_COLLECTIONS, ...OPERATIONAL_RESET_COLLECTIONS]);
+}
+
+/** POST /api/factory/delete-all — authoritative operational collections (users not purged here). */
+export function liveFactoryDeleteAllPurgeCollections(): string[] {
+  return uniqueStrings([...OPERATIONAL_RESET_COLLECTIONS]);
 }
 
 export function isProtectedSuperAdmin(user: { role?: string; active?: boolean } | null | undefined): boolean {

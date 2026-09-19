@@ -171,5 +171,15 @@ service cloud.firestore {
       allow read: if isActiveUser();
       allow write: if false;
     }
+
+    // Dispatch Store physical issues ledger (Admin SDK writes only).
+    match /mfr_dispatch_store_requirements/{requirementId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+    match /mfr_dispatch_store_issues/{issueId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
   }
 }

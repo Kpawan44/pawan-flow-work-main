@@ -305,6 +305,223 @@ export function remainingAtProduction(
   return ledger;
 }
 
+function jobCardMatchesMovement(jobCardNo: string | undefined, movement: { jobCardNo?: string }): boolean {
+  return String(movement.jobCardNo || "").toLowerCase() === String(jobCardNo || "").toLowerCase();
+}
+
+/**
+ * Purchase → dest receipt created by outsource vendor receipt.
+ * Counts pending (accepted: false) and accepted rows. Destination custody
+ * acceptance must not be required to leave the Production operational queue.
+ */
+export function hasPurchaseReceiptRouteToDepartment(
+  jobCardNo: string | undefined,
+  movements: Array<{
+    jobCardNo?: string;
+    fromDepartment?: string;
+    toDepartment?: string;
+    accepted?: boolean;
+    deletedDate?: string;
+    isDeleted?: boolean;
+    status?: string;
+    issueStatus?: string;
+    resolutionStatus?: string;
+    undone?: boolean;
+  }> = [],
+  department: string
+): boolean {
+  const dest = normalizeDeptName(department);
+  return (movements || []).some(
+    (m) =>
+      m &&
+      jobCardMatchesMovement(jobCardNo, m) &&
+      !isDeletedMovement(m) &&
+      !isFullyRejectedMovement(m) &&
+      !isUndoneMovement(m) &&
+      normalizeDeptName(m.fromDepartment) === "purchase" &&
+      normalizeDeptName(m.toDepartment) === dest
+  );
+}
+
+/** Accepted Purchase → dest receipt (outsourced SFG after destination accept). */
+export function hasAcceptedPurchaseReceiptToDepartment(
+  jobCardNo: string | undefined,
+  movements: Array<{ jobCardNo?: string; fromDepartment?: string; toDepartment?: string; accepted?: boolean }> = [],
+  department: string
+): boolean {
+  const dest = normalizeDeptName(department);
+  return (movements || []).some(
+    (m) =>
+      m &&
+      jobCardMatchesMovement(jobCardNo, m) &&
+      m.accepted &&
+      normalizeDeptName(m.fromDepartment) === "purchase" &&
+      normalizeDeptName(m.toDepartment) === dest
+  );
+}
+
+export function hasAcceptedProductionRejectionOrReversal(
+  jobCardNo: string | undefined,
+  movements: Array<{
+    jobCardNo?: string;
+    toDepartment?: string;
+    accepted?: boolean;
+    processDetails?: any;
+    transactionType?: string;
+  }> = []
+): boolean {
+  return (movements || []).some(
+    (m) =>
+      m &&
+      jobCardMatchesMovement(jobCardNo, m) &&
+      m.accepted &&
+      normalizeDeptName(m.toDepartment) === "production" &&
+      isRejectionReturnMovement(m)
+  );
+}
+
+function hasPurchaseRouteAwayFromProduction(
+  jobCardNo: string | undefined,
+  movements: Array<any> = []
+): boolean {
+  return (movements || []).some((m) => {
+    if (!m || !jobCardMatchesMovement(jobCardNo, m)) return false;
+    if (isDeletedMovement(m) || isFullyRejectedMovement(m) || isUndoneMovement(m)) return false;
+    if (normalizeDeptName(m.fromDepartment) !== "purchase") return false;
+    const to = normalizeDeptName(m.toDepartment);
+    return Boolean(to) && to !== "purchase" && to !== "production";
+  });
+}
+
+function hasPendingPurchaseRouteAwayFromProduction(
+  jobCardNo: string | undefined,
+  movements: Array<any> = []
+): boolean {
+  return hasPurchaseRouteAwayFromProduction(jobCardNo, movements);
+}
+
+/**
+ * Operational assignment away from Production.
+ * currentDepartment is authoritative once set. A Purchase → non-Production
+ * movement covers the receipt window before custody accept updates the job card,
+ * and remains active after acceptance if currentDepartment was not yet relocated.
+ * Does not treat in-house Production → HT/Plating pending sends as leaving Production.
+ */
+export function isRoutedAwayFromProductionQueue(
+  job: { currentDepartment?: string; jobCardNo?: string },
+  movements: Array<any> = []
+): boolean {
+  const current = normalizeDeptName(job?.currentDepartment);
+  if (current === "production") {
+    return hasPurchaseRouteAwayFromProduction(job?.jobCardNo, movements);
+  }
+  if (!current || current === "completed") return false;
+  return true;
+}
+
+function isOutsourcedSfgRoutedToPlatingOrHeatTreatment(
+  job: {
+    currentDepartment?: string;
+    outsourceStatus?: string;
+    jobCardNo?: string;
+  },
+  movements: Array<any> = []
+): boolean {
+  return isRoutedAwayFromProductionQueue(job, movements);
+}
+
+/**
+ * Production operational queue eligibility (desktop DepartmentOperations + mobile WIP).
+ * Does not rewrite remainingAtProduction / unproducedOrderQty.
+ *
+ * Historical Production quantity must not resurrect a job already assigned to another
+ * department. Genuine rejection/return to Production still qualifies.
+ */
+export function isEligibleForProductionOperationalQueue(
+  job: {
+    completed?: boolean;
+    currentDepartment?: string;
+    status?: string;
+    jobCardNo?: string;
+    orderQty?: number;
+    processType?: string;
+    currentQty?: number;
+    outsourceStatus?: string;
+  },
+  movements: Array<any> = [],
+  opts?: { compulsory?: boolean }
+): boolean {
+  if (!job || job.completed) return false;
+
+  const returnedToProduction = hasAcceptedProductionRejectionOrReversal(job.jobCardNo, movements);
+
+  if (isRoutedAwayFromProductionQueue(job, movements) && !returnedToProduction) {
+    return false;
+  }
+
+  // Purchase material is purchased, not manufactured in-house.
+  // For processType === 'Purchase', a job must NOT be resurrected into Production solely by orderQty > 0.
+  // It is only eligible for Production if actively routed to/remaining at Production, or returned via genuine rejection/reversal.
+  if (job.processType === "Purchase") {
+    if (returnedToProduction && remainingAtProduction(job, movements, opts) > 0) return true;
+    const hasActivePurchaseToProduction = (movements || []).some(
+      (m) =>
+        m &&
+        jobCardMatchesMovement(job.jobCardNo, m) &&
+        !isDeletedMovement(m) &&
+        !isFullyRejectedMovement(m) &&
+        !isUndoneMovement(m) &&
+        normalizeDeptName(m.fromDepartment) === "purchase" &&
+        normalizeDeptName(m.toDepartment) === "production"
+    );
+    if (hasActivePurchaseToProduction) {
+      const pendingPurchaseToProd = (movements || []).some(
+        (m) =>
+          m &&
+          jobCardMatchesMovement(job.jobCardNo, m) &&
+          !isDeletedMovement(m) &&
+          !isFullyRejectedMovement(m) &&
+          !isUndoneMovement(m) &&
+          normalizeDeptName(m.fromDepartment) === "purchase" &&
+          normalizeDeptName(m.toDepartment) === "production" &&
+          !m.accepted
+      );
+      if (pendingPurchaseToProd) return true;
+      return remainingAtDepartment(job, movements, "Production") > 0;
+    }
+    return false;
+  }
+
+  if (unproducedOrderQty(job, movements) > 0) return true;
+  if (remainingAtProduction(job, movements, opts) > 0) return true;
+  if (isVisibleInProductionQueue(job)) return true;
+  return returnedToProduction && remainingAtProduction(job, movements, opts) > 0;
+}
+
+/** Mobile department WIP filter. Production uses the shared operational-queue helper. */
+export function isVisibleInMobileDepartmentWip(
+  department: string,
+  job: {
+    completed?: boolean;
+    currentDepartment?: string;
+    status?: string;
+    jobCardNo?: string;
+    orderQty?: number;
+    processType?: string;
+    currentQty?: number;
+    outsourceStatus?: string;
+  },
+  movements: Array<any> = [],
+  opts?: { compulsory?: boolean }
+): boolean {
+  if (!job || job.status === "Completed" || job.currentDepartment === "Completed" || job.completed) return false;
+  if (normalizeDeptName(department) === "production") {
+    return isEligibleForProductionOperationalQueue(job, movements, opts);
+  }
+  if (normalizeDeptName(job.currentDepartment) === normalizeDeptName(department)) return true;
+  return remainingAtDepartment(job, movements, department) > 0;
+}
+
 export function remainingAtSourceDepartment(
   job: any,
   movements: any[] = [],
@@ -327,6 +544,9 @@ export function shouldRelocateJobOnQuantityMove(
 ): boolean {
   if (normalizeDeptName(fromDepartment) === "production") {
     return unproducedOrderQty(job, movementsIncludingThisMove) <= 1e-9;
+  }
+  if (normalizeDeptName(fromDepartment) === "purchase") {
+    return true;
   }
   return remainingAtSourceDepartment(job, movementsIncludingThisMove, fromDepartment, opts) <= 1e-9;
 }
@@ -456,12 +676,18 @@ export function remainingAtDepartment(
 
   const effectiveRejection = getEffectiveDepartmentRejectionQty(job, movements, department);
   if (received === 0 && sent === 0) {
+    if (dept === "purchase") {
+      return purchaseSendAvailableQty(job, movements);
+    }
     // Ledger history for this job exists: a department with no inbound/outbound is empty.
     // Do not let a manipulated currentQty cache invent transferable quantity.
     if (cardMoves.length > 0) return 0;
     // LEGACY_NO_HISTORY_FALLBACK: only when this job has zero movements. Never use orderQty.
     // Once any movement exists, cache cannot increase transferable quantity.
     return Math.max(0, Number(job.currentQty || 0));
+  }
+  if (dept === "purchase") {
+    return purchaseSendAvailableQty(job, movements);
   }
   // Partial production with no credited inbound (optional RM): keep unproduced order qty.
   if (received === 0 && dept === "production") {
@@ -579,6 +805,7 @@ export function shouldBlockPendingDuplicateRoute(
 ): boolean {
   if (!findPendingDuplicateMovement(movements, input)) return false;
   if (normalizeDeptName(input.fromDepartment) === "production") return false;
+  if (normalizeDeptName(input.fromDepartment) === "purchase") return false;
   return true;
 }
 
@@ -789,6 +1016,55 @@ export function rmIssueAvailableQty(
   return remainingAtDepartment(job, movements, "Raw Material Store");
 }
 
+/**
+ * Purchase is not a physical stock-holding location.
+ * The transferable quantity originating from Purchase is authorized by the Purchase inward/order quantity
+ * minus any outbound movements already dispatched from Purchase for this Job Card.
+ */
+export function purchaseSendAvailableQty(
+  job: {
+    jobCardNo?: string;
+    orderQty?: number;
+    currentQty?: number;
+    quantity?: number;
+    purchaseDetails?: { receivedQty?: number; quantity?: number };
+  } | null | undefined,
+  movements: Array<{
+    jobCardNo?: string;
+    fromDepartment?: string;
+    quantity?: number;
+    deletedDate?: string;
+    isDeleted?: boolean;
+    status?: string;
+  }> = []
+): number {
+  if (!job) return 0;
+  const inwardQty = Math.max(
+    0,
+    Number(
+      job.purchaseDetails?.receivedQty ??
+      job.purchaseDetails?.quantity ??
+      job.orderQty ??
+      job.quantity ??
+      job.currentQty ??
+      0
+    )
+  );
+  const target = String(job.jobCardNo || "").toLowerCase();
+  const sent = (movements || [])
+    .filter(
+      (m) =>
+        m &&
+        String(m.jobCardNo || "").toLowerCase() === target &&
+        normalizeDeptName(m.fromDepartment) === "purchase" &&
+        !isDeletedMovement(m) &&
+        !isUndoneMovement(m as any) &&
+        !isUndoReversalMovement(m as any)
+    )
+    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
+  return Math.max(0, inwardQty - sent);
+}
+
 export function process2SendAvailableQty(
   fromDepartment: string,
   job: any,
@@ -804,6 +1080,7 @@ export function process2SendAvailableQty(
     return null;
   }
   if (from === "store") return storeAuthoritativeOnHand(job, movements);
+  if (from === "purchase") return purchaseSendAvailableQty(job, movements);
   return remainingAtDepartment(job, movements, fromDepartment);
 }
 

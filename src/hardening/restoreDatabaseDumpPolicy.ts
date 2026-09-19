@@ -5,7 +5,9 @@ export const LEDGER_RESTORE_BLOCKED_COLLECTIONS = [
   "mfr_movements",
   "mfr_idempotency_keys",
   "mfr_purchase_invoice_claims",
-  "mfr_serialize_locks"
+  "mfr_serialize_locks",
+  "mfr_dispatch_store_requirements",
+  "mfr_dispatch_store_issues"
 ] as const;
 
 export const RESTORE_ADMIN_ONLY_MESSAGE =

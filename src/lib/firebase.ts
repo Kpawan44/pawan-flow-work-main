@@ -21,8 +21,8 @@ import {
   runTransaction
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink } from '../types';
-import { 
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation, OutsourceOrder, ProcessTransfer, ItemOtherRawMaterialLink, DispatchStoreRequirement, DispatchStoreIssue, StorePhysicalUnit, StoreBatchIssueInput } from '../types';
+import {
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
   logMaterialMovementToSheets, 
@@ -38,6 +38,7 @@ import {
   FACTORY_PURGE_NO_CLIENT_FIRESTORE_MESSAGE
 } from '../hardening/clientLedgerGuards';
 import { omitLedgerFieldsFromJobCardPut } from '../hardening/jobCardUpdatePolicy';
+import { ensureDispatchStoreIssueOperationId } from '../hardening/dispatchStoreIssue';
 import {
   authorizeDatabaseRestore,
   isLedgerRestoreCollection,
@@ -1872,6 +1873,203 @@ export class DBService {
       'UNDO_TRANSFER',
       `Undid pending material transfer ${movementId} via reversal lineage (history preserved).`
     );
+  }
+
+  static async getDispatchStoreRequirements(): Promise<DispatchStoreRequirement[]> {
+    const apiBase = getApiBaseUrl();
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${apiBase}/api/dispatch-store/requirements`, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.requirements)) return data.requirements;
+    } catch (_) {}
+    if (useRealFirebase && db) {
+      const snap = await getDocs(collection(db, 'mfr_dispatch_store_requirements'));
+      return snap.docs.map((d) => d.data() as DispatchStoreRequirement);
+    }
+    return [];
+  }
+
+  static async getDispatchStoreIssues(): Promise<DispatchStoreIssue[]> {
+    const apiBase = getApiBaseUrl();
+    try {
+      const headers = await this.getAuthHeaders();
+      const res = await fetch(`${apiBase}/api/dispatch-store/issues`, { headers });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && Array.isArray(data.issues)) return data.issues;
+    } catch (_) {}
+    if (useRealFirebase && db) {
+      const snap = await getDocs(collection(db, 'mfr_dispatch_store_issues'));
+      return snap.docs.map((d) => d.data() as DispatchStoreIssue);
+    }
+    return [];
+  }
+
+  static async createDispatchStoreRequirement(input: {
+    jobCardNo: string;
+    requestedQty: number;
+    requestedUnit: StorePhysicalUnit;
+    remarks?: string;
+  }): Promise<DispatchStoreRequirement> {
+    const apiBase = getApiBaseUrl();
+    const operationId = `dsr-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/requirements`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...input, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.requirement) {
+      throw new Error(data.error || `Dispatch → Store requirement creation is removed. Use direct Store → Dispatch issue.`);
+    }
+    return data.requirement as DispatchStoreRequirement;
+  }
+
+  static async issueStoreBatchItemsToDispatch(input: StoreBatchIssueInput): Promise<{ issues: DispatchStoreIssue[]; movements: MaterialMovement[] }> {
+    const apiBase = getApiBaseUrl();
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/batch-issues`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.issues) {
+      throw new Error(data.error || `Failed to batch issue Store stock to Dispatch (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    const itemListStr = (data.issues as DispatchStoreIssue[])
+      .map((iss) => `'${iss.itemName}' (${iss.issuedKgQty} KG, ${iss.issuedPcsQty} PCS, ${iss.issuedBagQty} BAG)`)
+      .join('; ');
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'DISPATCH_STORE_BATCH_ISSUE',
+      `Batch issue from Store to Dispatch for ${data.issues.length} item(s): ${itemListStr}.`
+    );
+    return { issues: data.issues, movements: data.movements || [] };
+  }
+
+  static async issueStoreItemToDispatch(input: {
+    itemName: string;
+    itemCode?: string;
+    jobCardNo?: string;
+    issuedBagQty?: number;
+    issuedPcsQty?: number;
+    issuedKgQty?: number;
+    remarks?: string;
+    operationId?: string;
+  }): Promise<{ issue: DispatchStoreIssue; movements?: MaterialMovement[]; movement?: MaterialMovement }> {
+    const apiBase = getApiBaseUrl();
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/issues`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.issue) {
+      throw new Error(data.error || `Failed to issue Store stock to Dispatch (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'DISPATCH_STORE_ISSUE',
+      `Direct issue for item '${input.itemName}': BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} to Dispatch.`
+    );
+    return { issue: data.issue, movements: data.movements, movement: data.movement };
+  }
+
+  static async issueStoreToDispatch(input: {
+    jobCardNo?: string;
+    itemName?: string;
+    itemCode?: string;
+    issuedBagQty?: number;
+    issuedPcsQty?: number;
+    issuedKgQty?: number;
+    remarks?: string;
+    operationId?: string;
+  }): Promise<{ issue: DispatchStoreIssue; movement?: MaterialMovement; movements?: MaterialMovement[] }> {
+    const apiBase = getApiBaseUrl();
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/dispatch-store/issues`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.issue) {
+      throw new Error(data.error || `Failed to issue Store stock to Dispatch (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'DISPATCH_STORE_ISSUE',
+      `Direct issue for ${input.itemName || input.jobCardNo}: BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty || 0} to Dispatch.`
+    );
+    return { issue: data.issue, movement: data.movement, movements: data.movements };
+  }
+
+  static async issueDispatchStoreRequirement(input: {
+    requirementId?: string;
+    jobCardNo?: string;
+    issuedBagQty?: number;
+    issuedPcsQty?: number;
+    issuedKgQty?: number;
+    remarks?: string;
+    operationId?: string;
+  }): Promise<{ requirement?: DispatchStoreRequirement; issue: DispatchStoreIssue; movement?: MaterialMovement }> {
+    return this.issueStoreToDispatch({
+      jobCardNo: input.jobCardNo || input.requirementId || '',
+      issuedBagQty: input.issuedBagQty,
+      issuedPcsQty: input.issuedPcsQty,
+      issuedKgQty: input.issuedKgQty,
+      remarks: input.remarks,
+      operationId: input.operationId
+    });
+  }
+
+  static async issueStoreProcessTransfer(input: {
+    toProcess: 'Repacking' | 'Replating';
+    itemName: string;
+    itemCode?: string;
+    jobCardNo?: string;
+    issuedKgQty: number;
+    issuedPcsQty?: number;
+    issuedBagQty?: number;
+    remarks?: string;
+    operationId?: string;
+  }): Promise<{ transfer: ProcessTransfer; movements: MaterialMovement[] }> {
+    const apiBase = getApiBaseUrl();
+    const payload = { ...input };
+    const operationId = ensureDispatchStoreIssueOperationId(payload);
+    const headers = await this.getAuthHeaders({ 'X-Operation-Id': operationId });
+    const res = await fetch(`${apiBase}/api/store-process/transfers`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...payload, operationId })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success || !data.transfer) {
+      throw new Error(data.error || `Failed to issue Store process transfer (status ${res.status}).`);
+    }
+    const user = auth?.currentUser;
+    await this.logAction(
+      user?.uid || 'store',
+      user?.displayName || 'Store',
+      'STORE_PROCESS_TRANSFER',
+      `Store sent material to ${input.toProcess} for '${input.itemName}': ${input.issuedKgQty} KG (Physical deductions: BAG ${input.issuedBagQty || 0}, PCS ${input.issuedPcsQty || 0}, KG ${input.issuedKgQty}).`
+    );
+    return { transfer: data.transfer, movements: data.movements };
   }
 
   // --- NOTIFICATIONS ---
