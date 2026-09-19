@@ -545,6 +545,9 @@ export function shouldRelocateJobOnQuantityMove(
   if (normalizeDeptName(fromDepartment) === "production") {
     return unproducedOrderQty(job, movementsIncludingThisMove) <= 1e-9;
   }
+  if (normalizeDeptName(fromDepartment) === "purchase") {
+    return true;
+  }
   return remainingAtSourceDepartment(job, movementsIncludingThisMove, fromDepartment, opts) <= 1e-9;
 }
 
@@ -673,12 +676,18 @@ export function remainingAtDepartment(
 
   const effectiveRejection = getEffectiveDepartmentRejectionQty(job, movements, department);
   if (received === 0 && sent === 0) {
+    if (dept === "purchase") {
+      return purchaseSendAvailableQty(job, movements);
+    }
     // Ledger history for this job exists: a department with no inbound/outbound is empty.
     // Do not let a manipulated currentQty cache invent transferable quantity.
     if (cardMoves.length > 0) return 0;
     // LEGACY_NO_HISTORY_FALLBACK: only when this job has zero movements. Never use orderQty.
     // Once any movement exists, cache cannot increase transferable quantity.
     return Math.max(0, Number(job.currentQty || 0));
+  }
+  if (dept === "purchase") {
+    return purchaseSendAvailableQty(job, movements);
   }
   // Partial production with no credited inbound (optional RM): keep unproduced order qty.
   if (received === 0 && dept === "production") {
@@ -796,6 +805,7 @@ export function shouldBlockPendingDuplicateRoute(
 ): boolean {
   if (!findPendingDuplicateMovement(movements, input)) return false;
   if (normalizeDeptName(input.fromDepartment) === "production") return false;
+  if (normalizeDeptName(input.fromDepartment) === "purchase") return false;
   return true;
 }
 
@@ -1006,6 +1016,55 @@ export function rmIssueAvailableQty(
   return remainingAtDepartment(job, movements, "Raw Material Store");
 }
 
+/**
+ * Purchase is not a physical stock-holding location.
+ * The transferable quantity originating from Purchase is authorized by the Purchase inward/order quantity
+ * minus any outbound movements already dispatched from Purchase for this Job Card.
+ */
+export function purchaseSendAvailableQty(
+  job: {
+    jobCardNo?: string;
+    orderQty?: number;
+    currentQty?: number;
+    quantity?: number;
+    purchaseDetails?: { receivedQty?: number; quantity?: number };
+  } | null | undefined,
+  movements: Array<{
+    jobCardNo?: string;
+    fromDepartment?: string;
+    quantity?: number;
+    deletedDate?: string;
+    isDeleted?: boolean;
+    status?: string;
+  }> = []
+): number {
+  if (!job) return 0;
+  const inwardQty = Math.max(
+    0,
+    Number(
+      job.purchaseDetails?.receivedQty ??
+      job.purchaseDetails?.quantity ??
+      job.orderQty ??
+      job.quantity ??
+      job.currentQty ??
+      0
+    )
+  );
+  const target = String(job.jobCardNo || "").toLowerCase();
+  const sent = (movements || [])
+    .filter(
+      (m) =>
+        m &&
+        String(m.jobCardNo || "").toLowerCase() === target &&
+        normalizeDeptName(m.fromDepartment) === "purchase" &&
+        !isDeletedMovement(m) &&
+        !isUndoneMovement(m as any) &&
+        !isUndoReversalMovement(m as any)
+    )
+    .reduce((sum, m) => sum + Number(m.quantity || 0), 0);
+  return Math.max(0, inwardQty - sent);
+}
+
 export function process2SendAvailableQty(
   fromDepartment: string,
   job: any,
@@ -1021,6 +1080,7 @@ export function process2SendAvailableQty(
     return null;
   }
   if (from === "store") return storeAuthoritativeOnHand(job, movements);
+  if (from === "purchase") return purchaseSendAvailableQty(job, movements);
   return remainingAtDepartment(job, movements, fromDepartment);
 }
 
